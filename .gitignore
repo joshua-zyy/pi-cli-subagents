@@ -1,0 +1,15 @@
+node_modules/
+dist/
+coverage/
+*.tsbuildinfo
+
+# Local configuration and generated probe output
+.env
+.env.*
+!.env.example
+*.log
+tools/out/
+
+# OS metadata
+.DS_Store
+Thumbs.db
