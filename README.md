@@ -30,7 +30,7 @@ pi --extension D:/AI/agentBySelf/pi-extensions/pi-cli-subagents/dist/index.js \
 
 也可将仓库作为 Pi 本地 package 显式安装（会写入相应范围的 Pi settings；安装前先自行确认）。运行时需要 Node >=22.19，仓库内 `dist/` 为本机构建产物，不提交 Git；打包时由 `prepack` 构建。
 
-第一版提供 `spawn_agent`、`send_input`、`list_agents`、`close_agent` 四个模型工具，以及仅供用户操作的 `/agent-reply <agentId> <questionId>`。运行中的 `send_input` 可选 `steer` 或 `followUp`；完成后的 `send_input` 恢复同一子 Pi 会话。`close_agent` 停止当前任务，不删除会话文件。主会话必须持久化（不能用 `--no-session`），结果只回到创建它的原主会话。
+第一版提供 `spawn_agent`、`send_input`、`list_agents`、`close_agent` 四个模型工具。原生 Pi 没有默认权限审批；仅当其它扩展使子 Pi 发出交互请求时，才会上报“等待处理”，由用户选择是否通过可选的 `/agent-reply <agentId> <questionId>` 回复，绝不自动批准。运行中的 `send_input` 可选 `steer` 或 `followUp`；完成后的 `send_input` 恢复同一子 Pi 会话。`close_agent` 停止当前任务，不删除会话文件。主会话必须持久化（不能用 `--no-session`），结果只回到创建它的原主会话。
 
 角色内置 `worker` 和 `reviewer`。可选角色覆盖文件：用户级 `~/.pi/agent/cli-subagents.roles.json`，受信项目的 `.pi/cli-subagents.roles.json`。每个角色需要 `description`、`instructions`，可选 `provider`、`model`、`thinking`；缺省模型与权限均由原 Pi CLI 配置决定。示例：
 
@@ -47,6 +47,6 @@ pi --extension D:/AI/agentBySelf/pi-extensions/pi-cli-subagents/dist/index.js \
 
 ## 验证与边界
 
-`npm test` 使用假 Pi RPC 子进程，不消耗模型额度。`node test/real-smoke.mjs` 是**需明确选择运行**的真实 Pi 测试（通常两次小模型调用），产物仅写 `.test-output/`。已用真实主 Pi（临时加载扩展的 RPC 模式）依次派发实施和独立审查、退出并恢复原主会话、将审查结果送回同一个实施实例和原生 session；恢复后仅补交新报告，再次恢复未重复投递。这次端到端验收的临时页面、驱动脚本、原始会话及日志均只留在本地，不进入版本控制或安装包。**尚未验证**真实主 Pi TUI 的 `/agent-reply` 对话框流程、TUI 退出后补交、执行端自身崩溃恢复；本次权限请求由用户明确选择后通过控制协议转交，而非 TUI 命令。出现执行端不可达或残留锁时会拒绝在同一会话上重复启动，需要人工检查日志，不会自动清锁抢占。
+`npm test` 使用假 Pi RPC 子进程，不消耗模型额度。`node test/real-smoke.mjs` 是**需明确选择运行**的真实 Pi 测试（通常两次小模型调用），产物仅写 `.test-output/`。已用真实主 Pi（临时加载扩展的 RPC 模式）依次派发实施和独立审查、退出并恢复原主会话、将审查结果送回同一个实施实例和原生 session；恢复后仅补交新报告，再次恢复未重复投递。这次端到端验收的临时页面、驱动脚本、原始会话及日志均只留在本地，不进入版本控制或安装包。**尚未验证**主 Pi TUI 退出后补交和执行端自身崩溃恢复。其它扩展触发交互时使用的 `/agent-reply` 真实 TUI 对话框也尚未实测，但这是可选兼容路径，**不阻塞首版 Pi→Pi 实施—审查—再实施的验收**；本次权限请求由用户明确选择后通过控制协议转交，而非 TUI 命令。出现执行端不可达或残留锁时会拒绝在同一会话上重复启动，需要人工检查日志，不会自动清锁抢占。
 
 前期独立协议/生命周期探针仍保留在本机 `D:/AI/piTest`（见 `docs/findings-pi-lifecycle.md`），原始会话、日志和测试凭证不作为项目源码提交。
