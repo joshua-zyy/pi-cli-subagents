@@ -1,0 +1,27 @@
+{
+  "name": "pi-cli-subagents",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local, reusable Pi CLI subagents with independent process lifetimes",
+  "type": "module",
+  "engines": { "node": ">=22.19.0" },
+  "keywords": ["pi-package"],
+  "files": ["dist", "skills", "README.md"],
+  "pi": { "extensions": ["./dist/index.js"], "skills": ["./skills"] },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "check": "tsc -p tsconfig.json --noEmit",
+    "test": "npm run build && node --test test/*.test.mjs",
+    "prepack": "npm run build"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-ai": "0.87.1",
+    "@earendil-works/pi-coding-agent": "0.87.1",
+    "@types/node": "22.19.19",
+    "typescript": "5.9.3"
+  }
+}

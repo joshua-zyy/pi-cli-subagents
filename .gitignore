@@ -9,6 +9,9 @@ coverage/
 !.env.example
 *.log
 tools/out/
+.test-output/
+.npm-cache/
+*.subagents/
 
 # OS metadata
 .DS_Store

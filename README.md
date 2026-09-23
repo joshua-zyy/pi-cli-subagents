@@ -18,14 +18,35 @@
 
 主 Pi 派发实施子代理 A，完成后派发独立审查子代理 B，再把问题发回原 A 会话继续修复。另需验证主 Pi 退出后的任务存活、恢复连接和完成结果补交。
 
-## 当前状态
+## 本地开发和加载
 
-仓库已初始化，尚未实现或安装扩展。已有独立生命周期探针验证了“测试父进程退出 → 真实子 Pi 继续 → 新控制端重连 → 完成后释放进程 → 原会话续聊”；正式 Pi 扩展集成仍需验证。
+```bash
+npm ci
+npm test
+# 本地试用：在目标工作目录运行，**不会安装到全局设置**
+pi --extension D:/AI/agentBySelf/pi-extensions/pi-cli-subagents/dist/index.js \
+   --skill D:/AI/agentBySelf/pi-extensions/pi-cli-subagents/skills/delegate-cli-agents
+```
 
-前期实验保留在本机 `D:/AI/piTest`：
+也可将仓库作为 Pi 本地 package 显式安装（会写入相应范围的 Pi settings；安装前先自行确认）。运行时需要 Node >=22.19，仓库内 `dist/` 为本机构建产物，不提交 Git；打包时由 `prepack` 构建。
 
-- 报告：`docs/findings-pi-lifecycle.md`
-- 入口：`tools/probe-pi-lifecycle.mjs`
-- 辅助代码与自动测试：`tools/lifecycle/`
+第一版提供 `spawn_agent`、`send_input`、`list_agents`、`close_agent` 四个模型工具，以及仅供用户操作的 `/agent-reply <agentId> <questionId>`。运行中的 `send_input` 可选 `steer` 或 `followUp`；完成后的 `send_input` 恢复同一子 Pi 会话。`close_agent` 停止当前任务，不删除会话文件。主会话必须持久化（不能用 `--no-session`），结果只回到创建它的原主会话。
 
-这些实验尚未迁入本仓库。原始会话、日志和测试凭证不作为项目源码提交。
+角色内置 `worker` 和 `reviewer`。可选角色覆盖文件：用户级 `~/.pi/agent/cli-subagents.roles.json`，受信项目的 `.pi/cli-subagents.roles.json`。每个角色需要 `description`、`instructions`，可选 `provider`、`model`、`thinking`；缺省模型与权限均由原 Pi CLI 配置决定。示例：
+
+```json
+{
+  "tester": {
+    "description": "独立验证",
+    "instructions": "检查指定代码并报告可复现的问题，不要自行修改代码。"
+  }
+}
+```
+
+子会话、结果和运行日志与主会话文件相邻，位于 `<主会话文件>.subagents/`；这些内容可能含敏感任务文本，勿上传或加入版本控制。共享 `cwd` 不等于独立文件系统；审查期间不要让写代理同时修改同一文件。无法处理的交互显示为等待处理，只有用户能通过 `/agent-reply` 回复。离线完成报告由原主会话重新打开后补交，未打开时保存在本地。
+
+## 验证与边界
+
+`npm test` 使用假 Pi RPC 子进程，不消耗模型额度。`node test/real-smoke.mjs` 是**需明确选择运行**的真实 Pi 测试（通常两次小模型调用），产物仅写 `.test-output/`。曾验证真实 Pi 扩展临时加载、四个工具已注册和激活，以及独立 worker 的同会话续聊；尚未用真实主 Pi 走完实施—审查—修复、人工权限审批、主 Pi TUI 退出后补交、执行端自身崩溃恢复。出现执行端不可达或残留锁时会拒绝在同一会话上重复启动，需要人工检查日志，不会自动清锁抢占。
+
+前期独立协议/生命周期探针仍保留在本机 `D:/AI/piTest`（见 `docs/findings-pi-lifecycle.md`），原始会话、日志和测试凭证不作为项目源码提交。
