@@ -20,7 +20,9 @@ test('multiple reports are batched, queued once while pending, and deduplicated 
   assert.deepEqual(h.sent[0].options, { triggerTurn: true, deliverAs: 'followUp' });
   deliverReports(h.manager, h.pi, h.ctx, pending);
   assert.equal(h.sent.length, 1, 'polling cannot queue a duplicate before message is persisted');
-  h.entries.push({ type: 'message', message: { role: 'custom', customType: 'cli-subagents-report', details: { ids: ['first', 'second'] } } });
+  // Pi persists ExtensionAPI.sendMessage as a SessionManager custom_message entry,
+  // not as a model-facing { type: 'message', message: { role: 'custom' } } entry.
+  h.entries.push({ type: 'custom_message', customType: 'cli-subagents-report', details: { ids: ['first', 'second'] } });
   const restarted = new Set();
   deliverReports(h.manager, h.pi, h.ctx, restarted);
   assert.equal(h.sent.length, 1, 'restart must not replay a report already in the parent session');

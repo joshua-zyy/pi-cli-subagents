@@ -13,6 +13,10 @@ tools/out/
 .npm-cache/
 *.subagents/
 
+# Local, disposable end-to-end showcase (not part of the extension package)
+demo/
+test/acceptance-demo.mjs
+
 # OS metadata
 .DS_Store
 Thumbs.db

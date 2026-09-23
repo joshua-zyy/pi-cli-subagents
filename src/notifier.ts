@@ -6,8 +6,8 @@ export const customType = "cli-subagents-report";
 export function deliveredIds(ctx: Pick<ExtensionContext, "sessionManager">): Set<string> {
   const ids = new Set<string>();
   for (const entry of ctx.sessionManager.getEntries()) {
-    if (entry.type !== "message" || entry.message.role !== "custom" || entry.message.customType !== customType) continue;
-    const details = entry.message.details as { ids?: unknown } | undefined;
+    if (entry.type !== "custom_message" || entry.customType !== customType) continue;
+    const details = entry.details as { ids?: unknown } | undefined;
     if (Array.isArray(details?.ids)) for (const id of details.ids) if (typeof id === "string") ids.add(id);
   }
   return ids;

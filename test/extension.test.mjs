@@ -30,7 +30,7 @@ test('extension tools implement → separate review → resume same implementer;
     registerCommand(name, command) { commands.set(name, command); },
     sendMessage(message, options) {
       messages.push({ message, options });
-      entries.push({ type: 'message', message: { role: 'custom', ...message } });
+      entries.push({ type: 'custom_message', ...message });
     },
   };
   const manager = new AgentManager(parent, { command: process.execPath, args: [fixture] });
