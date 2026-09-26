@@ -46,11 +46,17 @@ The parent must have a persistent session; `--no-session` cannot own subagents. 
 
 ## Terminal UI
 
+Two independent surfaces: a status summary above the editor and a navigable roster below it.
+
 The status widget above the editor shows role, phase, recent tool activity, and elapsed time. Waiting requests take priority. Active instances have a second activity line; finished instances collapse to one line, linger for 30 seconds, and then disappear. No widget space is reserved when there is nothing to show.
 
-### `/agents` and the live roster shortcut
+### Roster below the editor
 
-Press **Ctrl+Alt+A** from Pi's main editor to open the agent roster while children are running; no need to wait for them to finish or send the main model a prompt. `/agents` opens the same roster when commands are available. Use **Up/Down** to select any instance and **Enter** (or **v**) to open its live conversation immediately; **i** opens its summary. The summary contains the task, latest activity, result or error, native session, log path, and pending request.
+While any child is active, a compact roster stays visible below the editor: `main` followed by each running child, plus recently finished ones for a few seconds. With an empty prompt, press **Down** (or **Left**) to move focus into it, then **Up/Down** to select, **Enter** to open the selected child's live conversation, and **Esc** to return to the prompt. Typing is never intercepted: the roster only reacts to arrow keys when the prompt editor has focus and its text is empty, so it stays out of the way of other dialogs and of normal input.
+
+### `/agents` and the shortcut
+
+Press **Ctrl+Alt+A** from Pi's main editor to open the full agent roster while children are running; no need to wait for them to finish or send the main model a prompt. `/agents` opens the same roster when commands are available. Use **Up/Down** to select any instance and **Enter** (or **v**) to open its live conversation immediately; **i** opens its summary. The summary contains the task, latest activity, result or error, native session, log path, and pending request.
 
 | Key in the summary | Action |
 | --- | --- |
@@ -106,7 +112,7 @@ If a worker is unreachable or an ownership lock remains, the extension refuses d
 
 `node test/real-smoke.mjs` is an explicit opt-in real-model test; it normally makes two small calls and writes only to `.test-output/`. Prior real Pi RPC acceptance exercised implementation → independent review → original implementer continuation, parent exit/reconnect, offline report replay, and deduplication. Temporary tasks and raw acceptance artifacts remain local.
 
-Automated component tests are not full terminal acceptance. A no-model Windows ConPTY smoke test also loaded the actual Pi TUI in regular and fullscreen modes: opening the panel/viewer, rendering tool arguments and live output, resizing, scrolling, closing and exiting all passed. Its child was a deterministic RPC fixture, not another model call. Real TUI permission dialogs, parent TUI exit/replay, every terminal/key protocol and theme, and execution-owner crash recovery are not comprehensively verified. TUI approval is an optional compatibility path, not a blocker for the core Pi-to-Pi collaboration test. Safety-guard false positives remain unresolved; the parent-delegated decision path has deterministic protocol tests, but its real-model authorization behavior is not yet fully verified.
+Automated component tests are not full terminal acceptance. A no-model Windows ConPTY smoke test also loaded the actual Pi TUI in regular and fullscreen modes: the below-editor roster, arrow-key focus, opening a running child's live conversation, tool arguments, streaming output, resizing, scrolling, closing and exiting all passed. Its child was a deterministic RPC fixture, not another model call. Real TUI permission dialogs, parent TUI exit/replay, every terminal/key protocol and theme, and execution-owner crash recovery are not comprehensively verified. TUI approval is an optional compatibility path, not a blocker for the core Pi-to-Pi collaboration test. Safety-guard false positives remain unresolved; the parent-delegated decision path has deterministic protocol tests, but its real-model authorization behavior is not yet fully verified.
 
 ## References
 

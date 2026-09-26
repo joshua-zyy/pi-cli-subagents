@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, writeFileSync, renameSync, readdirSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync, renameSync, readdirSync, unlinkSync } from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 
@@ -10,7 +10,19 @@ export function writeJson(file: string, data: unknown): void {
   mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
   const temporary = `${file}.${randomUUID()}.tmp`;
   writeFileSync(temporary, `${JSON.stringify(data, null, 2)}\n`, { mode: 0o600 });
-  renameSync(temporary, file);
+  // Windows fails rename while another process holds the target open for reading.
+  // Retry briefly instead of losing a state update to a concurrent poll.
+  for (let attempt = 0; ; attempt++) {
+    try { renameSync(temporary, file); return; }
+    catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (attempt >= 20 || (code !== "EPERM" && code !== "EACCES" && code !== "EBUSY" && code !== "ENOTEMPTY")) {
+        try { unlinkSync(temporary); } catch { /* the retry loop already reported the real failure */ }
+        throw error;
+      }
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
+    }
+  }
 }
 export function directories(root: string): string[] {
   try { return readdirSync(root, { withFileTypes: true }).filter((item) => item.isDirectory()).map((item) => item.name); }

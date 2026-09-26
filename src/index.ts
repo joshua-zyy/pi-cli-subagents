@@ -7,6 +7,7 @@ import { loadRoles } from "./roles.js";
 import { AgentsPanel, type PanelAction } from "./ui/panel.js";
 import { canSteer, isTerminal } from "./ui/format.js";
 import { StatusWidget } from "./ui/status.js";
+import { FleetView } from "./ui/fleet.js";
 import { TranscriptReader } from "./ui/transcript.js";
 import { ConversationViewer } from "./ui/conversation.js";
 import type { AgentView, Delivery, Launch, Question } from "./types.js";
@@ -31,19 +32,19 @@ export default function extension(pi: ExtensionAPI): void {
   const launch: Launch = { command: process.execPath, args: [cli] };
   let dismissPanel: (() => void) | undefined;
   let sessionEpoch = 0;
-  let active: { file: string; ctx: ExtensionContext; manager: AgentManager; pending: Set<string>; timer: NodeJS.Timeout; widget?: StatusWidget } | undefined;
+  let active: { file: string; ctx: ExtensionContext; manager: AgentManager; pending: Set<string>; timer: NodeJS.Timeout; widget?: StatusWidget; fleet?: FleetView } | undefined;
 
   function pump(): void {
     if (!active || active.ctx.sessionManager.getSessionFile() !== active.file) return;
     try { deliverReports(active.manager, pi, active.ctx, active.pending); }
     catch (error) { console.error("[pi-cli-subagents] Report delivery failed; retrying:", error); }
-    try { active.widget?.update(); }
+    try { active.widget?.update(); active.fleet?.update(); }
     catch (error) { console.error("[pi-cli-subagents] Status refresh failed; retrying:", error); }
   }
   function stopMonitor(): void {
     sessionEpoch++;
     dismissPanel?.(); dismissPanel = undefined;
-    if (active) { clearInterval(active.timer); active.widget?.dispose(); }
+    if (active) { clearInterval(active.timer); active.widget?.dispose(); active.fleet?.dispose(); }
     active = undefined;
   }
   pi.on("session_start", (_event, ctx) => {
@@ -56,7 +57,11 @@ export default function extension(pi: ExtensionAPI): void {
     timer.unref();
     // The widget needs terminal components and requestRender; RPC clients cannot render it.
     const widget = ctx.mode === "tui" ? new StatusWidget(ctx.ui, () => manager.list()) : undefined;
-    active = { file, ctx, manager, pending, timer, ...(widget ? { widget } : {}) };
+    let fleet: FleetView | undefined;
+    if (ctx.mode === "tui") fleet = new FleetView(ctx.ui, () => manager.list(), (id) => {
+      void openAgents(ctx, id).finally(() => fleet?.viewerClosed());
+    });
+    active = { file, ctx, manager, pending, timer, ...(widget ? { widget } : {}), ...(fleet ? { fleet } : {}) };
     setTimeout(pump, 100).unref();
   });
   pi.on("session_shutdown", () => stopMonitor());
@@ -171,26 +176,31 @@ export default function extension(pi: ExtensionAPI): void {
   });
 
   let panelBusy = false;
-  async function openAgents(ctx: ExtensionContext): Promise<void> {
+  async function openAgents(ctx: ExtensionContext, selectedId?: string): Promise<void> {
       // custom() returns undefined in RPC mode; terminal panels are TUI-only.
       if (ctx.mode !== "tui") { ctx.ui.notify("The panel requires a TUI; use list_agents / send_input / close_agent or /agent-reply instead.", "error"); return; }
       // Keep one panel/action loop per extension instance so concurrent commands cannot compete for input.
       if (panelBusy) { ctx.ui.notify("The agent panel is already open or processing an action; wait or close it with Esc.", "warning"); return; }
       panelBusy = true;
       const epoch = sessionEpoch;
+      const fromFleet = selectedId !== undefined;
       try {
         const manager = parentManager(ctx, launch);
         while (epoch === sessionEpoch) {
-          let agents: AgentView[] = [];
-          try { agents = manager.list(); }
-          catch (error) { ctx.ui.notify((error as Error).message, "error"); return; }
-          if (!agents.length) { ctx.ui.notify("No subagents in this session.", "info"); return; }
-          // Close the overlay before opening action dialogs; the next loop restores the list.
-          let action = await ctx.ui.custom<PanelAction | undefined>((tui, theme, _kb, done) => {
-            dismissPanel = () => done(undefined);
-            return new AgentsPanel(agents, theme, done, { rows: () => Math.max(1, tui.terminal.rows - 2) });
-          }, { overlay: true, overlayOptions: { width: "96%", maxHeight: "100%", margin: 1 } });
-          dismissPanel = undefined;
+          let action: PanelAction | undefined;
+          if (selectedId) { action = { kind: "view", id: selectedId }; selectedId = undefined; }
+          else {
+            let agents: AgentView[] = [];
+            try { agents = manager.list(); }
+            catch (error) { ctx.ui.notify((error as Error).message, "error"); return; }
+            if (!agents.length) { ctx.ui.notify("No subagents in this session.", "info"); return; }
+            // Close the overlay before opening action dialogs; the next loop restores the list.
+            action = await ctx.ui.custom<PanelAction | undefined>((tui, theme, _kb, done) => {
+              dismissPanel = () => done(undefined);
+              return new AgentsPanel(agents, theme, done, { rows: () => Math.max(1, tui.terminal.rows - 2) });
+            }, { overlay: true, overlayOptions: { width: "96%", maxHeight: "100%", margin: 1 } });
+            dismissPanel = undefined;
+          }
           if (!action || epoch !== sessionEpoch) return;
           try {
             if (action.kind === "view") {
@@ -208,17 +218,18 @@ export default function extension(pi: ExtensionAPI): void {
                 }, { overlay: true, overlayOptions: { width: "96%", maxHeight: "100%", margin: 1 } });
               } finally { viewer?.dispose(); dismissPanel = undefined; }
               if (epoch !== sessionEpoch) return;
-              if (!action || action.kind === "view") continue;
+              if (!action || action.kind === "view") { if (fromFleet) return; continue; }
             }
             // Re-read state before acting: the list is a snapshot, not an authorization or lifecycle guarantee.
             const state = manager.get(action.id);
-            if (action.kind === "reply") { await replyPrompt(ctx, manager, action.id, action.questionId); continue; }
+            if (action.kind === "reply") { await replyPrompt(ctx, manager, action.id, action.questionId); if (fromFleet) return; continue; }
             if (action.kind === "stop") {
               if (isTerminal(state.phase)) { ctx.ui.notify(`${state.role} has already ended; nothing to stop.`, "info"); continue; }
               const confirmed = await ctx.ui.confirm("Stop subagent?", `${state.role} ${action.id.slice(0, 8)}: stop active work. The native session and results remain available for later continuation.`);
               if (!confirmed || epoch !== sessionEpoch) continue;
               await manager.close(action.id);
               ctx.ui.notify("Processes stopped; original session retained.", "info");
+              if (fromFleet) return;
               continue;
             }
             if (state.phase === "waiting") { ctx.ui.notify("This child has a pending interaction: use r, /agent-reply, or the parent permission tool.", "error"); continue; }
@@ -228,7 +239,8 @@ export default function extension(pi: ExtensionAPI): void {
             if (!steerable) ctx.ui.notify("Starting a new turn in the original session; this can take up to about 60 seconds...", "info");
             await manager.send(action.id, message);
             ctx.ui.notify(steerable ? "Instructions accepted; a completion report will follow." : "New turn accepted in the original session; a completion report will follow.", "info");
-          } catch (error) { ctx.ui.notify((error as Error).message, "error"); }
+            if (fromFleet) return;
+          } catch (error) { ctx.ui.notify((error as Error).message, "error"); if (fromFleet) return; }
         }
       } catch (error) { ctx.ui.notify((error as Error).message, "error"); }
       finally { dismissPanel = undefined; panelBusy = false; }
