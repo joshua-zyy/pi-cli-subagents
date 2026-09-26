@@ -214,6 +214,7 @@ export default function extension(pi: ExtensionAPI): void {
                     const agent = manager.get(id);
                     return { agent, ...await reader.read(manager.eventLogs(id)) };
                   }, { keybindings, markdownTheme: getMarkdownTheme(),
+                    onSend: async (message) => { await manager.send(id, message); },
                     // Match Pi's input box: its border follows the main session's thinking level.
                     frameColor: (text) => ctx.ui.theme.getThinkingBorderColor(ctx.thinkingLevel ?? "off")(text) });
                   return viewer;

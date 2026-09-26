@@ -1,8 +1,8 @@
-import { Markdown, matchesKey, stripTerminalSequences, truncateToWidth, visibleWidth, type KeyId, type KeybindingsManager } from "@earendil-works/pi-tui";
+import { Input, Markdown, matchesKey, stripTerminalSequences, truncateToWidth, visibleWidth, type KeyId, type KeybindingsManager } from "@earendil-works/pi-tui";
 import type { AgentView } from "../types.js";
 import type { PanelAction } from "./panel.js";
 import type { TranscriptEntry, TranscriptSnapshot } from "./transcript.js";
-import { canSteer, formatElapsed, isTerminal, oneLine, phaseColor, phaseIcon, phaseLabel, viewElapsed } from "./format.js";
+import { canMessage, canSteer, formatElapsed, formatTokens, isTerminal, oneLine, phaseColor, phaseIcon, phaseLabel, rightAlign, viewElapsed } from "./format.js";
 
 export interface ConversationSnapshot extends TranscriptSnapshot {
   agent: Pick<AgentView, "id" | "role" | "phase" | "runId"> & Partial<Pick<AgentView, "startedAt" | "updatedAt">>;
@@ -38,6 +38,8 @@ export interface ConversationViewerOptions {
   markdownTheme?: ViewerMarkdownTheme;
   /** Frame color, normally Pi's editor border so the overlay matches the input box. */
   frameColor?: (text: string) => string;
+  /** Deliver an inline message to the child without leaving the viewer. */
+  onSend?: (message: string) => Promise<void> | void;
 }
 
 /** Border, header, two separators, footer and bottom border. */
@@ -63,6 +65,10 @@ export class ConversationViewer {
   private readonly keybindings?: KeybindingsManager;
   private readonly markdownTheme?: ViewerMarkdownTheme;
   private readonly frameColor?: (text: string) => string;
+  private readonly onSend?: (message: string) => Promise<void> | void;
+  private composer?: Input;
+  private notice?: { text: string; color: string; revision?: number };
+  private sending = false;
 
   constructor(
     private readonly tui: ViewerTui,
@@ -75,6 +81,7 @@ export class ConversationViewer {
     this.keybindings = options.keybindings;
     this.markdownTheme = options.markdownTheme;
     this.frameColor = options.frameColor;
+    this.onSend = options.onSend;
     void this.refresh();
   }
 
@@ -94,6 +101,8 @@ export class ConversationViewer {
       const next = await this.load();
       if (this.closed) return;
       if (next.revision === undefined || next.revision !== this.snapshot?.revision) this.invalidate();
+      // A delivery note only stays until the child itself produces new output.
+      if (this.notice && next.revision !== undefined && next.revision !== this.notice.revision && !this.sending) this.notice = undefined;
       this.snapshot = next; this.error = undefined;
     } catch (error) {
       if (this.closed) return;
@@ -112,12 +121,49 @@ export class ConversationViewer {
     return matchesKey(data, fallback);
   }
 
+  /** Open the inline composer; it owns every key until it submits or is cancelled. */
+  private openComposer(): void {
+    const input = new Input();
+    input.focused = true;
+    input.onSubmit = (value: string) => {
+      const message = value.trim();
+      this.composer = undefined;
+      if (message) void this.send(message);
+      else this.tui.requestRender();
+    };
+    input.onEscape = () => { this.composer = undefined; this.tui.requestRender(); };
+    this.composer = input;
+    this.notice = undefined;
+    this.tui.requestRender();
+  }
+
+  private async send(message: string): Promise<void> {
+    const agent = this.snapshot?.agent;
+    if (!agent || !this.onSend) return;
+    const resuming = !canSteer(agent.phase);
+    this.sending = true;
+    this.notice = { text: resuming ? "Starting a new turn in the original session..." : "Delivering to the running child...", color: "dim", revision: this.snapshot?.revision };
+    this.tui.requestRender();
+    try {
+      await this.onSend(message);
+      this.notice = { text: resuming ? "Turn accepted in the original session; a report will follow." : "Message accepted; the child continues in the same session.", color: "success", revision: this.snapshot?.revision };
+    } catch (error) {
+      this.notice = { text: `Send failed: ${(error as Error).message}`, color: "error" };
+    } finally {
+      this.sending = false;
+      this.tui.requestRender();
+    }
+  }
+
   handleInput(data: string): void {
     if (this.closed) return;
+    // While composing, the input owns all keys (Enter sends, Esc cancels).
+    if (this.composer) { this.composer.handleInput(data); this.tui.requestRender(); return; }
     const agent = this.snapshot?.agent;
     const max = Math.max(0, this.totalLines - this.viewport);
     const page = Math.max(1, this.viewport);
     if (matchesKey(data, "escape") || matchesKey(data, "q") || matchesKey(data, "ctrl+c")) { this.finish(); return; }
+    if (agent && this.onSend && canMessage(agent.phase) && matchesKey(data, "return")) { this.openComposer(); return; }
     if (this.matches(data, "tui.altScreen.top", "home")) { this.scroll = 0; this.follow = false; }
     else if (this.matches(data, "tui.altScreen.bottom", "end")) { this.scroll = max; this.follow = true; }
     else if (this.matches(data, "tui.altScreen.pageUp", "pageUp")) { this.scroll = Math.max(0, this.scroll - page); this.follow = false; }
@@ -135,8 +181,9 @@ export class ConversationViewer {
     const rows = Math.max(3, Number.isFinite(this.tui.terminal.rows) ? this.tui.terminal.rows - 2 : 22);
     const inner = Math.max(1, width - 4);
     // Very short terminals drop the frame instead of overflowing the host view.
-    const framed = rows >= CHROME_LINES + 1;
-    this.viewport = Math.max(1, framed ? rows - CHROME_LINES : rows - 2);
+    const extra = (this.composer ? 1 : 0) + (this.notice ? 1 : 0);
+    const framed = rows >= CHROME_LINES + extra + 1;
+    this.viewport = Math.max(1, framed ? rows - CHROME_LINES - extra : rows - 2 - extra);
     const frame = this.frameColor ?? ((text: string) => this.theme.fg("borderMuted", text));
     const border = frame("│");
     const row = (content: string): string => {
@@ -151,8 +198,11 @@ export class ConversationViewer {
     };
 
     const agent = this.snapshot?.agent;
+    const stats = [this.snapshot?.usage ? `${formatTokens(this.snapshot.usage.input + this.snapshot.usage.output + this.snapshot.usage.cacheRead + this.snapshot.usage.cacheWrite)} tokens` : undefined,
+      this.snapshot?.model ? oneLine(this.snapshot.model, 40) : undefined].filter(Boolean).join(" · ");
     const header = agent
-      ? `${this.theme.fg(phaseColor(agent.phase), isTerminal(agent.phase) ? phaseIcon(agent.phase) : "●")} ${this.theme.bold(this.theme.fg("text", oneLine(agent.role, 40)))}${this.theme.fg("muted", ` · ${phaseLabel(agent.phase)}`)}${agent.startedAt ? this.theme.fg("dim", ` · ${formatElapsed(viewElapsed(agent as AgentView, Date.now()))}`) : ""}`
+      ? rightAlign(`${this.theme.fg(phaseColor(agent.phase), isTerminal(agent.phase) ? phaseIcon(agent.phase) : "●")} ${this.theme.bold(this.theme.fg("text", oneLine(agent.role, 40)))}${this.theme.fg("muted", ` · ${phaseLabel(agent.phase)}`)}${agent.startedAt ? this.theme.fg("dim", ` · ${formatElapsed(viewElapsed(agent as AgentView, Date.now()))}`) : ""}`,
+        this.theme.fg("dim", stats), inner)
       : this.theme.fg("muted", "Loading child session...");
 
     const body = this.content(inner);
@@ -168,21 +218,34 @@ export class ConversationViewer {
       : this.snapshot?.notice ? this.theme.fg("warning", oneLine(this.snapshot.notice, 120))
         : this.snapshot?.loading ? this.theme.fg("dim", "Loading history...")
           : this.theme.fg("dim", `${this.follow ? "Following" : "Paused"} · ${body.length} lines · ${Math.min(100, percent)}%`);
-    const keys: string[] = ["↑↓ scroll", "PgUp/PgDn", "Home/End"];
-    if (agent && canSteer(agent.phase)) keys.push("s message");
-    else if (agent && isTerminal(agent.phase)) keys.push("s resume");
-    if (agent && !isTerminal(agent.phase)) keys.push("x stop");
-    keys.push("Esc close");
-    const footer = bar(status, this.theme.fg("dim", keys.join(" · ")));
+    const hints: string[] = ["↑↓ scroll", "PgUp/PgDn", "Home/End"];
+    if (agent && this.onSend && canSteer(agent.phase)) hints.push("Enter message");
+    else if (agent && this.onSend && canMessage(agent.phase)) hints.push("Enter resume");
+    if (agent && !isTerminal(agent.phase)) hints.push("x stop");
+    hints.push("Esc close");
+    // Keep the most useful hints when the width is limited: dismissal and actions first, then scrolling.
+    const styled = (items: string[]): string => this.theme.fg("dim", items.join(" · "));
+    const priority = [...hints].sort((a, b) => rank(a) - rank(b));
+    let chosen = new Set<string>();
+    for (const hint of priority) {
+      const candidate = hints.filter((item) => chosen.has(item) || item === hint);
+      if (visibleWidth(status) + 1 + visibleWidth(styled(candidate)) <= width) chosen.add(hint);
+    }
+    const shown = hints.filter((hint) => chosen.has(hint));
+    const footer = shown.length ? bar(status, styled(shown)) : truncateToWidth(status, width);
+    const bottomRows = this.composer
+      ? [row(this.composer.render(inner)[0] ?? ""), bar(this.theme.fg("accent", "✎ message"), this.theme.fg("dim", "Enter send · Esc cancel"))]
+      : [footer];
+    if (this.notice) bottomRows.push(this.theme.fg(this.notice.color, oneLine(this.notice.text, width)));
     const rule = frame(`├${"─".repeat(Math.max(0, width - 2))}┤`);
-    if (!framed) return [row(header), ...visible.map((line) => row(line)), footer].map((line) => truncateToWidth(line, width));
+    if (!framed) return [row(header), ...visible.map((line) => row(line)), ...bottomRows].map((line) => truncateToWidth(line, width));
     return [
       frame(`╭${"─".repeat(Math.max(0, width - 2))}╮`),
       row(header),
       rule,
       ...visible.map((line) => row(line)),
       rule,
-      footer,
+      ...bottomRows,
       frame(`╰${"─".repeat(Math.max(0, width - 2))}╯`),
     ].map((line) => truncateToWidth(line, width));
   }
@@ -248,6 +311,14 @@ function formatArgs(input: string | undefined): string {
     }
   } catch { /* not JSON: keep the raw text below */ }
   return `(${oneLine(raw.split(/\r?\n/).slice(0, 2).join(" "), 120)})`;
+}
+
+/** Hint priority when the footer is too narrow: dismissal, actions, then scrolling. */
+function rank(hint: string): number {
+  if (hint === "Esc close") return 0;
+  if (hint.startsWith("Enter ")) return 1;
+  if (hint === "x stop") return 2;
+  return 3;
 }
 
 /** Wrap a plain (already sanitized) line to the given visible width. */

@@ -197,6 +197,24 @@ test('below-editor FleetView opens the selected active child without an intermed
   assert.equal(h.manager.get(first.id).phase,'running');assert.equal(h.manager.get(second.id).phase,'running');
 });
 
+test('inline message from the viewer reaches the running child in the same session', {timeout:20000}, async t => {
+  const h=harness(t);h.start();
+  const agent=await h.spawn('HOLD inline');
+  await waitUntil('running',()=>h.manager.get(agent.id).phase==='running');
+  const sessionId=h.manager.get(agent.id).sessionId;
+  await h.panel([[keys.enter],async viewer=>{
+    await waitUntil('viewer ready',()=>viewer.render(120).join('\n').includes('HOLD inline')||viewer.render(120).join('\n').includes('worker'));
+    viewer.handleInput('\r'); // open the inline composer
+    for(const key of 'PING') viewer.handleInput(key);
+    viewer.handleInput('\r');
+    await waitUntil('child finished with the steer text',()=>h.manager.get(agent.id).phase==='completed');
+    assert.equal(h.manager.get(agent.id).sessionId,sessionId,'steering must stay in the original session');
+    assert.equal(h.manager.get(agent.id).text,'PING');
+    viewer.handleInput('q');
+  }]);
+  assert.equal(h.editors.length,0,'inline send must not open the external editor dialog');
+});
+
 test('conversation is wired to live worker logs and remains open after completion', { timeout: 15000 }, async t => {
   const h = harness(t); h.start();
   const agent = await h.spawn('STREAM');

@@ -4,6 +4,7 @@ import { visibleWidth } from '@earendil-works/pi-tui';
 import { ConversationViewer } from '../dist/ui/conversation.js';
 
 const theme = { fg: (_, text) => text, bold: text => text };
+const markdownTheme = { heading: t => t, link: t => t, linkUrl: t => t, code: t => t, codeBlock: t => t, codeBlockBorder: t => t, quote: t => t, quoteBorder: t => t, hr: t => t, listBullet: t => t, bold: t => t, italic: t => t, strikethrough: t => t, underline: t => t };
 const entry = (i, extra = {}) => ({ id: String(i), kind: 'assistant', title: 'Assistant', text: `Message ${i}`, ...extra });
 const state = { id: 'agent-1', role: 'worker', phase: 'running', runId: 'run-1' };
 const wait = ms => new Promise(r => setTimeout(r, ms));
@@ -77,6 +78,47 @@ test('page, half-line and configured scroll bindings all move the transcript and
   assert.ok(viewer.render(80).every(line=>visibleWidth(line)<=80));
 });
 
+
+test('viewer shows lifetime tokens and the child model, and sends inline without closing', async t => {
+  const sent = [];
+  const tui = { terminal: { rows: 20, columns: 80 }, requestRender() {} };
+  const snapshot = { agent: state, entries: [entry(1, { text: 'Handling it' })], loading: false, usage: { input: 150, output: 25, cacheRead: 900, cacheWrite: 10, cost: 0, contextTokens: 1085 }, provider: 'opencode-go', model: 'deepseek-v4.1-flash' };
+  const viewer = new ConversationViewer(tui, theme, () => {}, async () => snapshot, { intervalMs: 10, markdownTheme, onSend: async (message) => { sent.push(message); } });
+  t.after(() => viewer.dispose());
+  await wait(30);
+  assert.match(viewer.render(80).join('\n'), /1\.1k tokens · deepseek-v4\.1-flash/);
+  assert.match(viewer.render(80).join('\n'), /Enter message/);
+  viewer.handleInput('\r');
+  const open = viewer.render(80).join('\n');
+  assert.match(open, /✎ message/); assert.match(open, /Enter send · Esc cancel/);
+  for (const key of ['h', 'i']) viewer.handleInput(key);
+  assert.deepEqual(sent, [], 'typing must not send or scroll');
+  viewer.handleInput('\u001b'); // Esc cancels the composer
+  assert.doesNotMatch(viewer.render(80).join('\n'), /✎ message/);
+  viewer.handleInput('\r'); viewer.handleInput('p'); viewer.handleInput('\r');
+  assert.deepEqual(sent, ['p']);
+  await wait(20);
+  assert.match(viewer.render(80).join('\n'), /Message accepted/);
+  assert.ok(viewer.render(80).every(line => visibleWidth(line) <= 80));
+});
+
+test('the composer is unavailable for a read-only child and reports send failures', async t => {
+  const tui = { terminal: { rows: 16, columns: 60 }, requestRender() {} };
+  const blocked = { agent: { ...state, phase: 'unreachable' }, entries: [entry(1)], loading: false };
+  const viewer = new ConversationViewer(tui, theme, () => {}, async () => blocked, { intervalMs: 10, onSend: async () => { throw Error('worker has exited'); } });
+  t.after(() => viewer.dispose());
+  await wait(20);
+  assert.doesNotMatch(viewer.render(60).join('\n'), /Enter message|Enter resume/);
+  viewer.handleInput('\r');
+  assert.doesNotMatch(viewer.render(60).join('\n'), /✎ message/, 'a non-resumable child gets no composer');
+  const resumable = new ConversationViewer(tui, theme, () => {}, async () => ({ agent: { ...state, phase: 'completed' }, entries: [entry(1)], loading: false }), { intervalMs: 10, onSend: async () => { throw Error('worker has exited'); } });
+  t.after(() => resumable.dispose());
+  await wait(20);
+  assert.match(resumable.render(60).join('\n'), /Enter resume/);
+  resumable.handleInput('\r'); resumable.handleInput('x'); resumable.handleInput('\r');
+  await wait(20);
+  assert.match(resumable.render(60).join('\n'), /Send failed: worker has exited/);
+});
 
 test('a loading snapshot followed by failure uses the normal retry interval', async t => {
   let calls = 0;

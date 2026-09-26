@@ -70,6 +70,26 @@ test('missing files, malformed records and bounded history produce visible notic
   assert.ok(s.entries.some(e => e.text === 'Task 349'));
 });
 
+test('assistant usage is summed across runs and survives an unrelated revision change', async t => {
+  const h = fixture(t);
+  h.append({ type: 'message_end', message: { role: 'assistant', content: 'first', provider: 'p', model: 'm', usage: { input: 100, output: 20, cacheRead: 900, cacheWrite: 10, totalTokens: 1030, cost: { total: 0.5 } } } });
+  let s = await h.read();
+  assert.deepEqual({ input: s.usage.input, output: s.usage.output, cacheRead: s.usage.cacheRead, cacheWrite: s.usage.cacheWrite, cost: s.usage.cost }, { input: 100, output: 20, cacheRead: 900, cacheWrite: 10, cost: 0.5 });
+  assert.equal(s.model, 'm'); assert.equal(s.provider, 'p'); assert.equal(s.usage.contextTokens, 1030);
+  h.append({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', contentIndex: 0, delta: 'more' } });
+  h.append({ type: 'message_end', message: { role: 'assistant', content: 'second', provider: 'p', model: 'm2', usage: { input: 50, output: 5, cacheRead: 0, cacheWrite: 0, totalTokens: 55 } } });
+  s = await h.read();
+  assert.equal(s.usage.input, 150); assert.equal(s.usage.output, 25); assert.equal(s.model, 'm2');
+});
+
+test('usage resets with the transcript instead of leaking into another agent', async t => {
+  const h = fixture(t);
+  h.append({ type: 'message_end', message: { role: 'assistant', content: 'x', usage: { input: 10, output: 1, totalTokens: 11 } } });
+  await h.read();
+  const cleared = await h.read([]);
+  assert.equal(cleared.usage, undefined); assert.equal(cleared.model, undefined);
+});
+
 test('clearing history advances the revision so the UI cannot retain stale lines', async t => {
   const h = fixture(t);
   h.append({ type: 'message_end', message: { role: 'assistant', content: 'OLD-CONTENT' } });

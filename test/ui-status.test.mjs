@@ -2,7 +2,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { stripTerminalSequences, visibleWidth } from '@earendil-works/pi-tui';
-import { formatElapsed, oneLine, rightAlign, viewElapsed } from '../dist/ui/format.js';
+import { formatElapsed, formatTokens, oneLine, rightAlign, viewElapsed, canMessage } from '../dist/ui/format.js';
 import { FINISHED_LINGER_MS, MAX_STATUS_LINES, STATUS_KEY, StatusWidget, statusLines } from '../dist/ui/status.js';
 
 const theme = { fg: (_color, text) => text, bold: text => text };
@@ -12,6 +12,12 @@ const view = (over = {}) => ({
   startedAt: 1000, updatedAt: 1000, role: 'worker', cwd: '/tmp', task: 'Implement UI', logFile: 'log.jsonl', ...over,
 });
 const lines = (agents, options = {}) => statusLines(agents, { now: 11000, frame: 0, width: 120, theme, ...options });
+
+test('token counts stay compact and messageability excludes unreachable instances', () => {
+  for (const [input, expected] of [[0, '0'], [512, '512'], [999, '999'], [1000, '1.0k'], [12345, '12.3k'], [1_234_567, '1.2M'], [-5, '0'], [NaN, '0']]) assert.equal(formatTokens(input), expected);
+  for (const phase of ['starting', 'running', 'completed', 'failed', 'stopped']) assert.equal(canMessage(phase), true, phase);
+  for (const phase of ['waiting', 'stopping', 'unreachable']) assert.equal(canMessage(phase), false, phase);
+});
 
 test('elapsed formatting handles all units and invalid inputs', () => {
   for (const [input, expected] of [[0, '0.0s'], [-500, '0.0s'], [420, '0.4s'], [12345, '12.3s'], [252000, '4m12s'], [3780000, '1h03m'], [NaN, '0.0s']]) assert.equal(formatElapsed(input), expected);

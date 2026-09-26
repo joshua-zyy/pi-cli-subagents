@@ -21,6 +21,12 @@ export const isTerminal = (phase: Phase): boolean => !isActive(phase);
 /** Waiting children do not accept messages; their questions must go through /agent-reply. */
 export const canSteer = (phase: Phase): boolean => phase === "starting" || phase === "running";
 
+/**
+ * Whether this instance can receive a message: running ones are steered, finished ones resume
+ * their original session. Unreachable instances must not be resumed, so they are excluded.
+ */
+export const canMessage = (phase: Phase): boolean => canSteer(phase) || ["completed", "failed", "stopped"].includes(phase);
+
 /** Unknown phases from old or manually edited records should remain visible. */
 export const phaseLabel = (phase: Phase): string => PHASE_LABEL[phase] ?? String(phase);
 
@@ -45,6 +51,14 @@ export function oneLine(text: string | undefined, limit: number): string {
   if (typeof text !== "string") return "";
   const flat = stripTerminalSequences(text).replace(/\s+/g, " ").trim();
   return limit > 0 ? flat.slice(0, limit) : flat;
+}
+
+/** `512`, `12.3k`, `1.2M` — compact token counts for status lines. */
+export function formatTokens(count: number): string {
+  const value = Number.isFinite(count) && count > 0 ? Math.round(count) : 0;
+  if (value < 1000) return String(value);
+  if (value < 1_000_000) return `${(value / 1000).toFixed(1)}k`;
+  return `${(value / 1_000_000).toFixed(1)}M`;
 }
 
 export function formatElapsed(ms: number): string {

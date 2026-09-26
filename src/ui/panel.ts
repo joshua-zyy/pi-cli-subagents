@@ -1,6 +1,6 @@
 import { matchesKey, stripTerminalSequences, truncateToWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import type { AgentView } from "../types.js";
-import { canSteer, formatElapsed, isActive, isTerminal, oneLine, phaseColor, phaseIcon, phaseLabel, rightAlign, viewElapsed, SPINNER, type UiColor, type UiTheme } from "./format.js";
+import { canMessage, canSteer, formatElapsed, isActive, isTerminal, oneLine, phaseColor, phaseIcon, phaseLabel, rightAlign, viewElapsed, SPINNER, type UiColor, type UiTheme } from "./format.js";
 
 export type PanelAction =
   | { kind: "view"; id: string }
@@ -74,7 +74,7 @@ export class AgentsPanel {
     if (matchesKey(data, "escape") || matchesKey(data, "left") || matchesKey(data, "h")) this.view = "list";
     else if (matchesKey(data, "up")) this.scroll = Math.max(0, this.scroll - 1);
     else if (matchesKey(data, "down")) this.scroll = Math.min(Math.max(0, this.bodyLines - this.pageLines), this.scroll + 1);
-    else if (agent && matchesKey(data, "s") && (steerable || isTerminal(agent.phase))) this.finish({ kind: "message", id: agent.id, resume: !steerable });
+    else if (agent && matchesKey(data, "s") && canMessage(agent.phase)) this.finish({ kind: "message", id: agent.id, resume: !steerable });
     else if (agent && matchesKey(data, "v")) this.finish({ kind: "view", id: agent.id });
     else if (agent && matchesKey(data, "x") && !isTerminal(agent.phase)) this.finish({ kind: "stop", id: agent.id });
     else if (agent && question && matchesKey(data, "r")) this.finish({ kind: "reply", id: agent.id, questionId: question.id });
@@ -197,7 +197,7 @@ export class AgentsPanel {
 
     const hint: [string, string][] = [["esc/←", "back"], ["↑↓", "scroll"], ["v", "conversation"]];
     if (canSteer(agent.phase)) hint.push(["s", "message"]);
-    else if (isTerminal(agent.phase)) hint.push(["s", "resume"]);
+    else if (canMessage(agent.phase)) hint.push(["s", "resume"]);
     if (!isTerminal(agent.phase)) hint.push(["x", "stop"]);
     if (question) hint.push(["r", "reply"]);
     hint.push(["q", "close"]);

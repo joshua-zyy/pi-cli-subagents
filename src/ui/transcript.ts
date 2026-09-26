@@ -9,7 +9,9 @@ export interface TranscriptEntry {
   input?: string;
   status?: "running" | "done" | "error";
 }
-export interface TranscriptSnapshot { entries: TranscriptEntry[]; loading: boolean; notice?: string; revision?: number }
+export interface TranscriptSnapshot { entries: TranscriptEntry[]; loading: boolean; notice?: string; revision?: number; usage?: TranscriptUsage; provider?: string; model?: string }
+/** Lifetime tokens reported by the child's assistant messages, plus the latest context size. */
+export interface TranscriptUsage { input: number; output: number; cacheRead: number; cacheWrite: number; cost: number; contextTokens?: number }
 
 const CHUNK_BYTES = 512 * 1024;
 const MAX_RECORD = 4 * 1024 * 1024;
@@ -26,6 +28,7 @@ function textOf(content: unknown): string {
 function argumentsOf(value: unknown): string {
   return bounded(typeof value === "string" ? value : JSON.stringify(value ?? {}, null, 2));
 }
+const zeroUsage = (): TranscriptUsage => ({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 });
 
 /** Incremental, bounded reader of existing RPC logs; it never controls a child process. */
 export class TranscriptReader {
@@ -45,6 +48,9 @@ export class TranscriptReader {
   private clipped = false;
   private malformed = false;
   private error?: string;
+  private usage?: TranscriptUsage;
+  private provider?: string;
+  private model?: string;
 
   async read(files: string[]): Promise<TranscriptSnapshot> {
     // A different instance/history or a truncated file must not share parsing state.
@@ -84,11 +90,13 @@ export class TranscriptReader {
     this.decoder = new StringDecoder("utf8"); this.droppingLine = false;
     this.entries.clear(); this.assistant = undefined; this.user = undefined;
     this.blocks.clear(); this.calls.clear(); this.clipped = false; this.malformed = false; this.error = undefined;
+    this.usage = undefined; this.provider = undefined; this.model = undefined;
   }
   private snapshot(loading: boolean): TranscriptSnapshot {
     const notice = [this.error, this.clipped ? "Showing recent content only; older or oversized content remains in the event logs." : undefined,
       this.malformed ? "Some malformed or incomplete log records were skipped." : undefined].filter(Boolean).join(" ");
-    return { entries: [...this.entries.values()].map(entry => ({ ...entry })), loading, revision: this.revision, ...(notice ? { notice } : {}) };
+    return { entries: [...this.entries.values()].map(entry => ({ ...entry })), loading, revision: this.revision, ...(notice ? { notice } : {}),
+      ...(this.usage ? { usage: { ...this.usage } } : {}), ...(this.provider ? { provider: this.provider } : {}), ...(this.model ? { model: this.model } : {}) };
   }
   private add(entry: TranscriptEntry): TranscriptEntry {
     this.revision++;
@@ -128,7 +136,7 @@ export class TranscriptReader {
         if (part?.type === "toolCall" && typeof part.id === "string") this.tool(part.id, part.name ?? "tool", part.arguments);
       }
       if (typeof message.errorMessage === "string") this.assistant.text += `\n${bounded(message.errorMessage)}`;
-      if (type === "message_end") this.assistant = undefined;
+      if (type === "message_end") { this.countUsage(message); this.assistant = undefined; }
     } else if (message.role === "user") {
       if (!this.user || type === "message_start") this.user = this.add({ id: `user:${++this.serial}`, kind: "user", title: "User", text: "" });
       this.user.text = textOf(message.content);
@@ -137,6 +145,24 @@ export class TranscriptReader {
       const entry = this.tool(message.toolCallId, message.toolName ?? "tool");
       entry.text = textOf(message.content); entry.status = message.isError ? "error" : "done";
     }
+  }
+  /** Sum provider-reported usage per finished assistant message; the last context size is kept separately. */
+  private countUsage(message: Record<string, any>): void {
+    if (typeof message.provider === "string") this.provider = message.provider;
+    if (typeof message.model === "string") this.model = message.model;
+    const usage = object(message.usage);
+    if (!usage) return;
+    if (typeof usage.totalTokens === "number" && Number.isFinite(usage.totalTokens)) this.usage = { ...(this.usage ?? zeroUsage()), contextTokens: usage.totalTokens };
+    const counted = ["input", "output", "cacheRead", "cacheWrite"].some(key => typeof usage[key] === "number" && Number.isFinite(usage[key]));
+    if (!counted) return;
+    const total = this.usage ?? zeroUsage();
+    for (const key of ["input", "output", "cacheRead", "cacheWrite"] as const) {
+      const value = usage[key];
+      if (typeof value === "number" && Number.isFinite(value) && value > 0) total[key] += value;
+    }
+    const cost = object(usage.cost)?.total;
+    if (typeof cost === "number" && Number.isFinite(cost) && cost > 0) total.cost += cost;
+    this.usage = total;
   }
   private event(record: Record<string, any>): void {
     if (["message_start", "message_end", "message_update"].includes(record.type) && object(record.message)) {
