@@ -36,6 +36,8 @@ export interface ConversationViewerOptions {
   intervalMs?: number;
   keybindings?: KeybindingsManager;
   markdownTheme?: ViewerMarkdownTheme;
+  /** Frame color, normally Pi's editor border so the overlay matches the input box. */
+  frameColor?: (text: string) => string;
 }
 
 /** Border, header, two separators, footer and bottom border. */
@@ -60,6 +62,7 @@ export class ConversationViewer {
   private readonly intervalMs: number;
   private readonly keybindings?: KeybindingsManager;
   private readonly markdownTheme?: ViewerMarkdownTheme;
+  private readonly frameColor?: (text: string) => string;
 
   constructor(
     private readonly tui: ViewerTui,
@@ -71,6 +74,7 @@ export class ConversationViewer {
     this.intervalMs = options.intervalMs ?? 500;
     this.keybindings = options.keybindings;
     this.markdownTheme = options.markdownTheme;
+    this.frameColor = options.frameColor;
     void this.refresh();
   }
 
@@ -133,7 +137,8 @@ export class ConversationViewer {
     // Very short terminals drop the frame instead of overflowing the host view.
     const framed = rows >= CHROME_LINES + 1;
     this.viewport = Math.max(1, framed ? rows - CHROME_LINES : rows - 2);
-    const border = this.theme.fg("border", "│");
+    const frame = this.frameColor ?? ((text: string) => this.theme.fg("borderMuted", text));
+    const border = frame("│");
     const row = (content: string): string => {
       const clipped = truncateToWidth(content, inner);
       return `${border} ${clipped}${" ".repeat(Math.max(0, inner - visibleWidth(clipped)))} ${border}`;
@@ -169,16 +174,16 @@ export class ConversationViewer {
     if (agent && !isTerminal(agent.phase)) keys.push("x stop");
     keys.push("Esc close");
     const footer = bar(status, this.theme.fg("dim", keys.join(" · ")));
-    const rule = this.theme.fg("border", `├${"─".repeat(Math.max(0, width - 2))}┤`);
+    const rule = frame(`├${"─".repeat(Math.max(0, width - 2))}┤`);
     if (!framed) return [row(header), ...visible.map((line) => row(line)), footer].map((line) => truncateToWidth(line, width));
     return [
-      this.theme.fg("border", `╭${"─".repeat(Math.max(0, width - 2))}╮`),
+      frame(`╭${"─".repeat(Math.max(0, width - 2))}╮`),
       row(header),
       rule,
       ...visible.map((line) => row(line)),
       rule,
       footer,
-      this.theme.fg("border", `╰${"─".repeat(Math.max(0, width - 2))}╯`),
+      frame(`╰${"─".repeat(Math.max(0, width - 2))}╯`),
     ].map((line) => truncateToWidth(line, width));
   }
 

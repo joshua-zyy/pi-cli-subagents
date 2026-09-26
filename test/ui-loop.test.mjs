@@ -27,6 +27,8 @@ function harness(t) {
     get mode() { return state.mode; },
     sessionManager: { getSessionFile: () => parent, getEntries: () => state.entries },
     ui: {
+      // Pi's editor border follows the thinking level; the viewer reuses it for its frame.
+      theme: { getThinkingBorderColor: () => (text) => text, fg: (_color, text) => text, bg: (_color, text) => text, bold: (text) => text },
       notify(message, type) { state.notices.push({ message, type }); },
       setWidget(key, content, options) { state.widgetCalls.push({ key, content, options }); },
       onTerminalInput(listener) { state.listeners.push(listener); return () => { state.listeners.splice(state.listeners.indexOf(listener), 1); }; },

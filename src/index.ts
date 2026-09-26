@@ -213,7 +213,9 @@ export default function extension(pi: ExtensionAPI): void {
                   viewer = new ConversationViewer(tui, theme, done, async () => {
                     const agent = manager.get(id);
                     return { agent, ...await reader.read(manager.eventLogs(id)) };
-                  }, { keybindings, markdownTheme: getMarkdownTheme() });
+                  }, { keybindings, markdownTheme: getMarkdownTheme(),
+                    // Match Pi's input box: its border follows the main session's thinking level.
+                    frameColor: (text) => ctx.ui.theme.getThinkingBorderColor(ctx.thinkingLevel ?? "off")(text) });
                   return viewer;
                 }, { overlay: true, overlayOptions: { width: "96%", maxHeight: "100%", margin: 1 } });
               } finally { viewer?.dispose(); dismissPanel = undefined; }
