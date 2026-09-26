@@ -46,11 +46,12 @@ function harness(t) {
       async input() { return undefined; },
     },
   };
-  const handlers = {}, tools = new Map(), commands = new Map();
+  const handlers = {}, tools = new Map(), commands = new Map(), shortcuts = new Map();
   const pi = {
     on(name, handler) { handlers[name] = handler; },
     registerTool(tool) { tools.set(tool.name, tool); },
     registerCommand(name, command) { commands.set(name, command); },
+    registerShortcut(key, shortcut) { shortcuts.set(key, shortcut); },
     sendMessage(message, options) { state.messages.push({ message, options }); state.entries.push({ type: 'custom_message', ...message }); },
   };
   const manager = new AgentManager(parent, { command: process.execPath, args: [fixture] });
@@ -64,7 +65,7 @@ function harness(t) {
   });
   return {
     // Getters keep test observations live instead of returning stale primitive snapshots.
-    state, ctx, pi, handlers, tools, commands, manager,
+    state, ctx, pi, handlers, tools, commands, shortcuts, manager,
     get customCalls() { return state.customCalls; },
     get messages() { return state.messages; },
     get notices() { return state.notices; },
@@ -119,7 +120,7 @@ test('panel resumes the original session, confirms stops, and rejects non-TUI us
 
   // Open details, send through the editor, then close the restored list.
   h.editorAnswer = 'RECALL';
-  await h.panel([[keys.enter, 's'], [keys.escape]]);
+  await h.panel([['i', 's'], [keys.escape]]);
   assert.equal(h.customCalls, 2, 'each action reopens the list until Esc closes it');
   assert.match(h.editors[0], /Resume worker/);
   await waitUntil('resumed report', () => h.messages.some((entry) => entry.message.content.includes('panel-token')));
@@ -129,7 +130,7 @@ test('panel resumes the original session, confirms stops, and rejects non-TUI us
   // HOLD is second by start time; stopping an active child needs confirmation.
   const holding = await h.spawn('HOLD');
   await waitUntil('running', () => h.manager.get(holding.id).phase === 'running');
-  await h.panel([[keys.down, keys.enter, 'x'], [keys.escape]]);
+  await h.panel([[keys.down, 'i', 'x'], [keys.escape]]);
   assert.equal(h.confirms.length, 1);
   assert.match(h.confirms[0].title, /Stop/);
   assert.equal(h.manager.get(holding.id).phase, 'stopped');
@@ -147,10 +148,27 @@ test('panel resumes the original session, confirms stops, and rejects non-TUI us
 
 function commands0(h) { return h.commands.get('agents').handler('', h.ctx); }
 
+test('shortcut selects a running child and opens its live conversation directly', { timeout: 15000 }, async t => {
+  const h = harness(t); h.start();
+  assert.ok(h.shortcuts.has('ctrl+alt+a'));
+  const first = await h.spawn('HOLD one');
+  const second = await h.spawn('HOLD two');
+  await waitUntil('both active', () => h.manager.get(first.id).phase === 'running' && h.manager.get(second.id).phase === 'running');
+  h.state.scripts.push([keys.down, keys.enter], async viewer => {
+    await waitUntil('selected agent loaded', () => viewer.render(100).join('\n').includes(second.id.slice(0,8)));
+    assert.match(viewer.render(100).join('\n'), /HOLD two/);
+    viewer.handleInput('q');
+  }, [keys.escape]);
+  await h.shortcuts.get('ctrl+alt+a').handler(h.ctx);
+  assert.equal(h.customCalls,3);
+  assert.equal(h.manager.get(first.id).phase,'running');
+  assert.equal(h.manager.get(second.id).phase,'running');
+});
+
 test('conversation is wired to live worker logs and remains open after completion', { timeout: 15000 }, async t => {
   const h = harness(t); h.start();
   const agent = await h.spawn('STREAM');
-  await h.panel([[keys.enter, 'v'], async viewer => {
+  await h.panel([[keys.enter], async viewer => {
     const text = () => viewer.render(120).join('\n');
     await waitUntil('streaming tool details', () => text().includes('partial fixture output'));
     assert.match(text(), /src\/example.ts/);
@@ -168,7 +186,7 @@ test('conversation is wired to live worker logs and remains open after completio
 test('session shutdown dismisses a live viewer without stopping its child or reopening the list', { timeout: 15000 }, async t => {
   const h = harness(t); h.start();
   const agent = await h.spawn('HOLD ui-lifecycle');
-  await h.panel([[keys.enter, 'v'], async viewer => {
+  await h.panel([[keys.enter], async viewer => {
     await waitUntil('viewer initialized', () => viewer.render(120).join('\n').includes('worker'));
     h.handlers.session_shutdown();
   }]);

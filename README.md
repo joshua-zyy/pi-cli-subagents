@@ -12,7 +12,7 @@ A lightweight Pi extension for delegating work to real, reusable Pi CLI sessions
 - Review in a separate conversation, not an automatically created worktree. The parent coordinates writes in the shared working directory.
 - Inherit CLI model and permission configuration unless a role overrides the model. Report unresolved interactions instead of silently approving them.
 
-The first version targets **Pi → Pi**. It does not introduce a workflow DSL, remote service, web dashboard, automatic worktrees, nested delegation, or token budgeting. Codex and Claude adapters are not implemented.
+The first version targets **Pi → Pi**. It does not introduce a workflow DSL, remote service, web dashboard, automatic worktrees, nested delegation, or token budgeting. The lifecycle takes inspiration from Paseo; live child navigation takes inspiration from tintinweb/pi-subagents. Later phases may add OpenCode CLI, Codex CLI, Claude Code CLI, and Grok Build CLI adapters, then revisit subagent management patterns inspired by Codex. These later phases are not part of V1.
 
 ## Development and local loading
 
@@ -48,9 +48,9 @@ The parent must have a persistent session; `--no-session` cannot own subagents. 
 
 The status widget above the editor shows role, phase, recent tool activity, and elapsed time. Waiting requests take priority. Active instances have a second activity line; finished instances collapse to one line, linger for 30 seconds, and then disappear. No widget space is reserved when there is nothing to show.
 
-### `/agents`
+### `/agents` and the live roster shortcut
 
-Use **Up/Down** to select an instance and **Enter** to open its summary. The summary contains the task, latest activity, result or error, native session, log path, and pending request.
+Press **Ctrl+Alt+A** from Pi's main editor to open the agent roster while children are running; no need to wait for them to finish or send the main model a prompt. `/agents` opens the same roster when commands are available. Use **Up/Down** to select any instance and **Enter** (or **v**) to open its live conversation immediately; **i** opens its summary. The summary contains the task, latest activity, result or error, native session, log path, and pending request.
 
 | Key in the summary | Action |
 | --- | --- |
@@ -61,7 +61,7 @@ Use **Up/Down** to select an instance and **Enter** to open its summary. The sum
 | `Esc` / `Left` | Return to the list. |
 | `q` | Close the panel. |
 
-The conversation viewer reads existing event logs incrementally. It shows user and assistant text, tool arguments, partial and final tool output, and errors across the instance's runs. It supports both cumulative and delta-only Pi RPC streaming formats. It stays open when the child finishes. This is an execution transcript, not a viewer for hidden reasoning or binary attachments.
+The viewer is non-blocking with respect to child execution: closing it does not stop a child. Keyboard shortcuts apply while Pi's main editor has focus, not during another modal dialog. The conversation viewer reads existing event logs incrementally. It shows user and assistant text, tool arguments, partial and final tool output, and errors across the instance's runs. It supports both cumulative and delta-only Pi RPC streaming formats. It stays open when the child finishes. This is an execution transcript, not a viewer for hidden reasoning or binary attachments.
 
 - New output is followed automatically. **Up/Down** or **Page Up/Page Down** scroll; scrolling up pauses following.
 - **Home** goes to the oldest retained entry; **End** returns to live following.

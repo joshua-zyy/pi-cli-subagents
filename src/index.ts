@@ -1,4 +1,5 @@
 import { Type } from "@earendil-works/pi-ai";
+import { Key } from "@earendil-works/pi-tui";
 import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { AgentManager } from "./manager.js";
 import { deliverReports } from "./notifier.js";
@@ -170,9 +171,7 @@ export default function extension(pi: ExtensionAPI): void {
   });
 
   let panelBusy = false;
-  pi.registerCommand("agents", {
-    description: "Manage subagents: view live conversations, results and errors, message, resume, reply or stop",
-    handler: async (_args, ctx) => {
+  async function openAgents(ctx: ExtensionContext): Promise<void> {
       // custom() returns undefined in RPC mode; terminal panels are TUI-only.
       if (ctx.mode !== "tui") { ctx.ui.notify("The panel requires a TUI; use list_agents / send_input / close_agent or /agent-reply instead.", "error"); return; }
       // Keep one panel/action loop per extension instance so concurrent commands cannot compete for input.
@@ -233,6 +232,13 @@ export default function extension(pi: ExtensionAPI): void {
         }
       } catch (error) { ctx.ui.notify((error as Error).message, "error"); }
       finally { dismissPanel = undefined; panelBusy = false; }
-    },
+  }
+  pi.registerCommand("agents", {
+    description: "Manage subagents: view live conversations, results and errors, message, resume, reply or stop",
+    handler: (_args, ctx) => openAgents(ctx),
+  });
+  pi.registerShortcut(Key.ctrlAlt("a"), {
+    description: "Open the subagent roster while the parent is working",
+    handler: openAgents,
   });
 }

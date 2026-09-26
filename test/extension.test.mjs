@@ -28,6 +28,7 @@ test('extension tools implement → separate review → resume same implementer;
     on(name, handler) { handlers[name] = handler; },
     registerTool(tool) { tools.set(tool.name, tool); },
     registerCommand(name, command) { commands.set(name, command); },
+    registerShortcut() {},
     sendMessage(message, options) {
       messages.push({ message, options });
       entries.push({ type: 'custom_message', ...message });

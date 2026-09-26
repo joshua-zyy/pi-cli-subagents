@@ -18,7 +18,7 @@ test('parent can explicitly review a child request while the human command remai
   const ctx = {cwd, hasUI:true, isProjectTrusted:()=>false,
     sessionManager:{ getSessionFile:()=>parent, getEntries:()=>[] },
     ui:{notify:(message)=>notices.push(message),confirm:async()=>{confirmations++;return false;}}};
-  extension({on(){},registerTool(tool){tools.set(tool.name,tool)},registerCommand(name,def){commands.set(name,def)}});
+  extension({on(){},registerTool(tool){tools.set(tool.name,tool)},registerCommand(name,def){commands.set(name,def)},registerShortcut(){}});
   const manager = new AgentManager(parent,{command:process.execPath,args:[fixture]});
   t.after(async()=>{for(const s of manager.list())if(processAlive(s.workerPid))await manager.close(s.id);process.argv[1]=saved;});
   assert.ok(tools.has('list_pending_permissions'));
@@ -58,7 +58,7 @@ test('permission tools reject foreign parents, missing persistent sessions and i
   const cwd=fs.mkdtempSync(path.join(out,'permission-scope-'));
   const parent=path.join(cwd,'parent.jsonl'),foreign=path.join(cwd,'foreign.jsonl');
   fs.writeFileSync(parent,'{}\n');fs.writeFileSync(foreign,'{}\n');
-  const tools=new Map();extension({on(){},registerTool(tool){tools.set(tool.name,tool)},registerCommand(){}});
+  const tools=new Map();extension({on(){},registerTool(tool){tools.set(tool.name,tool)},registerCommand(){},registerShortcut(){}});
   const manager=new AgentManager(parent,{command:process.execPath,args:[fixture]});
   t.after(async()=>{for(const state of manager.list())if(processAlive(state.workerPid))await manager.close(state.id);process.argv[1]=saved;});
   let current=parent;

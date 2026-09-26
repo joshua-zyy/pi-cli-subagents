@@ -63,7 +63,8 @@ export class AgentsPanel {
     if (this.view === "list") {
       if (matchesKey(data, "up")) this.index = Math.max(0, this.index - 1);
       else if (matchesKey(data, "down")) this.index = Math.min(this.agents.length - 1, this.index + 1);
-      else if (matchesKey(data, "return")) { if (agent) { this.view = "detail"; this.scroll = 0; } }
+      else if (agent && (matchesKey(data, "return") || matchesKey(data, "v"))) this.finish({ kind: "view", id: agent.id });
+      else if (agent && matchesKey(data, "i")) { this.view = "detail"; this.scroll = 0; }
       else if (matchesKey(data, "escape") || matchesKey(data, "q")) this.finish(undefined);
       return;
     }
@@ -122,7 +123,7 @@ export class AgentsPanel {
       lines.push(this.hint([["esc", "close"]]));
       return lines;
     }
-    lines.push(this.hint([["↑↓", "select"], ["enter", "details"], ["esc", "close"]]));
+    lines.push(this.hint([["↑↓", "select"], ["enter/v", "conversation"], ["i", "details"], ["esc", "close"]]));
     const selected = Math.min(this.index, this.agents.length - 1);
     const visible = Math.min(this.maxRows, this.agents.length, this.rows > 0 ? Math.max(1, this.rows - 4) : this.maxRows);
     const start = selected < visible ? 0 : selected - visible + 1;

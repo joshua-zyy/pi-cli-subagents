@@ -28,7 +28,7 @@ test('terminal elapsed time freezes at updatedAt', () => {
 });
 test('active instances use two rows with a closing connector on the last entry', () => {
   const rows = lines([view({ lastActivity: 'tool_execution_start: bash' })]);
-  assert.match(rows[0], /^● Subagents · 1 running$/);
+  assert.match(rows[0], /^● Subagents · 1 running · Ctrl\+Alt\+A view$/);
   assert.match(rows[1], /^└─ ⠋ worker {2}Implement UI +· Running · 10\.0s$/);
   assert.match(rows[2], /^ {3}⎿ tool_execution_start: bash$/);
   const pair = lines([view({ id: 'a1', task: 'First' }), view({ id: 'a2', startedAt: 2000, task: 'Second' })]);

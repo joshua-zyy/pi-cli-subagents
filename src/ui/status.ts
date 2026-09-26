@@ -70,7 +70,8 @@ export function statusLines(agents: AgentView[], options: StatusLinesOptions): s
       .filter(([count]) => Number(count) > 0).map(([count, label]) => `${count} ${label}`);
     const color = waiting.length || active.length ? "accent" : "dim";
     return theme.fg(color, `${waiting.length || active.length ? "●" : "○"} Subagents`) +
-      (counts.length ? theme.fg("dim", ` · ${counts.join(" · ")}`) : "");
+      (counts.length ? theme.fg("dim", ` · ${counts.join(" · ")}`) : "") +
+      theme.fg("dim", " · Ctrl+Alt+A view");
   };
   if (!waiting.length && !active.length && !finished.length) return [];
 
