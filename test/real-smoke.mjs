@@ -2,12 +2,13 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { randomBytes } from 'node:crypto';
 import { AgentManager } from '../dist/manager.js';
 import { defaultRoles } from '../dist/roles.js';
 import { processAlive, waitUntil } from '../dist/storage.js';
 
-const cli = process.env.PI_CLI_PATH ?? 'D:/software/node22_21.0/node_global/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js';
+const cli = process.env.PI_CLI_PATH ?? path.join(path.dirname(fileURLToPath(import.meta.resolve('@earendil-works/pi-coding-agent'))), 'bundle', 'cli.js');
 const root = path.resolve('.test-output'); fs.mkdirSync(root, {recursive:true});
 const cwd = fs.mkdtempSync(path.join(root, 'real-'));
 const parent = path.join(cwd, 'parent.jsonl'); fs.writeFileSync(parent,'{}\n');

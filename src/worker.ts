@@ -10,12 +10,12 @@ async function run(dir: string, runId: string): Promise<void> {
   const runDir = path.join(dir, "runs", runId);
   const spec = readJson<AgentSpec>(path.join(dir, "spec.json"))!;
   const start = readJson<StartRequest>(path.join(runDir, "request.json"))!;
-  if (!spec || spec.version !== 1 || start?.runId !== runId) throw new Error("无效的启动记录");
+  if (!spec || spec.version !== 1 || start?.runId !== runId) throw new Error("Invalid startup record");
   const lockFile = path.join(dir, "owner.lock");
   const lock = openSync(lockFile, "wx", 0o600);
   writeFileSync(lock, JSON.stringify({ pid: process.pid, runId }));
   const state: AgentState = {
-    id: spec.id, runId, phase: "starting", workerPid: process.pid,
+    id: spec.id, runId, phase: "starting", workerPid: process.pid, startedAt: Date.now(),
     updatedAt: Date.now(), accepted: false, questions: [], logFile: path.join(runDir, "events.jsonl"),
   };
   const save = () => { state.updatedAt = Date.now(); writeJson(path.join(dir, "state.json"), state); };
@@ -53,7 +53,7 @@ async function run(dir: string, runId: string): Promise<void> {
         const result = await (stop ? rpc.stop() : rpc.end());
         state.exitCode = result.exit.code; state.forced = result.forced;
         if (status === "completed" && (result.exit.code !== 0 || result.forced)) {
-          status = "failed"; error = "回合结束，但子 Pi 未正常退出；请检查日志。";
+          status = "failed"; error = "The turn ended but child Pi did not exit cleanly; inspect the logs.";
         }
       }
       const text = Array.isArray(assistant?.content) ? assistant.content.filter((part: WireRecord) => part.type === "text").map((part: WireRecord) => part.text).join("") : "";
@@ -75,7 +75,7 @@ async function run(dir: string, runId: string): Promise<void> {
     if (record.type === "extension_ui_request" &&
       (record.method === "select" || record.method === "confirm" || record.method === "input" || record.method === "editor")) {
       const question: Question = {
-        id: String(record.id), method: record.method, title: String(record.title ?? "子代理等待处理"),
+        id: String(record.id), method: record.method, title: String(record.title ?? "Subagent needs a response"),
         message: typeof record.message === "string" ? record.message : undefined,
         options: record.options, placeholder: record.placeholder, prefill: record.prefill,
         ...(typeof record.timeout === "number" ? { expiresAt: Date.now() + record.timeout } : {}),
@@ -94,30 +94,30 @@ async function run(dir: string, runId: string): Promise<void> {
     if (record.type === "agent_settled") {
       const reason = assistant?.stopReason;
       void finish(reason === "stop" ? "completed" : reason === "aborted" ? "stopped" : "failed",
-        reason === "stop" || reason === "aborted" ? undefined : String(assistant?.errorMessage ?? `未正常完成：${reason ?? "缺少最终消息"}`));
+        reason === "stop" || reason === "aborted" ? undefined : String(assistant?.errorMessage ?? `Did not complete normally: ${reason ?? "missing final message"}`));
     }
   }
 
   async function dispatch(input: Control): Promise<AgentState> {
     if (input.type === "status") return state;
-    if (input.type === "close") { void finish("stopped", "主 agent 请求关闭", true); return state; }
-    if (ending || !rpc) throw new Error("本条未受理：执行端正在启动或收尾，请先查看状态。");
+    if (input.type === "close") { void finish("stopped", "Parent requested shutdown", true); return state; }
+    if (ending || !rpc) throw new Error("Not accepted: worker is starting or shutting down; inspect its state first.");
     if (input.type === "send") {
-      if (!state.accepted) throw new Error("初始任务尚未受理，请先处理启动交互。");
-      if (state.questions.length) throw new Error("子代理等待用户处理；使用 /agent-reply，不要将消息当作审批答复。");
-      if (typeof input.message !== "string" || !input.message.trim() || !["steer", "followUp"].includes(input.mode)) throw new Error("无效消息或发送模式");
+      if (!state.accepted) throw new Error("Initial task has not been accepted; resolve any startup interaction first.");
+      if (state.questions.length) throw new Error("The child is waiting for a human response. Use /agent-reply; a message is not an approval.");
+      if (typeof input.message !== "string" || !input.message.trim() || !["steer", "followUp"].includes(input.mode)) throw new Error("Invalid message or delivery mode");
       await rpc.request({ type: "prompt", message: input.message, streamingBehavior: input.mode });
     } else if (input.type === "reply") {
       const q = state.questions.find((q) => q.id === input.id);
-      if (!q) throw new Error("交互请求已结束或不存在");
+      if (!q) throw new Error("The interaction has ended or does not exist");
       if (!input.cancelled) {
-        if (q.method === "confirm" ? typeof input.confirmed !== "boolean" : typeof input.value !== "string") throw new Error("答复类型不匹配");
-        if (q.method === "select" && !q.options?.includes(input.value!)) throw new Error("选项不匹配");
+        if (q.method === "confirm" ? typeof input.confirmed !== "boolean" : typeof input.value !== "string") throw new Error("Response type does not match the question");
+        if (q.method === "select" && !q.options?.includes(input.value!)) throw new Error("Response is not one of the available options");
       }
       await rpc.reply({ id: q.id, value: input.value, confirmed: input.confirmed, cancelled: input.cancelled });
       state.questions = state.questions.filter((item) => item !== q);
       if (!ending) { state.phase = state.questions.length ? "waiting" : state.accepted ? "running" : "starting"; save(); }
-    } else throw new Error("未知控制操作");
+    } else throw new Error("Unknown control operation");
     return state;
   }
 
@@ -131,7 +131,7 @@ async function run(dir: string, runId: string): Promise<void> {
       }
       try {
         let body = "";
-        for await (const chunk of req) { body += chunk; if (body.length > 1024 * 1024) throw new Error("控制消息过大"); }
+        for await (const chunk of req) { body += chunk; if (body.length > 1024 * 1024) throw new Error("Control message is too large"); }
         const input = JSON.parse(body) as Control;
         const operation = commandQueue.then(() => dispatch(input));
         commandQueue = operation.then(() => {}, () => {});
@@ -142,7 +142,7 @@ async function run(dir: string, runId: string): Promise<void> {
     server.requestTimeout = 40_000;
     await new Promise<void>((resolve, reject) => { server!.once("error", reject); server!.listen(0, "127.0.0.1", resolve); });
     const address = server.address();
-    if (!address || typeof address === "string") throw new Error("没有本地控制地址");
+    if (!address || typeof address === "string") throw new Error("Local control address is unavailable");
     writeJson(path.join(dir, "endpoint.json"), { port: address.port, token, runId });
     const sessions = path.join(dir, "sessions"); mkdirSync(sessions, { recursive: true, mode: 0o700 });
     const args = ["--mode", "rpc", "--session-dir", sessions, "--append-system-prompt", `# Delegated role: ${spec.roleName}\n${spec.role.instructions}`];
@@ -154,11 +154,11 @@ async function run(dir: string, runId: string): Promise<void> {
     rpc = new PiProcess(spec.launch, args, spec.cwd, state.logFile, event);
     state.cliPid = rpc.child.pid; save();
     rpc.closed.then((exit) => {
-      if (!ending) void finish("failed", `子 Pi 未到 agent_settled 即退出 (${exit.code ?? exit.signal})`);
+      if (!ending) void finish("failed", `Child Pi exited before agent_settled (${exit.code ?? exit.signal})`);
     });
     const initial = await rpc.request({ type: "get_state" });
-    if (typeof initial.sessionId !== "string" || typeof initial.sessionFile !== "string") throw new Error("Pi 未提供持久会话句柄");
-    if (start.session && (initial.sessionId !== start.session.sessionId || path.resolve(initial.sessionFile) !== path.resolve(start.session.sessionFile))) throw new Error("恢复返回了不同会话，拒绝继续执行");
+    if (typeof initial.sessionId !== "string" || typeof initial.sessionFile !== "string") throw new Error("Pi did not provide persistent session handles");
+    if (start.session && (initial.sessionId !== start.session.sessionId || path.resolve(initial.sessionFile) !== path.resolve(start.session.sessionFile))) throw new Error("Resume returned a different session; refusing to continue");
     state.sessionId = initial.sessionId; state.sessionFile = initial.sessionFile; save();
     if (!ending) {
       await rpc.request({ type: "prompt", message: start.message });

@@ -30,5 +30,5 @@ test('only a human command can respond to a blocking UI question', {timeout:1200
   await waitUntil('complete',()=>manager.get(id).phase==='completed'&&!processAlive(manager.get(id).workerPid));
   assert.equal(confirmations,1);
   assert.equal(manager.get(id).text,'DENY');
-  assert.ok(notices.some(message=>message.includes('已向子代理')));
+  assert.ok(notices.some(message=>message.includes('Human response sent to subagent')));
 });

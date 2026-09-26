@@ -41,5 +41,5 @@ test('a crashed delivery before append retries; after append does not', () => {
 
 test('no-session parent must fail closed rather than create unowned agents', async () => {
   const { parentManager } = await import('../dist/index.js');
-  assert.throws(() => parentManager({ sessionManager: { getSessionFile: () => undefined } }, { command: 'pi', args: [] }), /持久主会话/);
+  assert.throws(() => parentManager({ sessionManager: { getSessionFile: () => undefined } }, { command: 'pi', args: [] }), /persistent parent session/);
 });

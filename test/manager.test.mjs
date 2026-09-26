@@ -134,9 +134,9 @@ test('missing sessions, foreign ids and path traversal fail closed', { timeout: 
   const start = await manager.spawn('worker', defaultRoles.worker, cwd, 'DONE');
   const done = await complete(manager, start.id);
   fs.renameSync(done.sessionFile, `${done.sessionFile}.backup`);
-  await assert.rejects(manager.send(done.id, 'RECALL'), /不会静默新建/);
-  assert.throws(() => manager.get('../anything'), /无效/);
-  assert.throws(() => new AgentManager(`${parent}.other`, launch).get(done.id), /不属于/);
+  await assert.rejects(manager.send(done.id, 'RECALL'), /will not silently create/);
+  assert.throws(() => manager.get('../anything'), /Invalid/);
+  assert.throws(() => new AgentManager(`${parent}.other`, launch).get(done.id), /does not belong/);
 });
 
 test('racing resumes cannot start two CLI owners for the same session', { timeout: 20_000 }, async t => {

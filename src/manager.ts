@@ -19,30 +19,43 @@ export class AgentManager {
   }
 
   private directory(id: string): string {
-    if (!idPattern.test(id)) throw new Error("无效 agent id");
+    if (!idPattern.test(id)) throw new Error("Invalid agent id");
     return path.join(this.root, id);
   }
   private spec(id: string): AgentSpec {
     const spec = readJson<AgentSpec>(path.join(this.directory(id), "spec.json"));
-    if (!spec || spec.version !== 1 || spec.parentFile !== this.parentFile || spec.id !== id) throw new Error("该子代理不属于当前主会话，或记录不存在");
+    if (!spec || spec.version !== 1 || spec.parentFile !== this.parentFile || spec.id !== id) throw new Error("This subagent does not belong to the current parent session, or its record is missing");
     return spec;
   }
   get(id: string): AgentView {
     const spec = this.spec(id), dir = this.directory(id);
     let state = readJson<AgentState>(path.join(dir, "state.json"));
-    if (!state) throw new Error(`子代理 ${id} 尚未建立运行状态；检查 ${dir}`);
+    if (!state) throw new Error(`Subagent ${id} has no runtime state yet; inspect ${dir}`);
     if (["starting", "running", "waiting", "stopping"].includes(state.phase) && !processAlive(state.workerPid)) {
-      state = { ...state, phase: "unreachable", error: "后台执行端已退出，任务状态不确定；禁止另起实例重复执行。检查日志与 owner.lock。" };
+      state = { ...state, phase: "unreachable", error: "The worker exited and task status is uncertain. Do not start duplicate work; inspect the logs and owner.lock." };
     }
     const report = state.resultFile ? readJson<Report>(state.resultFile) : undefined;
-    return { ...state, role: spec.roleName, cwd: spec.cwd, ...(report ? shorten(report.text) : {}) };
+    const request = readJson<StartRequest>(path.join(dir, "runs", state.runId, "request.json"));
+    const task = request?.message ? request.message.replace(/\s+/g, " ").trim().slice(0, 200) : undefined;
+    return { ...state, role: spec.roleName, cwd: spec.cwd, ...(task ? { task } : {}), ...(report ? shorten(report.text) : {}) };
   }
   list(): AgentView[] { return directories(this.root).filter((id) => idPattern.test(id)).map((id) => this.get(id)); }
 
+  /** Return only this parent's validated run logs, ordered by request creation time. */
+  eventLogs(id: string): string[] {
+    this.spec(id);
+    const root = path.join(this.directory(id), "runs");
+    return directories(root).filter(runId => idPattern.test(runId)).map(runId => {
+      const folder = path.join(root, runId);
+      const request = path.join(folder, "request.json");
+      return { file: path.join(folder, "events.jsonl"), time: statSync(request).mtimeMs };
+    }).sort((a, b) => a.time - b.time || a.file.localeCompare(b.file)).map(run => run.file);
+  }
+
   async spawn(roleName: string, role: Role, cwd: string, message: string): Promise<AgentView> {
-    if (!message.trim()) throw new Error("任务不能为空");
+    if (!message.trim()) throw new Error("Task must not be empty");
     cwd = path.resolve(cwd);
-    if (!statSync(cwd).isDirectory()) throw new Error("cwd 必须是现有目录");
+    if (!statSync(cwd).isDirectory()) throw new Error("cwd must be an existing directory");
     const id = randomUUID(), dir = this.directory(id);
     mkdirSync(dir, { recursive: true, mode: 0o700 });
     const spec: AgentSpec = { version: 1, id, parentFile: this.parentFile, cwd, roleName, role, launch: this.launch, createdAt: Date.now() };
@@ -52,8 +65,8 @@ export class AgentManager {
 
   private async start(id: string, message: string, session?: SessionHandle): Promise<AgentView> {
     const dir = this.directory(id);
-    if (existsSync(path.join(dir, "owner.lock"))) throw new Error("原执行端尚未释放或存在旧锁；先检查状态，不能并发恢复同一 session。");
-    if (session && !existsSync(session.sessionFile)) throw new Error(`原 session 文件丢失：${session.sessionFile}；不会静默新建。`);
+    if (existsSync(path.join(dir, "owner.lock"))) throw new Error("The previous worker still owns this session or a stale lock remains. Inspect it before resuming; concurrent owners are not allowed.");
+    if (session && !existsSync(session.sessionFile)) throw new Error(`Original session file is missing: ${session.sessionFile}; will not silently create a new session.`);
     const runId = randomUUID(), runDir = path.join(dir, "runs", runId);
     mkdirSync(runDir, { recursive: true, mode: 0o700 });
     const initial: StartRequest = { runId, message, session };
@@ -67,7 +80,7 @@ export class AgentManager {
       child.unref();
     } finally { closeSync(fd); }
     try {
-      return await waitUntil(`子代理 ${id} 启动`, () => {
+      return await waitUntil(`Subagent ${id} startup`, () => {
         const failure = readJson<{ error: string }>(path.join(runDir, "error.json"));
         if (failure) throw new Error(failure.error);
         const state = readJson<AgentState>(path.join(dir, "state.json"));
@@ -77,20 +90,20 @@ export class AgentManager {
         return view.accepted || ["waiting", "failed", "stopped", "completed"].includes(view.phase) ? view : undefined;
       }, 45_000);
     } catch (error) {
-      throw new Error(`子代理 ${id}: ${(error as Error).message}；记录保留于 ${dir}`);
+      throw new Error(`Subagent ${id}: ${(error as Error).message}; records retained at ${dir}`);
     }
   }
 
   private async request(id: string, input: Control): Promise<void> {
     const state = this.get(id);
-    if (!processAlive(state.workerPid)) throw new Error("执行端已退出；请查看最终状态");
+    if (!processAlive(state.workerPid)) throw new Error("Worker has exited; inspect the final state");
     const endpoint = readJson<Endpoint>(path.join(this.directory(id), "endpoint.json"));
-    if (!endpoint || endpoint.runId !== state.runId) throw new Error("执行端尚未就绪，或连接记录过期");
+    if (!endpoint || endpoint.runId !== state.runId) throw new Error("Worker is not ready, or the connection record is stale");
     await control(endpoint, input);
   }
 
   async send(id: string, message: string, mode: Delivery = "steer"): Promise<AgentView> {
-    if (!message.trim()) throw new Error("消息不能为空");
+    if (!message.trim()) throw new Error("Message must not be empty");
     let state = this.get(id);
     if (state.phase === "unreachable") throw new Error(state.error);
     if (["starting", "running", "waiting"].includes(state.phase)) {
@@ -98,10 +111,10 @@ export class AgentManager {
       return this.get(id);
     }
     if (processAlive(state.workerPid)) {
-      await waitUntil("上一轮进程释放", () => !processAlive(state.workerPid), 15_000);
+      await waitUntil("Previous worker release", () => !processAlive(state.workerPid), 15_000);
       state = this.get(id);
     }
-    if (!state.sessionFile || !state.sessionId) throw new Error("没有可恢复的原 session；不会静默新建");
+    if (!state.sessionFile || !state.sessionId) throw new Error("No resumable original session; will not silently create a new session");
     return this.start(id, message, { sessionFile: state.sessionFile, sessionId: state.sessionId });
   }
 
@@ -110,7 +123,7 @@ export class AgentManager {
     if (state.phase === "unreachable") throw new Error(state.error);
     if (processAlive(state.workerPid)) {
       if (!["completed", "failed", "stopped", "stopping"].includes(state.phase)) await this.request(id, { type: "close" });
-      await waitUntil("子代理关闭", () => !processAlive(state.workerPid), 30_000);
+      await waitUntil("Subagent shutdown", () => !processAlive(state.workerPid), 30_000);
     }
     return this.get(id);
   }

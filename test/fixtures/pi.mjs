@@ -32,6 +32,17 @@ function handle(cmd) {
   session.messages.push({ role: 'user', content: cmd.message }); save();
   active = true; response(cmd); emit({ type: 'agent_start' });
   if (cmd.message.startsWith('HOLD')) return;
+  if (cmd.message === 'STREAM') {
+    emit({ type: 'message_start', message: { role: 'assistant', content: [] } });
+    emit({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', contentIndex: 0, delta: 'Inspecting implementation' } });
+    emit({ type: 'tool_execution_start', toolCallId: 'stream-call', toolName: 'read', args: { path: 'src/example.ts' } });
+    emit({ type: 'tool_execution_update', toolCallId: 'stream-call', toolName: 'read', partialResult: { content: [{ type: 'text', text: 'partial fixture output' }] } });
+    setTimeout(() => {
+      emit({ type: 'tool_execution_end', toolCallId: 'stream-call', toolName: 'read', result: { content: [{ type: 'text', text: 'final fixture output' }] }, isError: false });
+      finish('Implementation complete');
+    }, 1500);
+    return;
+  }
   if (cmd.message === 'WAIT') {
     question = true;
     emit({ type: 'extension_ui_request', id: 'permission-1', method: 'confirm', title: 'Allow fixture operation?', message: 'Requires a human answer' });
@@ -41,7 +52,7 @@ function handle(cmd) {
   if (cmd.message === 'CRASH') return process.exit(2);
   if (cmd.message.startsWith('REMEMBER ')) { session.token = cmd.message.slice(9); save(); return finish('OK'); }
   if (cmd.message === 'RECALL') return finish(session.token ?? 'MISSING');
-  if (cmd.message === 'UNICODE') return finish('A\u2028B\u2029雪');
+  if (cmd.message === 'UNICODE') return finish('A\u2028B\u2029\u96ea');
   finish(cmd.message);
 }
 process.stdin.setEncoding('utf8');

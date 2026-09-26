@@ -39,6 +39,8 @@ export interface AgentState extends Partial<SessionHandle> {
   phase: Phase;
   workerPid: number;
   cliPid?: number;
+  /** Start time of this run; old records fall back to updatedAt. */
+  startedAt?: number;
   updatedAt: number;
   accepted: boolean;
   questions: Question[];
@@ -67,6 +69,8 @@ export interface Report {
 export interface AgentView extends AgentState {
   role: string;
   cwd: string;
+  /** Optional one-line summary of the current run's task. */
+  task?: string;
   text?: string;
   truncated?: boolean;
 }

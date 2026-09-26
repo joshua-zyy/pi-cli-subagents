@@ -68,12 +68,12 @@ export class PiProcess {
         if (!line.trim()) continue;
         try {
           const record: WireRecord = JSON.parse(line);
-          if (!record || typeof record.type !== "string") throw new Error("Pi stdout 不是有效 RPC 记录");
+          if (!record || typeof record.type !== "string") throw new Error("Pi stdout is not a valid RPC record");
           const entry = typeof record.id === "string" ? this.pending.get(record.id) : undefined;
           if (record.type === "response" && entry) {
             this.pending.delete(record.id!);
             if (record.success === true) entry.resolve(record.data ?? {});
-            else entry.reject(new Error(String(record.error ?? "RPC 命令失败")));
+            else entry.reject(new Error(String(record.error ?? "RPC command failed")));
           } else onRecord(record);
         } catch (error) { fail(error as Error); void this.kill(); return; }
       }
@@ -82,7 +82,7 @@ export class PiProcess {
     this.child.stdin.on("error", fail);
     this.closed = new Promise((resolve) => {
       this.child.once("close", (code, signal) => {
-        fail(this.exitError ?? new Error(`子 Pi 已退出 (${code ?? signal})`));
+        fail(this.exitError ?? new Error(`Child Pi exited (${code ?? signal})`));
         output.end();
         resolve({ code, signal });
       });
@@ -95,7 +95,7 @@ export class PiProcess {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
-        reject(new Error(`Pi RPC ${command.type} 超时，受理状态未知；请检查实例，不要重复派发。`));
+        reject(new Error(`Pi RPC ${command.type} timed out; acceptance is uncertain. Inspect the instance before retrying.`));
       }, timeout);
       this.pending.set(id, {
         resolve: (value) => { clearTimeout(timer); resolve(value as T); },

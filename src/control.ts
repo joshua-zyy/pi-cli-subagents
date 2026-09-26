@@ -14,12 +14,12 @@ export function control(endpoint: Endpoint, input: Control): Promise<AgentState>
       res.on("end", () => {
         try {
           const value = JSON.parse(body);
-          if (res.statusCode !== 200) reject(new Error(value.error ?? `控制端 HTTP ${res.statusCode}`));
+          if (res.statusCode !== 200) reject(new Error(value.error ?? `Control endpoint HTTP ${res.statusCode}`));
           else resolve(value);
         } catch (error) { reject(error); }
       });
     });
-    req.setTimeout(35_000, () => req.destroy(new Error("控制请求超时，受理情况未知；请检查实例，不要直接重发。")));
+    req.setTimeout(35_000, () => req.destroy(new Error("Control request timed out; acceptance is uncertain. Inspect the instance before retrying.")));
     req.on("error", reject);
     req.end(JSON.stringify(input));
   });

@@ -1,52 +1,111 @@
 # pi-cli-subagents
 
-为 Pi 提供轻量、本地的 CLI 子代理管理能力。主 agent 使用工具派发和管理真实 CLI 会话，skill 指导任务拆分与调度；扩展不内置自动工作流系统。
+A lightweight Pi extension for delegating work to real, reusable Pi CLI sessions. The parent agent chooses what to delegate; the extension manages execution and lifecycle, and a bundled skill guides delegation.
 
-## 第一阶段范围
+**Status: work in progress.** The Pi-to-Pi collaboration loop has been exercised, but that is not a claim that every lifecycle and terminal interaction is production-ready.
 
-1. 先打通 **Pi → Pi**：异步派发、中途追加、状态与实例发现、停止/关闭、完成汇报。
-2. 保留稳定子代理身份和原生会话；本轮完成后可再次调用同一子会话。
-3. 运行中的子任务不因主 Pi 退出而取消；完成后允许释放进程，保留结果与会话供恢复。
-4. 审查使用独立会话，不自动创建 worktree；共享目录时由主 agent 协调，避免冲突写入。
-5. 沿用 CLI 已有模型和权限配置；无法自行处理的审批或交互明确报告“等待处理”，不自动扩大权限。
+## Scope
 
-运行中的实例应重连，已释放的实例应恢复原 session，不能静默新建或重复执行。主 Pi 离线时只继续已收到的任务；后续调度仍由主 agent 决定。
+- Dispatch independent Pi CLI sessions asynchronously, send further instructions, inspect instances, stop work, and receive reports.
+- Preserve the agent ID and native session across turns. Finished CLI processes may exit; later instructions resume the original session, never a silent replacement.
+- Keep accepted child work running when the parent Pi exits. Results are saved and replayed when the original persistent parent session returns.
+- Review in a separate conversation, not an automatically created worktree. The parent coordinates writes in the shared working directory.
+- Inherit CLI model and permission configuration unless a role overrides the model. Report unresolved interactions instead of silently approving them.
 
-第一阶段不接入 Codex/Claude，不建设多端平台、全局常驻服务、工作流 DSL、额外子代理展示界面或 token 预算机制。
+The first version targets **Pi → Pi**. It does not introduce a workflow DSL, remote service, web dashboard, automatic worktrees, nested delegation, or token budgeting. Codex and Claude adapters are not implemented.
 
-## 验收目标
+## Development and local loading
 
-主 Pi 派发实施子代理 A，完成后派发独立审查子代理 B，再把问题发回原 A 会话继续修复。另需验证主 Pi 退出后的任务存活、恢复连接和完成结果补交。
-
-## 本地开发和加载
+Requires Node.js >=22.19 and an installed, configured Pi CLI.
 
 ```bash
 npm ci
 npm test
-# 本地试用：在目标工作目录运行，**不会安装到全局设置**
-pi --extension D:/AI/agentBySelf/pi-extensions/pi-cli-subagents/dist/index.js \
-   --skill D:/AI/agentBySelf/pi-extensions/pi-cli-subagents/skills/delegate-cli-agents
+
+# From the project you want the agents to work in:
+pi --extension /absolute/path/to/pi-cli-subagents/dist/index.js \
+   --skill /absolute/path/to/pi-cli-subagents/skills/delegate-cli-agents
 ```
 
-也可将仓库作为 Pi 本地 package 显式安装（会写入相应范围的 Pi settings；安装前先自行确认）。运行时需要 Node >=22.19，仓库内 `dist/` 为本机构建产物，不提交 Git；打包时由 `prepack` 构建。
+These command-line flags do not modify global settings. For project-level loading, run `pi install --local /absolute/path/to/pi-cli-subagents` from the target project and review its trust prompt yourself. This writes `.pi/settings.json`; relative package paths resolve from that settings file. Rebuild and reload Pi after changing the extension.
 
-第一版提供 `spawn_agent`、`send_input`、`list_agents`、`close_agent` 四个模型工具。原生 Pi 没有默认权限审批；仅当其它扩展使子 Pi 发出交互请求时，才会上报“等待处理”，由用户选择是否通过可选的 `/agent-reply <agentId> <questionId>` 回复，绝不自动批准。运行中的 `send_input` 可选 `steer` 或 `followUp`；完成后的 `send_input` 恢复同一子 Pi 会话。`close_agent` 停止当前任务，不删除会话文件。主会话必须持久化（不能用 `--no-session`），结果只回到创建它的原主会话。
+`dist/` is generated locally and ignored by Git. `prepack` builds it for packaging. Disposable demonstration tasks, raw sessions, and local acceptance drivers are not shipped.
 
-角色内置 `worker` 和 `reviewer`。可选角色覆盖文件：用户级 `~/.pi/agent/cli-subagents.roles.json`，受信项目的 `.pi/cli-subagents.roles.json`。每个角色需要 `description`、`instructions`，可选 `provider`、`model`、`thinking`；缺省模型与权限均由原 Pi CLI 配置决定。示例：
+## Agent tools
+
+| Tool | Purpose |
+| --- | --- |
+| `spawn_agent` | Start a `worker`, `reviewer`, or custom role in a chosen working directory. |
+| `send_input` | Steer a running child, queue a `followUp`, or resume a finished child's original session. |
+| `list_agents` | List this parent's instances, roles, results, errors, and pending questions. |
+| `close_agent` | Stop active work without deleting the session or its history. |
+
+The parent must have a persistent session; `--no-session` cannot own subagents. Prompt acceptance is not completion. The final report records whether the run succeeded, failed, stopped, or needs a response.
+
+## Terminal UI
+
+The status widget above the editor shows role, phase, recent tool activity, and elapsed time. Waiting requests take priority. Active instances have a second activity line; finished instances collapse to one line, linger for 30 seconds, and then disappear. No widget space is reserved when there is nothing to show.
+
+### `/agents`
+
+Use **Up/Down** to select an instance and **Enter** to open its summary. The summary contains the task, latest activity, result or error, native session, log path, and pending request.
+
+| Key in the summary | Action |
+| --- | --- |
+| `v` | Open the live conversation viewer. |
+| `s` | Message an active child or resume a finished child's original session. |
+| `x` | Stop an active child, after confirmation. |
+| `r` | Answer a pending interaction as the human user. |
+| `Esc` / `Left` | Return to the list. |
+| `q` | Close the panel. |
+
+The conversation viewer reads existing event logs incrementally. It shows user and assistant text, tool arguments, partial and final tool output, and errors across the instance's runs. It supports both cumulative and delta-only Pi RPC streaming formats. It stays open when the child finishes. This is an execution transcript, not a viewer for hidden reasoning or binary attachments.
+
+- New output is followed automatically. **Up/Down** or **Page Up/Page Down** scroll; scrolling up pauses following.
+- **Home** goes to the oldest retained entry; **End** returns to live following.
+- **s** messages/resumes the selected instance; **x** requests a confirmed stop. **Esc/q** returns to the list.
+- Viewing and closing the UI never starts, stops, or approves a child by itself.
+
+History is bounded to the latest 300 entries, with up to 24,000 characters per text/input and a 4 MiB limit per raw JSONL record. Clipping and malformed records are reported; original logs remain available. Large histories load progressively. This is not a byte-for-byte replacement for the native session or raw event log.
+
+Panels use temporary overlays, not a replacement editor. They are TUI-only; RPC and non-interactive modes keep the four tools. Actions can take time: an active send has a 35-second control timeout, a resume can take about 60 seconds including prior process release, and stopping can take 30 seconds. Acceptance timeouts require inspection, not blind retries.
+
+## Custom roles
+
+Built-ins are `worker` and `reviewer`. Override or add roles in:
+
+- User: `~/.pi/agent/cli-subagents.roles.json`
+- Trusted project: `.pi/cli-subagents.roles.json`
+
+Project roles replace user roles with the same name; user roles replace built-ins. Replacements are whole role definitions, not field-by-field merges. `description` and `instructions` are required. `provider`, `model`, and `thinking` are optional. Allowed thinking values: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` (the selected model must support the value).
 
 ```json
 {
   "tester": {
-    "description": "独立验证",
-    "instructions": "检查指定代码并报告可复现的问题，不要自行修改代码。"
+    "description": "Independently verify the implementation",
+    "instructions": "Inspect the assigned changes and report reproducible issues. Do not modify source files."
   }
 }
 ```
 
-子会话、结果和运行日志与主会话文件相邻，位于 `<主会话文件>.subagents/`；这些内容可能含敏感任务文本，勿上传或加入版本控制。共享 `cwd` 不等于独立文件系统；审查期间不要让写代理同时修改同一文件。无法处理的交互显示为等待处理，只有用户能通过 `/agent-reply` 回复。离线完成报告由原主会话重新打开后补交，未打开时保存在本地。
+Role instructions are not a security sandbox. Per-role tool/skill restrictions are not implemented.
 
-## 验证与边界
+## Interactions and local data
 
-`npm test` 使用假 Pi RPC 子进程，不消耗模型额度。`node test/real-smoke.mjs` 是**需明确选择运行**的真实 Pi 测试（通常两次小模型调用），产物仅写 `.test-output/`。已用真实主 Pi（临时加载扩展的 RPC 模式）依次派发实施和独立审查、退出并恢复原主会话、将审查结果送回同一个实施实例和原生 session；恢复后仅补交新报告，再次恢复未重复投递。这次端到端验收的临时页面、驱动脚本、原始会话及日志均只留在本地，不进入版本控制或安装包。**尚未验证**主 Pi TUI 退出后补交和执行端自身崩溃恢复。其它扩展触发交互时使用的 `/agent-reply` 真实 TUI 对话框也尚未实测，但这是可选兼容路径，**不阻塞首版 Pi→Pi 实施—审查—再实施的验收**；本次权限请求由用户明确选择后通过控制协议转交，而非 TUI 命令。出现执行端不可达或残留锁时会拒绝在同一会话上重复启动，需要人工检查日志，不会自动清锁抢占。
+Native Pi has no default permission-approval workflow. Other extensions can request interaction. Those requests enter `waiting`; only an explicitly initiated human response is supported through `/agent-reply <agentId> <questionId>` or the panel. The model has no approval tool. This is a policy/interface boundary, **not OS isolation**: processes under the same user can access local control files.
 
-前期独立协议/生命周期探针仍保留在本机 `D:/AI/piTest`（见 `docs/findings-pi-lifecycle.md`），原始会话、日志和测试凭证不作为项目源码提交。
+Sessions, reports, and event logs live beside the parent session in `<parent-session-file>.subagents/`. They can contain sensitive task data; do not publish them. Control credentials are not included in tool results. Closing an instance does not delete these files.
+
+If a worker is unreachable or an ownership lock remains, the extension refuses duplicate execution and requires inspection. It does not automatically reclaim stale locks or recover a crashed execution owner.
+
+## Verification and limits
+
+`npm test` builds the extension and runs deterministic tests without model calls. Tests cover protocol framing, lifecycle and original-session resume, role trust, report receipts, UI rendering, keyboard actions, transcript streaming, and cleanup. `npm run check` checks TypeScript.
+
+`node test/real-smoke.mjs` is an explicit opt-in real-model test; it normally makes two small calls and writes only to `.test-output/`. Prior real Pi RPC acceptance exercised implementation → independent review → original implementer continuation, parent exit/reconnect, offline report replay, and deduplication. Temporary tasks and raw acceptance artifacts remain local.
+
+Automated component tests are not full terminal acceptance. A no-model Windows ConPTY smoke test also loaded the actual Pi TUI in regular and fullscreen modes: opening the panel/viewer, rendering tool arguments and live output, resizing, scrolling, closing and exiting all passed. Its child was a deterministic RPC fixture, not another model call. Real TUI permission dialogs, parent TUI exit/replay, every terminal/key protocol and theme, and execution-owner crash recovery are not comprehensively verified. TUI approval is an optional compatibility path, not a blocker for the core Pi-to-Pi collaboration test. Safety-guard false positives and parent-delegated approval policy remain separate work.
+
+## References
+
+[Paseo](https://github.com/getpaseo/paseo) informs the lifecycle and orchestration goals. [tintinweb/pi-subagents](https://github.com/tintinweb/pi-subagents) informs the compact status and conversation-viewer interaction. This extension keeps its own Pi CLI process ownership and persistence model rather than importing their workflow systems.

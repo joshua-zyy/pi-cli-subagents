@@ -21,7 +21,7 @@ test('RPC correlates requests, preserves Unicode separators, and surfaces reject
     await assert.rejects(rpc.request({ type: 'prompt', message: 'REJECT' }), /rejected/);
     await rpc.request({ type: 'prompt', message: 'UNICODE' });
     await waitUntil('settled', () => events.find(e => e.type === 'agent_settled'));
-    assert.equal(events.find(e => e.type === 'message_end').message.content[0].text, 'A\u2028B\u2029雪');
+    assert.equal(events.find(e => e.type === 'message_end').message.content[0].text, 'A\u2028B\u2029\u96ea');
   } finally { assert.equal((await rpc.end()).exit.code, 0); }
 });
 
@@ -33,5 +33,5 @@ test('role settings inherit defaults; untrusted project files are not loaded', (
   assert.equal(loadRoles(user, cwd, true).custom.description, 'project');
   assert.equal(loadRoles(user, cwd, true).worker.model, undefined);
   writeJson(path.join(cwd, '.pi/cli-subagents.roles.json'), { custom: { description: 'bad', instructions: 'bad', models: 'typo' } });
-  assert.throws(() => loadRoles(user, cwd, true), /未知字段/);
+  assert.throws(() => loadRoles(user, cwd, true), /unknown fields/);
 });

@@ -26,11 +26,11 @@ export function deliverReports(
   if (!reports.length) return;
   const ids = reports.map((report) => report.notificationId);
   const content = reports.map((report) => [
-    `[子代理 ${report.agentId} · ${report.status} · 本轮 ${report.runId}]`,
-    report.error ? `错误：${report.error}` : "",
-    report.text || (report.status === "waiting" ? "等待人工处理；请查看子代理状态并使用 /agent-reply。" : "无文本回复；请检查日志。"),
-    `事件与完整记录：${report.logFile}`,
-    report.resultFile ? `结果文件：${report.resultFile}` : "",
+    `[Subagent ${report.agentId} · ${report.status} · run ${report.runId}]`,
+    report.error ? `Error: ${report.error}` : "",
+    report.text || (report.status === "waiting" ? "Waiting for a human response; inspect the child and use /agent-reply." : "No text response; inspect the event log."),
+    `Full event log: ${report.logFile}`,
+    report.resultFile ? `Result file: ${report.resultFile}` : "",
   ].filter(Boolean).join("\n")).join("\n\n");
   for (const id of ids) pending.add(id);
   try {

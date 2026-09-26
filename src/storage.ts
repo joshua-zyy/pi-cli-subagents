@@ -32,7 +32,7 @@ export async function waitUntil<T>(label: string, check: () => T | Promise<T>, t
     if (value) return value as NonNullable<T>;
     await new Promise((resolve) => setTimeout(resolve, 50));
   } while (Date.now() < end);
-  throw new Error(`${label} 超时；检查状态与日志，勿直接重复派发。`);
+  throw new Error(`${label} timed out; inspect state and logs before retrying.`);
 }
 export function shorten(text: string, limit = 12_000): { text: string; truncated: boolean } {
   return { text: text.slice(0, limit), truncated: text.length > limit };
