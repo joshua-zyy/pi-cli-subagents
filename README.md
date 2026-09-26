@@ -39,8 +39,10 @@ These command-line flags do not modify global settings. For project-level loadin
 | `send_input` | Steer a running child, queue a `followUp`, or resume a finished child's original session. |
 | `list_agents` | List this parent's instances, roles, results, errors, and pending questions. |
 | `close_agent` | Stop active work without deleting the session or its history. |
+| `list_pending_permissions` | Inspect unresolved requests from subagents owned by this parent session. |
+| `respond_to_permission` | Send one explicit, reasoned decision for a current request. |
 
-The parent must have a persistent session; `--no-session` cannot own subagents. Prompt acceptance is not completion. The final report records whether the run succeeded, failed, stopped, or needs a response.
+The parent must have a persistent session; `--no-session` cannot own subagents. Prompt acceptance is not completion. The final report records whether the run succeeded, failed, stopped, or needs a response. Parent-facing notifications include the full instance ID and a short result/error, not repeated local file paths; inspect `list_agents` or `/agents` for log and session details.
 
 ## Terminal UI
 
@@ -68,7 +70,7 @@ The conversation viewer reads existing event logs incrementally. It shows user a
 
 History is bounded to the latest 300 entries, with up to 24,000 characters per text/input and a 4 MiB limit per raw JSONL record. Clipping and malformed records are reported; original logs remain available. Large histories load progressively. This is not a byte-for-byte replacement for the native session or raw event log.
 
-Panels use temporary overlays, not a replacement editor. They are TUI-only; RPC and non-interactive modes keep the four tools. Actions can take time: an active send has a 35-second control timeout, a resume can take about 60 seconds including prior process release, and stopping can take 30 seconds. Acceptance timeouts require inspection, not blind retries.
+Panels use temporary overlays, not a replacement editor. They are TUI-only; RPC and non-interactive modes keep the six agent tools. Actions can take time: an active send has a 35-second control timeout, a resume can take about 60 seconds including prior process release, and stopping can take 30 seconds. Acceptance timeouts require inspection, not blind retries.
 
 ## Custom roles
 
@@ -92,7 +94,7 @@ Role instructions are not a security sandbox. Per-role tool/skill restrictions a
 
 ## Interactions and local data
 
-Native Pi has no default permission-approval workflow. Other extensions can request interaction. Those requests enter `waiting`; only an explicitly initiated human response is supported through `/agent-reply <agentId> <questionId>` or the panel. The model has no approval tool. This is a policy/interface boundary, **not OS isolation**: processes under the same user can access local control files.
+Native Pi has no default permission-approval workflow. Other extensions can request interaction. Those requests enter `waiting`; the parent Pi may inspect them with `list_pending_permissions` and answer one current request with `respond_to_permission`, giving a reason. The parent must compare the requested action to the user's authorized task; ambiguous or out-of-scope requests should remain pending for the user. Approvals are per request, not permanent permission grants, and do not disable or reconfigure safety extensions. The human can still answer through `/agent-reply <agentId> <questionId>` or the panel. Decisions are recorded in the run's local `permissions.jsonl` next to the event log; a response being sent does not prove that the action later completed. This is a policy/interface boundary, **not OS isolation**: processes under the same user can access local control files.
 
 Sessions, reports, and event logs live beside the parent session in `<parent-session-file>.subagents/`. They can contain sensitive task data; do not publish them. Control credentials are not included in tool results. Closing an instance does not delete these files.
 
@@ -104,7 +106,7 @@ If a worker is unreachable or an ownership lock remains, the extension refuses d
 
 `node test/real-smoke.mjs` is an explicit opt-in real-model test; it normally makes two small calls and writes only to `.test-output/`. Prior real Pi RPC acceptance exercised implementation → independent review → original implementer continuation, parent exit/reconnect, offline report replay, and deduplication. Temporary tasks and raw acceptance artifacts remain local.
 
-Automated component tests are not full terminal acceptance. A no-model Windows ConPTY smoke test also loaded the actual Pi TUI in regular and fullscreen modes: opening the panel/viewer, rendering tool arguments and live output, resizing, scrolling, closing and exiting all passed. Its child was a deterministic RPC fixture, not another model call. Real TUI permission dialogs, parent TUI exit/replay, every terminal/key protocol and theme, and execution-owner crash recovery are not comprehensively verified. TUI approval is an optional compatibility path, not a blocker for the core Pi-to-Pi collaboration test. Safety-guard false positives and parent-delegated approval policy remain separate work.
+Automated component tests are not full terminal acceptance. A no-model Windows ConPTY smoke test also loaded the actual Pi TUI in regular and fullscreen modes: opening the panel/viewer, rendering tool arguments and live output, resizing, scrolling, closing and exiting all passed. Its child was a deterministic RPC fixture, not another model call. Real TUI permission dialogs, parent TUI exit/replay, every terminal/key protocol and theme, and execution-owner crash recovery are not comprehensively verified. TUI approval is an optional compatibility path, not a blocker for the core Pi-to-Pi collaboration test. Safety-guard false positives remain unresolved; the parent-delegated decision path has deterministic protocol tests, but its real-model authorization behavior is not yet fully verified.
 
 ## References
 

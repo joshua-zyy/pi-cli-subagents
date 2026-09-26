@@ -60,7 +60,7 @@ export function statusLines(agents: AgentView[], options: StatusLinesOptions): s
 
   // Display priority: waiting for a response, active, then recently finished.
   const groups: { rows: Row[] }[] = [
-    { rows: waiting.map((agent) => row(phaseIcon("waiting"), "warning", agent, "Waiting", oneLine(agent.questions?.[0]?.title, BODY_LIMIT) || "Waiting for a human response")) },
+    { rows: waiting.map((agent) => row(phaseIcon("waiting"), "warning", agent, "Waiting", oneLine(agent.questions?.[0]?.title, BODY_LIMIT) || "Waiting for a response")) },
     { rows: active.map((agent) => row(SPINNER[Math.abs(options.frame) % SPINNER.length], "accent", agent, phaseLabel(agent.phase), oneLine(agent.lastActivity, BODY_LIMIT) || "Starting...")) },
     { rows: recent.map((agent) => row(phaseIcon(agent.phase), phaseColor(agent.phase), agent, details(agent))) },
   ];

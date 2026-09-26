@@ -26,11 +26,9 @@ export function deliverReports(
   if (!reports.length) return;
   const ids = reports.map((report) => report.notificationId);
   const content = reports.map((report) => [
-    `[Subagent ${report.agentId} · ${report.status} · run ${report.runId}]`,
+    `[Subagent ${report.agentId} · ${report.status}]`,
     report.error ? `Error: ${report.error}` : "",
-    report.text || (report.status === "waiting" ? "Waiting for a human response; inspect the child and use /agent-reply." : "No text response; inspect the event log."),
-    `Full event log: ${report.logFile}`,
-    report.resultFile ? `Result file: ${report.resultFile}` : "",
+    report.text || (report.error ? "" : report.status === "waiting" ? "Waiting for a response; inspect with list_pending_permissions or /agent-reply." : "No text response; inspect with list_agents or /agents."),
   ].filter(Boolean).join("\n")).join("\n\n");
   for (const id of ids) pending.add(id);
   try {

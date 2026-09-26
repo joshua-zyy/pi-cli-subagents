@@ -128,8 +128,8 @@ export class AgentManager {
     return this.get(id);
   }
 
-  async reply(id: string, questionId: string, answer: { value?: string; confirmed?: boolean; cancelled?: boolean }): Promise<AgentView> {
-    await this.request(id, { type: "reply", id: questionId, ...answer });
+  async reply(id: string, questionId: string, answer: { value?: string; confirmed?: boolean; cancelled?: boolean }, decision: { actor: "human" | "parent"; reason?: string } = { actor: "human" }): Promise<AgentView> {
+    await this.request(id, { type: "reply", id: questionId, ...answer, ...decision });
     return this.get(id);
   }
 

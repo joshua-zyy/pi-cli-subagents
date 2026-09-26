@@ -78,4 +78,4 @@ export type Control =
   | { type: "status" }
   | { type: "send"; message: string; mode: Delivery }
   | { type: "close" }
-  | { type: "reply"; id: string; value?: string; confirmed?: boolean; cancelled?: boolean };
+  | { type: "reply"; id: string; value?: string; confirmed?: boolean; cancelled?: boolean; actor?: "human" | "parent"; reason?: string };

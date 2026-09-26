@@ -17,6 +17,8 @@ test('multiple reports are batched, queued once while pending, and deduplicated 
   deliverReports(h.manager, h.pi, h.ctx, pending);
   assert.equal(h.sent.length, 1);
   assert.deepEqual(h.sent[0].message.details.ids, ['first', 'second']);
+  assert.match(h.sent[0].message.content, /\[Subagent agent · completed\]\nDONE/);
+  assert.doesNotMatch(h.sent[0].message.content, /Full event log:|Result file:|trace|run first/);
   assert.deepEqual(h.sent[0].options, { triggerTurn: true, deliverAs: 'followUp' });
   deliverReports(h.manager, h.pi, h.ctx, pending);
   assert.equal(h.sent.length, 1, 'polling cannot queue a duplicate before message is persisted');
@@ -27,6 +29,16 @@ test('multiple reports are batched, queued once while pending, and deduplicated 
   deliverReports(h.manager, h.pi, h.ctx, restarted);
   assert.equal(h.sent.length, 1, 'restart must not replay a report already in the parent session');
   assert.deepEqual([...deliveredIds(h.ctx)], ['first', 'second']);
+});
+
+test('error and waiting messages keep actionable details without embedding file paths', () => {
+  const h=harness([{...report('failed'),status:'failed',error:'Permission denied',text:'',logFile:'C:\\long\\secret\\events.jsonl',resultFile:'C:\\long\\secret\\result.json'},
+    {...report('waiting'),status:'waiting',text:'Approve one operation?',questionId:'q',logFile:'C:\\long\\secret\\events.jsonl'}]);
+  deliverReports(h.manager,h.pi,h.ctx,new Set());
+  const content=h.sent[0].message.content;
+  assert.match(content,/Permission denied/);assert.match(content,/Approve one operation\?/);
+  assert.doesNotMatch(content,/C:\\long|Full event log|Result file/);
+  assert.deepEqual(h.sent[0].message.details.ids,['failed','waiting']);
 });
 
 test('a crashed delivery before append retries; after append does not', () => {

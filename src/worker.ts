@@ -1,5 +1,5 @@
 import { createServer, type Server } from "node:http";
-import { openSync, closeSync, unlinkSync, writeFileSync, mkdirSync } from "node:fs";
+import { openSync, closeSync, unlinkSync, writeFileSync, mkdirSync, appendFileSync } from "node:fs";
 import { randomBytes, randomUUID } from "node:crypto";
 import path from "node:path";
 import { PiProcess, type WireRecord } from "./pi-process.js";
@@ -104,16 +104,25 @@ async function run(dir: string, runId: string): Promise<void> {
     if (ending || !rpc) throw new Error("Not accepted: worker is starting or shutting down; inspect its state first.");
     if (input.type === "send") {
       if (!state.accepted) throw new Error("Initial task has not been accepted; resolve any startup interaction first.");
-      if (state.questions.length) throw new Error("The child is waiting for a human response. Use /agent-reply; a message is not an approval.");
+      if (state.questions.length) throw new Error("The child has an unresolved interaction. Use respond_to_permission or /agent-reply; a message is not an approval.");
       if (typeof input.message !== "string" || !input.message.trim() || !["steer", "followUp"].includes(input.mode)) throw new Error("Invalid message or delivery mode");
       await rpc.request({ type: "prompt", message: input.message, streamingBehavior: input.mode });
     } else if (input.type === "reply") {
       const q = state.questions.find((q) => q.id === input.id);
-      if (!q) throw new Error("The interaction has ended or does not exist");
+      if (!q || (q.expiresAt !== undefined && q.expiresAt <= Date.now())) throw new Error("The interaction has ended or does not exist");
+      const choices = Number(input.cancelled === true) + Number(typeof input.confirmed === "boolean") + Number(typeof input.value === "string");
+      if (choices !== 1) throw new Error("Provide exactly one response: confirmed, value, or cancelled");
       if (!input.cancelled) {
         if (q.method === "confirm" ? typeof input.confirmed !== "boolean" : typeof input.value !== "string") throw new Error("Response type does not match the question");
         if (q.method === "select" && !q.options?.includes(input.value!)) throw new Error("Response is not one of the available options");
       }
+      if (input.actor === "parent" && (typeof input.reason !== "string" || !input.reason.trim())) throw new Error("A parent decision requires a reason");
+      if (input.actor !== undefined && input.actor !== "parent" && input.actor !== "human") throw new Error("Unknown decision actor");
+      // Record intent before sending: a failed log write must not silently approve an action.
+      appendFileSync(path.join(runDir, "permissions.jsonl"), `${JSON.stringify({ time: Date.now(), runId, questionId: q.id,
+        actor: input.actor ?? "human", decision: input.cancelled ? "cancelled" : q.method === "confirm" ? input.confirmed ? "approved" : "denied" : "answered",
+        delivery: "attempted", ...(input.reason ? { reason: input.reason.slice(0, 2000) } : {}),
+      })}\n`, { mode: 0o600 });
       await rpc.reply({ id: q.id, value: input.value, confirmed: input.confirmed, cancelled: input.cancelled });
       state.questions = state.questions.filter((item) => item !== q);
       if (!ending) { state.phase = state.questions.length ? "waiting" : state.accepted ? "running" : "starting"; save(); }

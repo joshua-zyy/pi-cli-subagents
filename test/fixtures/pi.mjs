@@ -24,7 +24,7 @@ function handle(cmd) {
   if (cmd.type === 'abort') { clearTimeout(settling); active = false; finish('ABORTED', 'aborted'); return response(cmd); }
   if (cmd.type === 'extension_ui_response') {
     if (!question || cmd.id !== 'permission-1') throw new Error('wrong UI response');
-    question = false; return finish(cmd.confirmed ? 'ALLOW' : 'DENY');
+    question = false; return finish(cmd.cancelled ? 'CANCELLED' : cmd.value ?? (cmd.confirmed ? 'ALLOW' : 'DENY'));
   }
   if (cmd.type !== 'prompt') return emit({ type: 'response', id: cmd.id, success: false, error: 'unsupported command' });
   if (cmd.message === 'REJECT') return emit({ type: 'response', id: cmd.id, success: false, error: 'rejected by fixture' });
@@ -43,9 +43,11 @@ function handle(cmd) {
     }, 1500);
     return;
   }
-  if (cmd.message === 'WAIT') {
+  if (cmd.message === 'WAIT' || cmd.message === 'WAIT_SELECT') {
     question = true;
-    emit({ type: 'extension_ui_request', id: 'permission-1', method: 'confirm', title: 'Allow fixture operation?', message: 'Requires a human answer' });
+    emit(cmd.message === 'WAIT' ?
+      { type: 'extension_ui_request', id: 'permission-1', method: 'confirm', title: 'Allow fixture operation?', message: 'Requires a human answer' } :
+      { type: 'extension_ui_request', id: 'permission-1', method: 'select', title: 'Select fixture response', options: ['Allow once', 'Deny'] });
     return;
   }
   if (cmd.message === 'FAIL') return finish('', 'error');

@@ -109,7 +109,35 @@ export default function extension(pi: ExtensionAPI): void {
     },
   });
 
-  // Human-only. The LLM has no reply/approval tool; all answers are explicitly initiated by the user.
+  pi.registerTool({
+    name: "list_pending_permissions", label: "List pending child interactions",
+    description: "List unresolved interactions from this parent's Pi subagents. Inspect the request and the original task before deciding; do not assume every request is safe to approve.",
+    parameters: Type.Object({}),
+    async execute(_id, _args, _signal, _update, ctx) {
+      const pending = parentManager(ctx, launch).list().filter((agent) => agent.questions.length && agent.phase === "waiting")
+        .map(({ id, role, cwd, task, runId, questions }) => ({ id, role, cwd, task, runId, questions }));
+      return content(JSON.stringify(pending));
+    },
+  });
+  pi.registerTool({
+    name: "respond_to_permission", label: "Answer child interaction",
+    description: "Answer one current request from a child owned by this parent. Compare the requested operation with the user's task authorization; approve only within scope, otherwise deny/cancel or ask the user. This does not change global permissions or disable safety extensions. Every decision is recorded locally.",
+    parameters: Type.Object({
+      id: Type.String({ description: "Subagent instance ID returned by list_pending_permissions" }),
+      questionId: Type.String({ description: "Exact current interaction ID" }),
+      confirmed: Type.Optional(Type.Boolean({ description: "For confirm: true to approve once, false to deny" })),
+      value: Type.Optional(Type.String({ description: "For select: an exact offered option; for input/editor: response text" })),
+      cancelled: Type.Optional(Type.Literal(true, { description: "Cancel this request rather than answer it" })),
+      reason: Type.String({ description: "Why this decision is within the parent's authorization, or why it was denied/cancelled" }),
+    }),
+    async execute(_id, args, _signal, _update, ctx) {
+      const state = await parentManager(ctx, launch).reply(args.id, args.questionId,
+        { confirmed: args.confirmed, value: args.value, cancelled: args.cancelled }, { actor: "parent", reason: args.reason });
+      return content(`Response sent to the child's current interaction; delivery is not proof the action completed: ${view(state)}`);
+    },
+  });
+
+  // The human entry point remains available when the parent cannot decide safely.
   async function replyPrompt(ctx: ExtensionContext, manager: AgentManager, id: string, questionId: string): Promise<void> {
     if (!ctx.hasUI) throw new Error("Interaction requires a TUI or an RPC client with dialogs");
     const q: Question | undefined = manager.get(id).questions.find((entry) => entry.id === questionId);
@@ -194,7 +222,7 @@ export default function extension(pi: ExtensionAPI): void {
               ctx.ui.notify("Processes stopped; original session retained.", "info");
               continue;
             }
-            if (state.phase === "waiting") { ctx.ui.notify("This child is waiting for a human response: use r or /agent-reply <id> <questionId>.", "error"); continue; }
+            if (state.phase === "waiting") { ctx.ui.notify("This child has a pending interaction: use r, /agent-reply, or the parent permission tool.", "error"); continue; }
             const steerable = canSteer(state.phase);
             const message = await ctx.ui.editor(steerable ? `Message ${state.role}` : `Resume ${state.role} in the original session`, "");
             if (!message?.trim() || epoch !== sessionEpoch) continue;
