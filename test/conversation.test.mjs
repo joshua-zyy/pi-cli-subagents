@@ -53,6 +53,31 @@ test('viewer errors stay visible and an in-flight read cannot redraw after dispo
   await wait(20); assert.equal(pending.renders, renders);
 });
 
+test('page, half-line and configured scroll bindings all move the transcript and report position', async t => {
+  const entries = Array.from({length:60},(_,i)=>entry(i,{text:`Message ${i}`}));
+  const tui={terminal:{rows:20,columns:80},requestRender(){}};
+  // A user-configured binding must win over the built-in default.
+  const keybindings={matches:(data,action)=>action==='tui.altScreen.pageDown'&&data==='\u0006'};
+  const viewer=new ConversationViewer(tui,theme,()=>{},async()=>({agent:state,entries,loading:false}),{intervalMs:10,keybindings});
+  t.after(()=>viewer.dispose());
+  await wait(40);
+  const text=()=>viewer.render(80).join('\n');
+  const percent=()=>Number(/(\d+)%/.exec(text())?.[1]);
+  assert.match(text(),/Following · 120 lines · 100%/);
+  assert.match(text(),/^╭─+╮$/m); assert.match(text(),/^╰─+╯$/m);
+  viewer.handleInput('\u001b[H'); assert.match(text(),/Paused/);
+  const top=percent(); assert.match(text(),/Message 0/);
+  viewer.handleInput('\u001b[6~'); const onePage=percent(); assert.ok(onePage>top,'PageDown must advance'); assert.equal(onePage-top,Math.round((12/120)*100));
+  viewer.handleInput('\u0006'); const configured=percent(); assert.ok(configured>onePage,'a configured binding must advance');
+  viewer.handleInput('\u001b[1;2A'); const lineUp=percent(); assert.ok(lineUp<configured,'Shift+Up must scroll one line back');
+  viewer.handleInput('\u001b[1;2B'); assert.ok(percent()>lineUp,'Shift+Down scrolls one line forward');
+  const afterLine=percent();
+  viewer.handleInput('\u001b[5~'); assert.ok(percent()<afterLine,'PageUp must return toward the start');
+  viewer.handleInput('\u001b[F'); assert.match(text(),/Following · 120 lines · 100%/); assert.match(text(),/Message 59/);
+  assert.ok(viewer.render(80).every(line=>visibleWidth(line)<=80));
+});
+
+
 test('a loading snapshot followed by failure uses the normal retry interval', async t => {
   let calls = 0;
   const tui = { terminal: { rows: 20, columns: 80 }, requestRender() {} };

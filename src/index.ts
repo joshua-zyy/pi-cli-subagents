@@ -1,6 +1,6 @@
 import { Type } from "@earendil-works/pi-ai";
 import { Key } from "@earendil-works/pi-tui";
-import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, getMarkdownTheme, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { AgentManager } from "./manager.js";
 import { deliverReports } from "./notifier.js";
 import { loadRoles } from "./roles.js";
@@ -208,12 +208,12 @@ export default function extension(pi: ExtensionAPI): void {
               const reader = new TranscriptReader();
               let viewer: ConversationViewer | undefined;
               try {
-                action = await ctx.ui.custom<PanelAction | undefined>((tui, theme, _kb, done) => {
+                action = await ctx.ui.custom<PanelAction | undefined>((tui, theme, keybindings, done) => {
                   dismissPanel = () => { viewer?.dispose(); done(undefined); };
                   viewer = new ConversationViewer(tui, theme, done, async () => {
                     const agent = manager.get(id);
                     return { agent, ...await reader.read(manager.eventLogs(id)) };
-                  });
+                  }, { keybindings, markdownTheme: getMarkdownTheme() });
                   return viewer;
                 }, { overlay: true, overlayOptions: { width: "96%", maxHeight: "100%", margin: 1 } });
               } finally { viewer?.dispose(); dismissPanel = undefined; }

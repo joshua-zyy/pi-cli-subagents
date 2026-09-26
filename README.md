@@ -67,7 +67,9 @@ Press **Ctrl+Alt+A** from Pi's main editor to open the full agent roster while c
 | `Esc` / `Left` | Return to the list. |
 | `q` | Close the panel. |
 
-The viewer is non-blocking with respect to child execution: closing it does not stop a child. Keyboard shortcuts apply while Pi's main editor has focus, not during another modal dialog. The conversation viewer reads existing event logs incrementally. It shows user and assistant text, tool arguments, partial and final tool output, and errors across the instance's runs. It supports both cumulative and delta-only Pi RPC streaming formats. It stays open when the child finishes. This is an execution transcript, not a viewer for hidden reasoning or binary attachments.
+The viewer is non-blocking with respect to child execution: closing it does not stop a child. It renders the child's own conversation in Pi's visual language: bordered frame, header with role/phase/elapsed, user prompts on their message background, assistant replies as Markdown, and tool calls with their arguments and output (errors highlighted, long output clipped with a remaining-lines note).
+
+Scrolling follows Pi's transcript bindings, including user overrides from `keybindings.json`: **PageUp/PageDown** (or `tui.altScreen.pageUp/pageDown`) page through, **Home/End** jump to the top or back to live output, and **Up/Down** or **Shift+Up/Shift+Down** scroll a line at a time. Scrolling up pauses automatic following; returning to the end resumes it. The footer shows the follow state, total lines and scroll percentage. Keyboard shortcuts apply while Pi's main editor has focus, not during another modal dialog.
 
 - New output is followed automatically. **Up/Down** or **Page Up/Page Down** scroll; scrolling up pauses following.
 - **Home** goes to the oldest retained entry; **End** returns to live following.

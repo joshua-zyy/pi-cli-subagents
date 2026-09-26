@@ -1,16 +1,52 @@
-import { matchesKey, stripTerminalSequences, truncateToWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
+import { Markdown, matchesKey, stripTerminalSequences, truncateToWidth, visibleWidth, type KeyId, type KeybindingsManager } from "@earendil-works/pi-tui";
 import type { AgentView } from "../types.js";
 import type { PanelAction } from "./panel.js";
-import type { TranscriptSnapshot } from "./transcript.js";
-import { canSteer, isTerminal, oneLine, phaseLabel, type UiTheme } from "./format.js";
+import type { TranscriptEntry, TranscriptSnapshot } from "./transcript.js";
+import { canSteer, formatElapsed, isTerminal, oneLine, phaseColor, phaseIcon, phaseLabel, viewElapsed } from "./format.js";
 
 export interface ConversationSnapshot extends TranscriptSnapshot {
-  agent: Pick<AgentView, "id" | "role" | "phase" | "runId">;
+  agent: Pick<AgentView, "id" | "role" | "phase" | "runId"> & Partial<Pick<AgentView, "startedAt" | "updatedAt">>;
+}
+/** Structural subset of Pi's theme; tests can pass a minimal object. */
+export interface ViewerTheme {
+  fg(color: string, text: string): string;
+  bg?(color: string, text: string): string;
+  bold(text: string): string;
+  italic?(text: string): string;
+}
+export interface ViewerMarkdownTheme {
+  heading: (text: string) => string;
+  link: (text: string) => string;
+  linkUrl: (text: string) => string;
+  code: (text: string) => string;
+  codeBlock: (text: string) => string;
+  codeBlockBorder: (text: string) => string;
+  quote: (text: string) => string;
+  quoteBorder: (text: string) => string;
+  hr: (text: string) => string;
+  listBullet: (text: string) => string;
+  bold: (text: string) => string;
+  italic: (text: string) => string;
+  strikethrough: (text: string) => string;
+  underline: (text: string) => string;
+  codeBlockIndent?: string;
 }
 interface ViewerTui { terminal: { rows: number; columns: number }; requestRender(): void }
+export interface ConversationViewerOptions {
+  intervalMs?: number;
+  keybindings?: KeybindingsManager;
+  markdownTheme?: ViewerMarkdownTheme;
+}
+
+/** Border, header, two separators, footer and bottom border. */
+const CHROME_LINES = 6;
+const MAX_TOOL_OUTPUT_LINES = 12;
 const clean = (value: string): string => stripTerminalSequences(value).replace(/[\x00-\x08\x0b-\x1f\x7f]/g, "");
 
-/** A read-only live transcript with optional actions returned to the command handler. */
+/**
+ * A read-only live transcript overlay styled like Pi's own conversation view.
+ * It shows the child's user/assistant messages, tool calls and output without touching the child.
+ */
 export class ConversationViewer {
   private snapshot?: ConversationSnapshot;
   private error?: string;
@@ -22,15 +58,19 @@ export class ConversationViewer {
   private viewport = 1;
   private cache?: { width: number; lines: string[] };
   private readonly intervalMs: number;
+  private readonly keybindings?: KeybindingsManager;
+  private readonly markdownTheme?: ViewerMarkdownTheme;
 
   constructor(
     private readonly tui: ViewerTui,
-    private readonly theme: UiTheme,
+    private readonly theme: ViewerTheme,
     private readonly done: (action: PanelAction | undefined) => void,
     private readonly load: () => Promise<ConversationSnapshot>,
-    options: { intervalMs?: number } = {},
+    options: ConversationViewerOptions = {},
   ) {
     this.intervalMs = options.intervalMs ?? 500;
+    this.keybindings = options.keybindings;
+    this.markdownTheme = options.markdownTheme;
     void this.refresh();
   }
 
@@ -62,17 +102,24 @@ export class ConversationViewer {
     this.timer.unref?.();
   }
 
+  /** Pi's transcript bindings, with the plain key names as fallback for unconfigured terminals. */
+  private matches(data: string, keybinding: "tui.altScreen.pageUp" | "tui.altScreen.pageDown" | "tui.altScreen.top" | "tui.altScreen.bottom", fallback: KeyId): boolean {
+    if (this.keybindings?.matches(data, keybinding)) return true;
+    return matchesKey(data, fallback);
+  }
+
   handleInput(data: string): void {
     if (this.closed) return;
     const agent = this.snapshot?.agent;
     const max = Math.max(0, this.totalLines - this.viewport);
+    const page = Math.max(1, this.viewport);
     if (matchesKey(data, "escape") || matchesKey(data, "q") || matchesKey(data, "ctrl+c")) { this.finish(); return; }
-    if (matchesKey(data, "home")) { this.scroll = 0; this.follow = false; }
-    else if (matchesKey(data, "end")) { this.scroll = max; this.follow = true; }
-    else if (matchesKey(data, "up") || data === "k") { this.scroll = Math.max(0, this.scroll - 1); this.follow = false; }
-    else if (matchesKey(data, "down") || data === "j") { this.scroll = Math.min(max, this.scroll + 1); this.follow = this.scroll >= max; }
-    else if (matchesKey(data, "pageUp")) { this.scroll = Math.max(0, this.scroll - this.viewport); this.follow = false; }
-    else if (matchesKey(data, "pageDown")) { this.scroll = Math.min(max, this.scroll + this.viewport); this.follow = this.scroll >= max; }
+    if (this.matches(data, "tui.altScreen.top", "home")) { this.scroll = 0; this.follow = false; }
+    else if (this.matches(data, "tui.altScreen.bottom", "end")) { this.scroll = max; this.follow = true; }
+    else if (this.matches(data, "tui.altScreen.pageUp", "pageUp")) { this.scroll = Math.max(0, this.scroll - page); this.follow = false; }
+    else if (this.matches(data, "tui.altScreen.pageDown", "pageDown")) { this.scroll = Math.min(max, this.scroll + page); this.follow = this.scroll >= max; }
+    else if (matchesKey(data, "up") || matchesKey(data, "shift+up") || data === "k") { this.scroll = Math.max(0, this.scroll - 1); this.follow = false; }
+    else if (matchesKey(data, "down") || matchesKey(data, "shift+down") || data === "j") { this.scroll = Math.min(max, this.scroll + 1); this.follow = this.scroll >= max; }
     else if (agent && matchesKey(data, "s") && (canSteer(agent.phase) || isTerminal(agent.phase))) {
       this.finish({ kind: "message", id: agent.id, resume: !canSteer(agent.phase) }); return;
     } else if (agent && matchesKey(data, "x") && !isTerminal(agent.phase)) { this.finish({ kind: "stop", id: agent.id }); return; }
@@ -80,47 +127,136 @@ export class ConversationViewer {
   }
 
   render(width: number): string[] {
-    if (width < 1) return [];
-    const rows = Math.max(1, Number.isFinite(this.tui.terminal.rows) ? this.tui.terminal.rows - 2 : 22);
-    const inner = Math.max(1, width - 2);
+    if (width < 8) return [];
+    const rows = Math.max(3, Number.isFinite(this.tui.terminal.rows) ? this.tui.terminal.rows - 2 : 22);
+    const inner = Math.max(1, width - 4);
+    // Very short terminals drop the frame instead of overflowing the host view.
+    const framed = rows >= CHROME_LINES + 1;
+    this.viewport = Math.max(1, framed ? rows - CHROME_LINES : rows - 2);
+    const border = this.theme.fg("border", "│");
+    const row = (content: string): string => {
+      const clipped = truncateToWidth(content, inner);
+      return `${border} ${clipped}${" ".repeat(Math.max(0, inner - visibleWidth(clipped)))} ${border}`;
+    };
+    const bar = (left: string, right: string): string => {
+      const room = Math.max(0, width - visibleWidth(right) - 1);
+      if (visibleWidth(left) > room) return truncateToWidth(left, width);
+      const clipped = truncateToWidth(left, room);
+      return `${clipped}${" ".repeat(Math.max(0, room - visibleWidth(clipped)))} ${right}`;
+    };
+
     const agent = this.snapshot?.agent;
-    const label = agent ? `${oneLine(agent.role, 60)} / ${oneLine(agent.id, 8)} / ${phaseLabel(agent.phase)}` : "Loading";
-    const header = this.theme.bold(this.theme.fg("accent", `Conversation | ${label}`));
-    const state = `${this.follow ? "Following" : "Paused"}${this.snapshot?.loading ? " | Loading history..." : ""}`;
-    const note = this.error ?? this.snapshot?.notice;
-    const chrome = [header, this.theme.fg("dim", state)];
-    if (note) chrome.push(this.theme.fg("warning", oneLine(note, 1000)));
-    const keys = ["Esc back", "Up/Down scroll", "PgUp/PgDn page", "Home/End"];
-    if (agent && (canSteer(agent.phase) || isTerminal(agent.phase))) keys.push(canSteer(agent.phase) ? "s message" : "s resume");
-    if (agent && !isTerminal(agent.phase)) keys.push("x stop");
-    const footer = this.theme.fg("dim", keys.join(" | "));
-    this.viewport = Math.max(1, rows - chrome.length - 1);
+    const header = agent
+      ? `${this.theme.fg(phaseColor(agent.phase), isTerminal(agent.phase) ? phaseIcon(agent.phase) : "●")} ${this.theme.bold(this.theme.fg("text", oneLine(agent.role, 40)))}${this.theme.fg("muted", ` · ${phaseLabel(agent.phase)}`)}${agent.startedAt ? this.theme.fg("dim", ` · ${formatElapsed(viewElapsed(agent as AgentView, Date.now()))}`) : ""}`
+      : this.theme.fg("muted", "Loading child session...");
+
     const body = this.content(inner);
     this.totalLines = body.length;
     const max = Math.max(0, body.length - this.viewport);
     this.scroll = this.follow ? max : Math.min(max, this.scroll);
     const visible = body.slice(this.scroll, this.scroll + this.viewport);
-    const output = [...chrome, ...visible, footer];
-    // Tiny terminals still get a dismissal hint instead of overflowing the host.
-    const fitted = output.length > rows ? [...output.slice(0, Math.max(0, rows - 1)), footer] : output;
-    return fitted.map(line => truncateToWidth(line, width));
+    while (visible.length < this.viewport) visible.push("");
+
+    const percent = body.length <= this.viewport ? 100 : Math.round(((this.scroll + this.viewport) / Math.max(1, body.length)) * 100);
+    const status = this.error
+      ? this.theme.fg("error", oneLine(this.error, 120))
+      : this.snapshot?.notice ? this.theme.fg("warning", oneLine(this.snapshot.notice, 120))
+        : this.snapshot?.loading ? this.theme.fg("dim", "Loading history...")
+          : this.theme.fg("dim", `${this.follow ? "Following" : "Paused"} · ${body.length} lines · ${Math.min(100, percent)}%`);
+    const keys: string[] = ["↑↓ scroll", "PgUp/PgDn", "Home/End"];
+    if (agent && canSteer(agent.phase)) keys.push("s message");
+    else if (agent && isTerminal(agent.phase)) keys.push("s resume");
+    if (agent && !isTerminal(agent.phase)) keys.push("x stop");
+    keys.push("Esc close");
+    const footer = bar(status, this.theme.fg("dim", keys.join(" · ")));
+    const rule = this.theme.fg("border", `├${"─".repeat(Math.max(0, width - 2))}┤`);
+    if (!framed) return [row(header), ...visible.map((line) => row(line)), footer].map((line) => truncateToWidth(line, width));
+    return [
+      this.theme.fg("border", `╭${"─".repeat(Math.max(0, width - 2))}╮`),
+      row(header),
+      rule,
+      ...visible.map((line) => row(line)),
+      rule,
+      footer,
+      this.theme.fg("border", `╰${"─".repeat(Math.max(0, width - 2))}╯`),
+    ].map((line) => truncateToWidth(line, width));
   }
 
+  /** Build the scrollable transcript once per width and revision. */
   private content(width: number): string[] {
     if (this.cache?.width === width) return this.cache.lines;
     const lines: string[] = [];
     for (const entry of this.snapshot?.entries ?? []) {
-      if (entry.kind === "assistant" && !entry.text) continue;
-      const color = entry.status === "error" ? "error" : entry.kind === "user" ? "accent" : entry.kind === "tool" ? "muted" : "text";
-      lines.push(this.theme.bold(this.theme.fg(color, `${oneLine(entry.title, 200)}${entry.status ? ` [${entry.status}]` : ""}`)));
-      const blocks = [entry.input === undefined ? undefined : `Input:\n${entry.input}`, entry.text || (entry.kind === "tool" ? "Waiting for output..." : undefined)];
-      for (const block of blocks) if (block) {
-        for (const line of clean(block).split(/\r?\n/)) lines.push(...wrapTextWithAnsi(line, width).map(value => `  ${value}`));
-      }
-      lines.push("");
+      const rendered = this.renderEntry(entry, width);
+      if (rendered.length) lines.push(...rendered, "");
     }
     if (!lines.length) lines.push(this.theme.fg("dim", "No messages yet. Waiting for the child to emit events."));
     this.cache = { width, lines };
     return lines;
   }
+
+  private markdown(text: string, width: number, color?: string): string[] {
+    if (!this.markdownTheme) return clean(text).split(/\r?\n/).flatMap((line) => wrapPlain(line, width));
+    const component = new Markdown(text, 0, 0, this.markdownTheme as never, color ? { color: (value: string) => this.theme.fg(color, value) } : undefined);
+    return component.render(width).map((line) => truncateToWidth(line, width));
+  }
+
+  private renderEntry(entry: TranscriptEntry, width: number): string[] {
+    const title = oneLine(entry.title, 80);
+    if (entry.kind === "user") {
+      const block = this.markdown(clean(entry.text || ""), Math.max(1, width - 2), "userMessageText");
+      // Pi renders user prompts on their own background band.
+      return block.map((line) => this.theme.bg?.("userMessageBg", ` ${line}${" ".repeat(Math.max(0, width - 2 - visibleWidth(line)))} `) ?? ` ${line}`);
+    }
+    if (entry.kind === "tool") {
+      const color = entry.status === "error" ? "error" : entry.status === "running" ? "warning" : "toolTitle";
+      const args = formatArgs(entry.input);
+      const out: string[] = [`${this.theme.fg(color, "⏺")} ${this.theme.bold(this.theme.fg("toolTitle", title))}${args ? this.theme.fg("muted", args) : ""}${entry.status ? this.theme.fg("dim", ` [${entry.status}]`) : ""}`];
+      const output = entry.text ? clean(entry.text).split(/\r?\n/) : [];
+      const shown = output.slice(-MAX_TOOL_OUTPUT_LINES);
+      if (output.length > shown.length) out.push(this.theme.fg("dim", `  … ${output.length - shown.length} earlier lines`));
+      for (const line of shown) out.push(...wrapPlain(line, Math.max(1, width - 4)).map((value) => `  ${this.theme.fg(entry.status === "error" ? "error" : "toolOutput", value)}`));
+      if (!entry.text && entry.status !== "error") out.push(this.theme.fg("dim", "  … running"));
+      return out;
+    }
+    if (entry.kind === "assistant") {
+      if (!entry.text) return [];
+      return this.markdown(clean(entry.text), width, "text");
+    }
+    const color = entry.status === "error" ? "error" : "warning";
+    return [`${this.theme.fg(color, "!")} ${this.theme.fg(color, title)}`, ...(entry.text ? wrapPlain(clean(entry.text), Math.max(1, width - 2)).map((line) => `  ${this.theme.fg("dim", line)}`) : [])];
+  }
+}
+
+/** Compact tool arguments into `(k: v, …)` like Pi's transcript; fall back to raw clipped text. */
+function formatArgs(input: string | undefined): string {
+  if (!input) return "";
+  const raw = clean(input).trim();
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      const parts = Object.entries(parsed as Record<string, unknown>).map(([key, value]) => {
+        if (value === null || typeof value !== "object") return `${key}: ${String(value)}`;
+        return `${key}: …`;
+      });
+      if (parts.length && parts.length <= 6) return `(${oneLine(parts.join(", "), 120)})`;
+    }
+  } catch { /* not JSON: keep the raw text below */ }
+  return `(${oneLine(raw.split(/\r?\n/).slice(0, 2).join(" "), 120)})`;
+}
+
+/** Wrap a plain (already sanitized) line to the given visible width. */
+function wrapPlain(line: string, width: number): string[] {
+  const limit = Math.max(1, width);
+  if (!line) return [""];
+  const out: string[] = [];
+  let rest = line;
+  while (visibleWidth(rest) > limit) {
+    let cut = rest.length;
+    while (cut > 1 && visibleWidth(rest.slice(0, cut)) > limit) cut--;
+    out.push(rest.slice(0, cut));
+    rest = rest.slice(cut);
+  }
+  out.push(rest);
+  return out;
 }
