@@ -4,6 +4,7 @@ coverage/
 *.tsbuildinfo
 
 # Local configuration and generated probe output
+.pi/
 .env
 .env.*
 !.env.example
