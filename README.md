@@ -2,7 +2,7 @@
 
 A lightweight Pi extension for delegating work to real, reusable Pi CLI sessions. The parent agent chooses what to delegate; the extension manages execution and lifecycle, and a bundled skill guides delegation.
 
-**Status: work in progress.** The Pi-to-Pi collaboration loop has been exercised, but that is not a claim that every lifecycle and terminal interaction is production-ready.
+**Status: Pi → Pi first-phase workflow verified; broader lifecycle and terminal behavior remain work in progress.** A live parent Pi completed an implement → independent review → original implementer continuation through notifications without status polling. This is not a claim that every permission UI or crash-recovery path is production-ready.
 
 ## Scope
 
@@ -42,7 +42,7 @@ These command-line flags do not modify global settings. For project-level loadin
 | `list_pending_permissions` | Inspect unresolved requests from subagents owned by this parent session. |
 | `respond_to_permission` | Send one explicit, reasoned decision for a current request. |
 
-The parent must have a persistent session; `--no-session` cannot own subagents. Prompt acceptance is not completion. The final report records whether the run succeeded, failed, stopped, or needs a response. Parent-facing notifications include the full instance ID and a short result/error, not repeated local file paths; inspect `list_agents` or `/agents` for log and session details.
+The parent must have a persistent session; `--no-session` cannot own subagents. Prompt acceptance is not completion. The final report records whether the run succeeded, failed, stopped, or needs a response. **Do not poll `list_agents` for completion**: a `steer` report wakes the original parent at the next safe model boundary. Successes arriving within two seconds of the first success share one report; failures, pending interactions, unreachable workers, and inactivity reminders flush outstanding successes immediately. Reports include each full instance ID and the child's result/error, clipped per instance when long with an explicit pointer to `list_agents` or `/agents` and the raw log. A running child with no recorded activity for 15 minutes triggers one non-terminal reminder per run; this does not stop or restart it. Delivery is retried until the parent session contains the report receipt, so a crash at the delivery boundary may repeat a notification rather than lose it. Inspect `list_agents` or `/agents` for diagnosis, logs and native session details.
 
 ## Terminal UI
 
@@ -116,7 +116,7 @@ If a worker is unreachable or an ownership lock remains, the extension refuses d
 
 `npm test` builds the extension and runs deterministic tests without model calls. Tests cover protocol framing, lifecycle and original-session resume, role trust, report receipts, UI rendering, keyboard actions, transcript streaming, and cleanup. `npm run check` checks TypeScript.
 
-`node test/real-smoke.mjs` is an explicit opt-in real-model test; it normally makes two small calls and writes only to `.test-output/`. Prior real Pi RPC acceptance exercised implementation → independent review → original implementer continuation, parent exit/reconnect, offline report replay, and deduplication. Temporary tasks and raw acceptance artifacts remain local.
+`node test/real-smoke.mjs` is an explicit opt-in real-model test; it normally makes two small calls and writes only to `.test-output/`. Local real Pi RPC acceptance also exercised a notification-driven implement → review → original-implementer continuation without `list_agents` polling. A persisted parent session was reopened after an offline child completion, with one delivered report and no duplicate on a second reopen. A real parent Pi handled a fixture child's ambiguous permission request without approving it; the human denied the request and the child still sent its final report. Temporary drivers, tasks and raw artifacts remain local.
 
 Automated component tests are not full terminal acceptance. A no-model Windows ConPTY smoke test also loaded the actual Pi TUI in regular and fullscreen modes: the below-editor roster, arrow-key focus, opening a running child's live conversation, tool arguments, streaming output, resizing, scrolling, closing and exiting all passed. Its child was a deterministic RPC fixture, not another model call. Real TUI permission dialogs, parent TUI exit/replay, every terminal/key protocol and theme, and execution-owner crash recovery are not comprehensively verified. TUI approval is an optional compatibility path, not a blocker for the core Pi-to-Pi collaboration test. Safety-guard false positives remain unresolved; the parent-delegated decision path has deterministic protocol tests, but its real-model authorization behavior is not yet fully verified.
 

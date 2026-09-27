@@ -119,6 +119,24 @@ test('permissions remain waiting until an explicit human reply', { timeout: 20_0
   assert.ok(manager.reports().every(r => r.status !== 'waiting'));
 });
 
+test('running child inactive for 15 minutes produces one stable, non-terminal alert', { timeout: 20_000 }, async t => {
+  const { cwd, manager } = setup(t);
+  const start = await manager.spawn('worker', defaultRoles.worker, cwd, 'HOLD');
+  const file = path.join(manager.root, start.id, 'state.json');
+  const state = readJson(file);
+  fs.writeFileSync(file, JSON.stringify({ ...state, updatedAt: 1000 }));
+  assert.equal(manager.reports(900999).length, 0);
+  const alert = manager.reports(901000)[0];
+  assert.equal(alert.status, 'stalled');
+  assert.equal(alert.notificationId, `${state.runId}-inactive`);
+  assert.match(alert.text, /15 minutes.*list_agents/i);
+  assert.equal(manager.reports(1000000)[0].notificationId, alert.notificationId);
+  assert.equal(manager.get(start.id).phase, 'running', 'reminder must not stop the worker');
+  await manager.send(start.id, 'FINISH');
+  await complete(manager, start.id);
+  assert.ok(manager.reports(1000000).every(r => r.status !== 'stalled'));
+});
+
 test('close stops active work without deleting the resumable session', { timeout: 20_000 }, async t => {
   const { cwd, manager } = setup(t);
   const start = await manager.spawn('worker', defaultRoles.worker, cwd, 'HOLD');

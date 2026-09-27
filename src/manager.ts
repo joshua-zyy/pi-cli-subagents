@@ -133,7 +133,7 @@ export class AgentManager {
     return this.get(id);
   }
 
-  reports(): Report[] {
+  reports(now = Date.now()): Report[] {
     const reports: Report[] = [];
     for (const state of this.list()) {
       const folder = path.join(this.directory(state.id), "reports");
@@ -146,6 +146,12 @@ export class AgentManager {
       if (state.phase === "unreachable") reports.push({
         notificationId: `${state.runId}-unreachable`, agentId: state.id, runId: state.runId, parentFile: this.parentFile,
         status: "failed", time: state.updatedAt, text: "", error: state.error, logFile: state.logFile,
+      });
+      if (["running", "starting"].includes(state.phase) && now - state.updatedAt >= 15 * 60_000) reports.push({
+        notificationId: `${state.runId}-inactive`, agentId: state.id, runId: state.runId, parentFile: this.parentFile,
+        status: "stalled", time: state.updatedAt + 15 * 60_000,
+        text: "No activity for 15 minutes; the child may still be running. Inspect with list_agents or /agents; do not assume failure or start duplicate work.",
+        logFile: state.logFile,
       });
     }
     return reports.sort((a, b) => a.time - b.time);

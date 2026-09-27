@@ -58,7 +58,7 @@ export interface Report {
   agentId: string;
   runId: string;
   parentFile: string;
-  status: "completed" | "failed" | "stopped" | "waiting";
+  status: "completed" | "failed" | "stopped" | "waiting" | "stalled";
   time: number;
   text: string;
   error?: string;

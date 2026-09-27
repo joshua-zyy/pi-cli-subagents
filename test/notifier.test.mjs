@@ -19,7 +19,7 @@ test('multiple reports are batched, queued once while pending, and deduplicated 
   assert.deepEqual(h.sent[0].message.details.ids, ['first', 'second']);
   assert.match(h.sent[0].message.content, /\[Subagent agent · completed\]\nDONE/);
   assert.doesNotMatch(h.sent[0].message.content, /Full event log:|Result file:|trace|run first/);
-  assert.deepEqual(h.sent[0].options, { triggerTurn: true, deliverAs: 'followUp' });
+  assert.deepEqual(h.sent[0].options, { triggerTurn: true, deliverAs: 'steer' });
   deliverReports(h.manager, h.pi, h.ctx, pending);
   assert.equal(h.sent.length, 1, 'polling cannot queue a duplicate before message is persisted');
   // Pi persists ExtensionAPI.sendMessage as a SessionManager custom_message entry,
@@ -37,6 +37,7 @@ test('error and waiting messages keep actionable details without embedding file 
   deliverReports(h.manager,h.pi,h.ctx,new Set());
   const content=h.sent[0].message.content;
   assert.match(content,/Permission denied/);assert.match(content,/Approve one operation\?/);
+  assert.match(content, /Question ID: q.*list_pending_permissions/s);
   assert.doesNotMatch(content,/C:\\long|Full event log|Result file/);
   assert.deepEqual(h.sent[0].message.details.ids,['failed','waiting']);
 });
@@ -49,6 +50,43 @@ test('a crashed delivery before append retries; after append does not', () => {
   h.pi.sendMessage = (m, o) => h.sent.push({ message: m, options: o });
   deliverReports(h.manager, h.pi, h.ctx, pending);
   assert.equal(h.sent.length, 1);
+});
+
+test('nearby successes share a two-second window; later successes start a new batch', () => {
+  const reports = [report('first')]; reports[0].time = 1000;
+  const h = harness(reports), pending = new Set();
+  deliverReports(h.manager, h.pi, h.ctx, pending, 1000);
+  assert.equal(h.sent.length, 0);
+  reports.push({ ...report('second'), time: 2500 });
+  deliverReports(h.manager, h.pi, h.ctx, pending, 2999);
+  assert.equal(h.sent.length, 0);
+  deliverReports(h.manager, h.pi, h.ctx, pending, 3000);
+  assert.deepEqual(h.sent[0].message.details.ids, ['first', 'second']);
+  reports.push({ ...report('third'), time: 3200 });
+  deliverReports(h.manager, h.pi, h.ctx, pending, 4000);
+  assert.equal(h.sent.length, 1);
+  deliverReports(h.manager, h.pi, h.ctx, pending, 5200);
+  assert.deepEqual(h.sent[1].message.details.ids, ['third']);
+});
+
+test('failure, waiting and inactivity alerts flush held successes without waiting', () => {
+  for (const status of ['failed', 'waiting', 'stalled']) {
+    const reports = [{ ...report('success'), time: 1000 }];
+    const h = harness(reports), pending = new Set();
+    deliverReports(h.manager, h.pi, h.ctx, pending, 1200);
+    assert.equal(h.sent.length, 0);
+    reports.push({ ...report(status), time: 1300, status, text: status === 'waiting' ? 'Approve one operation?' : 'Needs attention' });
+    deliverReports(h.manager, h.pi, h.ctx, pending, 1300);
+    assert.deepEqual(h.sent[0].message.details.ids, ['success', status]);
+    assert.equal(h.sent.length, 1);
+  }
+});
+
+test('long output is explicitly clipped with a way to inspect the full result', () => {
+  const h = harness([{ ...report('long'), text: 'A'.repeat(10000) }]);
+  deliverReports(h.manager, h.pi, h.ctx, new Set());
+  assert.ok(h.sent[0].message.content.length < 4000);
+  assert.match(h.sent[0].message.content, /truncated.*list_agents.*agent/is);
 });
 
 test('no-session parent must fail closed rather than create unowned agents', async () => {
