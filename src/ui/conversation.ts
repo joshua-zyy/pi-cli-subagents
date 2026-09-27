@@ -2,7 +2,7 @@ import { Input, Markdown, matchesKey, stripTerminalSequences, truncateToWidth, v
 import type { AgentView } from "../types.js";
 import type { PanelAction } from "./panel.js";
 import type { TranscriptEntry, TranscriptSnapshot } from "./transcript.js";
-import { canMessage, canSteer, formatElapsed, formatTokens, isTerminal, oneLine, phaseColor, phaseIcon, phaseLabel, rightAlign, viewElapsed } from "./format.js";
+import { canMessage, canSteer, formatElapsed, formatTokens, isTerminal, oneLine, phaseColor, phaseIcon, phaseLabel, rightAlign, shortId, viewElapsed } from "./format.js";
 
 export interface ConversationSnapshot extends TranscriptSnapshot {
   agent: Pick<AgentView, "id" | "role" | "phase" | "runId"> & Partial<Pick<AgentView, "startedAt" | "updatedAt">>;
@@ -201,7 +201,7 @@ export class ConversationViewer {
     const stats = [this.snapshot?.usage ? `${formatTokens(this.snapshot.usage.input + this.snapshot.usage.output + this.snapshot.usage.cacheRead + this.snapshot.usage.cacheWrite)} tokens` : undefined,
       this.snapshot?.model ? oneLine(this.snapshot.model, 40) : undefined].filter(Boolean).join(" · ");
     const header = agent
-      ? rightAlign(`${this.theme.fg(phaseColor(agent.phase), isTerminal(agent.phase) ? phaseIcon(agent.phase) : "●")} ${this.theme.bold(this.theme.fg("text", oneLine(agent.role, 40)))}${this.theme.fg("muted", ` · ${phaseLabel(agent.phase)}`)}${agent.startedAt ? this.theme.fg("dim", ` · ${formatElapsed(viewElapsed(agent as AgentView, Date.now()))}`) : ""}`,
+      ? rightAlign(`${this.theme.fg(phaseColor(agent.phase), isTerminal(agent.phase) ? phaseIcon(agent.phase) : "●")} ${this.theme.bold(this.theme.fg("text", oneLine(agent.role, 40)))} ${this.theme.fg("dim", shortId(agent.id))}${this.theme.fg("muted", ` · ${phaseLabel(agent.phase)}`)}${agent.startedAt ? this.theme.fg("dim", ` · ${formatElapsed(viewElapsed(agent as AgentView, Date.now()))}`) : ""}`,
         this.theme.fg("dim", stats), inner)
       : this.theme.fg("muted", "Loading child session...");
 

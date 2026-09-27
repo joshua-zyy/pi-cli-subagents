@@ -72,6 +72,12 @@ export function formatElapsed(ms: number): string {
 
 export const viewStartedAt = (view: AgentView): number => view.startedAt ?? view.updatedAt;
 
+/**
+ * Same-role instances are only distinguishable by identity, and a full UUID crowds out the task
+ * summary on narrow terminals. Lists show this stable prefix; detail views keep the full ID.
+ */
+export const shortId = (id: string): string => (typeof id === "string" ? id.slice(0, 8) : "");
+
 /** Freeze elapsed time at updatedAt for terminal states. */
 export const viewElapsed = (view: AgentView, now: number): number =>
   (isTerminal(view.phase) ? view.updatedAt : now) - viewStartedAt(view);

@@ -27,6 +27,12 @@ test('RPC correlates requests, preserves Unicode separators, and surfaces reject
 
 test('role settings inherit defaults; untrusted project files are not loaded', () => {
   const user = temp(), cwd = temp();
+  // Built-in roles cover investigation, implementation and independent review.
+  assert.deepEqual(Object.keys(loadRoles(user, cwd, true)), ['explore', 'worker', 'reviewer']);
+  for (const role of Object.values(loadRoles(user, cwd, true))) {
+    assert.ok(role.description.trim() && role.instructions.trim());
+  }
+  assert.match(loadRoles(user, cwd, true).explore.instructions, /not a read-only sandbox/, 'the explore role must not promise isolation it does not enforce');
   writeJson(path.join(user, 'cli-subagents.roles.json'), { custom: { description: 'global', instructions: 'do work', model: 'chosen' } });
   writeJson(path.join(cwd, '.pi/cli-subagents.roles.json'), { custom: { description: 'project', instructions: 'project work', thinking: 'high' } });
   assert.equal(loadRoles(user, cwd, false).custom.model, 'chosen');
@@ -34,4 +40,6 @@ test('role settings inherit defaults; untrusted project files are not loaded', (
   assert.equal(loadRoles(user, cwd, true).worker.model, undefined);
   writeJson(path.join(cwd, '.pi/cli-subagents.roles.json'), { custom: { description: 'bad', instructions: 'bad', models: 'typo' } });
   assert.throws(() => loadRoles(user, cwd, true), /unknown fields/);
+  writeJson(path.join(cwd, '.pi/cli-subagents.roles.json'), { explore: { description: 'project explore', instructions: 'project instructions' } });
+  assert.equal(loadRoles(user, cwd, true).explore.description, 'project explore', 'a configured role replaces the built-in one');
 });

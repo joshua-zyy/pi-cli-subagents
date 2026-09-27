@@ -3,6 +3,10 @@ import { readJson } from "./storage.js";
 import type { Role, Thinking } from "./types.js";
 
 export const defaultRoles: Record<string, Role> = {
+  explore: {
+    description: "Investigate the code and report findings without changing project files",
+    instructions: "Investigate the question assigned by the parent agent. Report the conclusion, the file and symbol locations that support it, the evidence you actually observed, and the questions you could not answer. Distinguish what you verified from what you inferred. Do not change project files, and do not implement the work you are investigating. Permissions follow the CLI configuration: these role instructions are not a read-only sandbox.",
+  },
   worker: {
     description: "Implement a task and verify the changes",
     instructions: "Complete the implementation assigned by the parent agent. Change only authorized files. Verify the changes and report the result, actual edits and unresolved issues. Do not treat tool failures as success or delegate to further agents.",

@@ -5,7 +5,7 @@ import { AgentManager } from "./manager.js";
 import { deliverReports } from "./notifier.js";
 import { loadRoles } from "./roles.js";
 import { AgentsPanel, type PanelAction } from "./ui/panel.js";
-import { canSteer, isTerminal } from "./ui/format.js";
+import { canSteer, isTerminal, oneLine } from "./ui/format.js";
 import { StatusWidget } from "./ui/status.js";
 import { FleetView } from "./ui/fleet.js";
 import { TranscriptReader } from "./ui/transcript.js";
@@ -19,13 +19,16 @@ export function parentManager(ctx: Pick<ExtensionContext, "sessionManager">, lau
 }
 
 function visible(state: AgentView) {
-  // `task` and `startedAt` let the parent match an instance to its assignment without reading the TUI.
-  const { id, role, phase, task, runId, sessionId, cwd, startedAt, updatedAt, lastActivity, questions, text, truncated, error, logFile } = state;
-  return { id, role, phase, runId, sessionId, cwd, updatedAt, lastActivity, questions, text, truncated, error, logFile,
+  // `task`, `history` and `startedAt` let the parent match an instance to its assignments
+  // after its own context is compacted, without reading the child's transcript.
+  const { id, role, phase, task, history, runCount, runId, sessionId, cwd, startedAt, updatedAt, lastActivity, questions, text, truncated, error, logFile } = state;
+  return { id, role, phase, runId, sessionId, cwd, updatedAt, lastActivity, questions, text, truncated, error, logFile, history, runCount,
     ...(task ? { task } : {}), ...(startedAt ? { startedAt } : {}) };
 }
 const view = (state: AgentView): string => JSON.stringify(visible(state));
 const content = (text: string) => ({ content: [{ type: "text" as const, text }], details: undefined });
+/** Separate from report receipts: these entries record what the human did, not what a child reported. */
+export const humanActionType = "cli-subagents-human-action";
 
 export default function extension(pi: ExtensionAPI): void {
   // Explicit child marker prevents an auto-discovered copy of this extension from recursively spawning agents.
@@ -34,6 +37,19 @@ export default function extension(pi: ExtensionAPI): void {
   const launch: Launch = { command: process.execPath, args: [cli] };
   let dismissPanel: (() => void) | undefined;
   let sessionEpoch = 0;
+
+  /**
+   * The parent coordinates this instance, so a direct human action must not be invisible to it.
+   * It is recorded without starting a turn: routine additions should not interrupt sibling work,
+   * and the entry is already in context when the child's own report arrives.
+   */
+  function recordHumanAction(ctx: ExtensionContext, agent: AgentView, action: string): void {
+    const text = `[Human → subagent ${agent.id} · ${agent.role}] ${action}\n`
+      + "The user acted on this instance directly. Re-check your plan for it before integrating or dispatching related work. This does not widen the task's original authorization.";
+    try { pi.sendMessage({ customType: humanActionType, content: text, display: true, details: { agentId: agent.id, role: agent.role } }, { triggerTurn: false }); }
+    catch (error) { ctx.ui.notify(`The parent agent was not told about this action: ${(error as Error).message}`, "warning"); }
+  }
+
   let active: { file: string; ctx: ExtensionContext; manager: AgentManager; pending: Set<string>; timer: NodeJS.Timeout; widget?: StatusWidget; fleet?: FleetView } | undefined;
 
   function pump(): void {
@@ -70,7 +86,7 @@ export default function extension(pi: ExtensionAPI): void {
 
   pi.registerTool({
     name: "spawn_agent", label: "Spawn Pi subagent",
-    description: "Start an independent, reusable Pi CLI subagent asynchronously. Returns an ID; keep working while completion reports arrive automatically. Roles: worker/reviewer or custom roles.",
+    description: "Start an independent, reusable Pi CLI subagent asynchronously. Returns an ID; keep working while completion reports arrive automatically. Roles: explore/worker/reviewer or custom roles. Reuse an existing instance with send_input when the new work depends on what it already did.",
     parameters: Type.Object({
       role: Type.String({ description: "Role name; use list_agents to discover available roles" }),
       task: Type.String({ description: "Concrete goal, authorized files and verification criteria; do not widen CLI permissions" }),
@@ -99,7 +115,7 @@ export default function extension(pi: ExtensionAPI): void {
   });
   pi.registerTool({
     name: "list_agents", label: "List Pi subagents",
-    description: "List this parent's subagent instances, their states and available roles. Does not access other parent sessions.",
+    description: "List this parent's subagent instances with the assignments each one has already handled (history, oldest first) and the available roles. Use it to recover which instance did what before reusing one; do not poll it for completion. Does not access other parent sessions.",
     parameters: Type.Object({ id: Type.Optional(Type.String({ description: "If provided, return only this instance" })) }),
     async execute(_id, args, _signal, _update, ctx) {
       const roles = loadRoles(getAgentDir(), ctx.cwd, ctx.isProjectTrusted());
@@ -146,6 +162,11 @@ export default function extension(pi: ExtensionAPI): void {
   });
 
   // The human entry point remains available when the parent cannot decide safely.
+  const describeAnswer = (answer: { value?: string; confirmed?: boolean; cancelled?: boolean }): string => {
+    if (answer.cancelled) return "cancelled";
+    if (typeof answer.confirmed === "boolean") return answer.confirmed ? "approved once" : "denied";
+    return `replied "${oneLine(answer.value, 200)}"`;
+  };
   async function replyPrompt(ctx: ExtensionContext, manager: AgentManager, id: string, questionId: string): Promise<void> {
     if (!ctx.hasUI) throw new Error("Interaction requires a TUI or an RPC client with dialogs");
     const q: Question | undefined = manager.get(id).questions.find((entry) => entry.id === questionId);
@@ -163,6 +184,7 @@ export default function extension(pi: ExtensionAPI): void {
       answer = value === undefined ? { cancelled: true } : { value };
     }
     await manager.reply(id, questionId, answer);
+    recordHumanAction(ctx, manager.get(id), `Answered pending request ${questionId}: ${describeAnswer(answer)}.`);
     ctx.ui.notify(`Human response sent to subagent ${id}`, "info");
   }
 
@@ -216,7 +238,7 @@ export default function extension(pi: ExtensionAPI): void {
                     const agent = manager.get(id);
                     return { agent, ...await reader.read(manager.eventLogs(id)) };
                   }, { keybindings, markdownTheme: getMarkdownTheme(),
-                    onSend: async (message) => { await manager.send(id, message); },
+                    onSend: async (message) => { recordHumanAction(ctx, await manager.send(id, message), `Sent an instruction: "${oneLine(message, 400)}"`); },
                     // Match Pi's input box: its border follows the main session's thinking level.
                     frameColor: (text) => ctx.ui.theme.getThinkingBorderColor(ctx.thinkingLevel ?? "off")(text) });
                   return viewer;
@@ -232,7 +254,7 @@ export default function extension(pi: ExtensionAPI): void {
               if (isTerminal(state.phase)) { ctx.ui.notify(`${state.role} has already ended; nothing to stop.`, "info"); continue; }
               const confirmed = await ctx.ui.confirm("Stop subagent?", `${state.role} ${action.id.slice(0, 8)}: stop active work. The native session and results remain available for later continuation.`);
               if (!confirmed || epoch !== sessionEpoch) continue;
-              await manager.close(action.id);
+              recordHumanAction(ctx, await manager.close(action.id), "Stopped active work; the original session and results remain available.");
               ctx.ui.notify("Processes stopped; original session retained.", "info");
               if (fromFleet) return;
               continue;
@@ -242,7 +264,8 @@ export default function extension(pi: ExtensionAPI): void {
             const message = await ctx.ui.editor(steerable ? `Message ${state.role}` : `Resume ${state.role} in the original session`, "");
             if (!message?.trim() || epoch !== sessionEpoch) continue;
             if (!steerable) ctx.ui.notify("Starting a new turn in the original session; this can take up to about 60 seconds...", "info");
-            await manager.send(action.id, message);
+            recordHumanAction(ctx, await manager.send(action.id, message),
+              `${steerable ? "Sent an instruction" : "Resumed the original session with"}: "${oneLine(message, 400)}"`);
             ctx.ui.notify(steerable ? "Instructions accepted; a completion report will follow." : "New turn accepted in the original session; a completion report will follow.", "info");
             if (fromFleet) return;
           } catch (error) { ctx.ui.notify((error as Error).message, "error"); if (fromFleet) return; }

@@ -33,6 +33,17 @@ export interface Question {
   expiresAt?: number;
 }
 export interface SessionHandle { sessionId: string; sessionFile: string }
+/**
+ * One assignment this instance has already been given. It answers "what did this instance do"
+ * after the parent's own context is compacted, without replaying the child's transcript.
+ */
+export interface TaskRun {
+  runId: string;
+  startedAt: number;
+  task?: string;
+  /** Reported outcome, the live phase of the current run, or `unknown` when a run left no report. */
+  status: Phase | "unknown";
+}
 export interface AgentState extends Partial<SessionHandle> {
   id: string;
   runId: string;
@@ -51,7 +62,7 @@ export interface AgentState extends Partial<SessionHandle> {
   exitCode?: number | null;
   forced?: boolean;
 }
-export interface StartRequest { runId: string; message: string; session?: SessionHandle }
+export interface StartRequest { runId: string; message: string; session?: SessionHandle; createdAt?: number }
 export interface Endpoint { port: number; token: string; runId: string }
 export interface Report {
   notificationId: string;
@@ -71,6 +82,9 @@ export interface AgentView extends AgentState {
   cwd: string;
   /** Optional one-line summary of the current run's task. */
   task?: string;
+  /** Most recent assignments, oldest first; `runCount` reports how many exist in total. */
+  history: TaskRun[];
+  runCount: number;
   text?: string;
   truncated?: boolean;
 }

@@ -5,10 +5,18 @@ import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { control } from "./control.js";
 import { directories, jsonFiles, processAlive, readJson, shorten, waitUntil, writeJson } from "./storage.js";
-import type { AgentSpec, AgentState, AgentView, Control, Delivery, Endpoint, Launch, Report, Role, SessionHandle, StartRequest } from "./types.js";
+import type { AgentSpec, AgentState, AgentView, Control, Delivery, Endpoint, Launch, Report, Role, SessionHandle, StartRequest, TaskRun } from "./types.js";
 
 const workerFile = fileURLToPath(new URL("./worker.js", import.meta.url));
 const idPattern = /^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/;
+/** Enough recent assignments to choose a reusable instance without pasting a whole work history. */
+const HISTORY_LIMIT = 5;
+
+/** One-line assignment summary: the parent matches an instance to its work, not to a transcript. */
+function summarize(message: string | undefined, limit = 200): string | undefined {
+  const flat = typeof message === "string" ? message.replace(/\s+/g, " ").trim().slice(0, limit) : "";
+  return flat || undefined;
+}
 
 export class AgentManager {
   readonly root: string;
@@ -35,21 +43,47 @@ export class AgentManager {
       state = { ...state, phase: "unreachable", error: "The worker exited and task status is uncertain. Do not start duplicate work; inspect the logs and owner.lock." };
     }
     const report = state.resultFile ? readJson<Report>(state.resultFile) : undefined;
-    const request = readJson<StartRequest>(path.join(dir, "runs", state.runId, "request.json"));
-    const task = request?.message ? request.message.replace(/\s+/g, " ").trim().slice(0, 200) : undefined;
-    return { ...state, role: spec.roleName, cwd: spec.cwd, ...(task ? { task } : {}), ...(report ? shorten(report.text) : {}) };
+    const current = state.runId, phase = state.phase;
+    // A resume writes its run directory before the worker replaces state.json. Report only runs
+    // the persisted state has acknowledged, so a queued run is never paired with the previous
+    // run's phase — that would read as "finished" while the new work has not started.
+    const all = this.runs(id), acknowledged = all.findIndex((run) => run.runId === current), runs = acknowledged < 0 ? all : all.slice(0, acknowledged + 1);
+    const history = runs.slice(-HISTORY_LIMIT).map<TaskRun>((run) => {
+      const task = summarize(run.request.message);
+      const outcome = readJson<Report>(path.join(dir, "reports", `${run.runId}-result.json`))?.status;
+      const final = outcome === "completed" || outcome === "failed" || outcome === "stopped" ? outcome : undefined;
+      return {
+        runId: run.runId, startedAt: run.time, ...(task ? { task } : {}),
+        // A run that left no result report has no verdict to report; never invent one.
+        status: final ?? (run.runId === current ? phase : "unknown"),
+      };
+    });
+    const latest = history.at(-1);
+    return { ...state, role: spec.roleName, cwd: spec.cwd, history, runCount: runs.length,
+      ...(latest?.runId === current && latest.task ? { task: latest.task } : {}), ...(report ? shorten(report.text) : {}) };
   }
   list(): AgentView[] { return directories(this.root).filter((id) => idPattern.test(id)).map((id) => this.get(id)); }
 
-  /** Return only this parent's validated run logs, ordered by request creation time. */
+  /** Only this parent's validated runs, oldest first. Requests carry their own creation time. */
+  private runs(id: string): { runId: string; folder: string; time: number; request: StartRequest }[] {
+    const root = path.join(this.directory(id), "runs");
+    const runs: { runId: string; folder: string; time: number; request: StartRequest }[] = [];
+    for (const runId of directories(root)) {
+      if (!idPattern.test(runId)) continue;
+      const folder = path.join(root, runId), file = path.join(folder, "request.json");
+      // A run directory exists before its request file is durable; skip it rather than failing a poll.
+      const request = readJson<StartRequest>(file);
+      if (!request || request.runId !== runId) continue;
+      try { runs.push({ runId, folder, request, time: request.createdAt ?? statSync(file).mtimeMs }); }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+    }
+    return runs.sort((a, b) => a.time - b.time || a.runId.localeCompare(b.runId));
+  }
+
+  /** Event logs for this instance, ordered like its task history. */
   eventLogs(id: string): string[] {
     this.spec(id);
-    const root = path.join(this.directory(id), "runs");
-    return directories(root).filter(runId => idPattern.test(runId)).map(runId => {
-      const folder = path.join(root, runId);
-      const request = path.join(folder, "request.json");
-      return { file: path.join(folder, "events.jsonl"), time: statSync(request).mtimeMs };
-    }).sort((a, b) => a.time - b.time || a.file.localeCompare(b.file)).map(run => run.file);
+    return this.runs(id).map((run) => path.join(run.folder, "events.jsonl"));
   }
 
   async spawn(roleName: string, role: Role, cwd: string, message: string): Promise<AgentView> {
@@ -69,7 +103,7 @@ export class AgentManager {
     if (session && !existsSync(session.sessionFile)) throw new Error(`Original session file is missing: ${session.sessionFile}; will not silently create a new session.`);
     const runId = randomUUID(), runDir = path.join(dir, "runs", runId);
     mkdirSync(runDir, { recursive: true, mode: 0o700 });
-    const initial: StartRequest = { runId, message, session };
+    const initial: StartRequest = { runId, message, createdAt: Date.now(), session };
     writeJson(path.join(runDir, "request.json"), initial);
     const fd = openSync(path.join(runDir, "worker.log"), "a", 0o600);
     try {

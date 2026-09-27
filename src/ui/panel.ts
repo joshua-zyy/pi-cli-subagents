@@ -1,6 +1,6 @@
 import { matchesKey, stripTerminalSequences, truncateToWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import type { AgentView } from "../types.js";
-import { canMessage, canSteer, formatElapsed, isActive, isTerminal, oneLine, phaseColor, phaseIcon, phaseLabel, rightAlign, viewElapsed, SPINNER, type UiColor, type UiTheme } from "./format.js";
+import { canMessage, canSteer, formatElapsed, isActive, isTerminal, oneLine, phaseColor, phaseIcon, phaseLabel, rightAlign, shortId, viewElapsed, SPINNER, type UiColor, type UiTheme } from "./format.js";
 
 export type PanelAction =
   | { kind: "view"; id: string }
@@ -143,7 +143,7 @@ export class AgentsPanel {
     const role = current ? this.theme.bold(this.theme.fg("text", agent.role)) : this.theme.fg("muted", agent.role);
     const task = oneLine(agent.task, 80) || "(No task summary)";
     const stats = `${phaseLabel(agent.phase)} · ${formatElapsed(viewElapsed(agent, this.now))}`;
-    const left = `  ${bullet} ${this.theme.fg(phaseColor(agent.phase), icon)} ${role}  ${current ? this.theme.fg("text", task) : this.theme.fg("dim", task)}`;
+    const left = `  ${bullet} ${this.theme.fg(phaseColor(agent.phase), icon)} ${role} ${this.theme.fg("dim", shortId(agent.id))}  ${current ? this.theme.fg("text", task) : this.theme.fg("dim", task)}`;
     return rightAlign(left, current ? this.theme.fg("text", stats) : this.theme.fg("dim", stats), width);
   }
 

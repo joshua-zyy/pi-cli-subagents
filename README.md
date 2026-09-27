@@ -2,17 +2,18 @@
 
 A lightweight Pi extension for delegating work to real, reusable Pi CLI sessions. The parent agent chooses what to delegate; the extension manages execution and lifecycle, and a bundled skill guides delegation.
 
-**Status: Pi → Pi first-phase workflow verified; broader lifecycle and terminal behavior remain work in progress.** A live parent Pi completed an implement → independent review → original implementer continuation through notifications without status polling. This is not a claim that every permission UI or crash-recovery path is production-ready.
+**Status: phase 1 (reliable instance identity, task history, and human-intervention sync) verified; managed worktrees and non-Pi CLI adapters are not implemented.** A live parent Pi completed an implement → independent review → original implementer continuation through notifications without status polling, and a reopened session rebuilt which instance did which task and resumed that instance in its original session. This is not a claim that every permission UI or crash-recovery path is production-ready.
 
 ## Scope
 
 - Dispatch independent Pi CLI sessions asynchronously, send further instructions, inspect instances, stop work, and receive reports.
 - Preserve the agent ID and native session across turns. Finished CLI processes may exit; later instructions resume the original session, never a silent replacement.
+- Recover which instance handled which task from persisted history, so a compacted or reopened parent session does not have to remember it.
 - Keep accepted child work running when the parent Pi exits. Results are saved and replayed when the original persistent parent session returns.
 - Review in a separate conversation, not an automatically created worktree. The parent coordinates writes in the shared working directory.
 - Inherit CLI model and permission configuration unless a role overrides the model. Report unresolved interactions instead of silently approving them.
 
-The first version targets **Pi → Pi**. It does not introduce a workflow DSL, remote service, web dashboard, automatic worktrees, nested delegation, or token budgeting. The lifecycle takes inspiration from Paseo; live child navigation takes inspiration from tintinweb/pi-subagents. Later phases may add OpenCode CLI, Codex CLI, Claude Code CLI, and Grok Build CLI adapters, then revisit subagent management patterns inspired by Codex. These later phases are not part of V1.
+The first version targets **Pi → Pi**. It does not introduce a workflow DSL, remote service, web dashboard, automatic worktrees, nested delegation, or token budgeting. The lifecycle takes inspiration from Paseo; live child navigation takes inspiration from tintinweb/pi-subagents. The next phases are managed worktrees for parallel edits, then OpenCode/Codex/Claude Code/Grok Build CLI adapters and their role, lifecycle and permission mapping. These later phases are not implemented.
 
 ## Development and local loading
 
@@ -35,20 +36,28 @@ These command-line flags do not modify global settings. For project-level loadin
 
 | Tool | Purpose |
 | --- | --- |
-| `spawn_agent` | Start a `worker`, `reviewer`, or custom role in a chosen working directory. |
+| `spawn_agent` | Start an `explore`, `worker`, `reviewer`, or custom role in a chosen working directory. |
 | `send_input` | Steer a running child, queue a `followUp`, or resume a finished child's original session. |
-| `list_agents` | List this parent's instances with their task summary, start time, roles, results, errors, and pending questions. |
+| `list_agents` | List this parent's instances with each one's earlier assignments and outcomes, roles, results, errors, and pending questions. |
 | `close_agent` | Stop active work without deleting the session or its history. |
 | `list_pending_permissions` | Inspect unresolved requests from subagents owned by this parent session. |
 | `respond_to_permission` | Send one explicit, reasoned decision for a current request. |
 
 The parent must have a persistent session; `--no-session` cannot own subagents. Prompt acceptance is not completion. The final report records whether the run succeeded, failed, stopped, or needs a response. **Do not poll `list_agents` for completion**: a `steer` report wakes the original parent at the next safe model boundary. Successes arriving within two seconds of the first success share one report; failures, pending interactions, unreachable workers, and inactivity reminders flush outstanding successes immediately. Reports include each full instance ID and the child's result/error, clipped per instance when long with an explicit pointer to `list_agents` or `/agents` and the raw log. A running child with no recorded activity for 15 minutes triggers one non-terminal reminder per run; this does not stop or restart it. Delivery is retried until the parent session contains the report receipt, so a crash at the delivery boundary may repeat a notification rather than lose it. Inspect `list_agents` or `/agents` for diagnosis, logs and native session details.
 
+## Instances, roles, and task history
+
+A role is a template; an instance is a colleague with a stable identity and its own native Pi session. The same role can run as several instances at once, so lists identify each one by role plus the first eight characters of its ID, and detail views keep the full ID for commands.
+
+`list_agents` reports each instance's `history`: the assignments it already handled, oldest first, each with the task summary, its run ID, its start time, and its outcome. `runCount` is the total number of runs, and `history` holds the five most recent. A run that ended without a result report is reported as `unknown` rather than being assumed successful. This is how the parent recovers *who did what* after its own context is compacted or the session is reopened, instead of relying on recall. Reuse an instance when the new task depends on what it already learned; start a new one for unrelated work. Session memory is not a current view of the code: when earlier work has since been integrated or changed, the follow-up task must say what to re-read.
+
+Direct human actions in the TUI — messaging or resuming an instance, answering its pending request, or stopping it — are appended to the parent session as `[Human → subagent …]` entries. They do not start a parent turn, so routine additions do not interrupt sibling work, but the parent sees them in context and can re-check its plan. They are instructions to one instance, not wider authorization.
+
 ## Terminal UI
 
 Two independent surfaces: a status summary above the editor and a navigable roster below it.
 
-The status widget above the editor shows role, phase, recent tool activity, and elapsed time. Waiting requests take priority. Active instances have a second activity line; finished instances collapse to one line, linger for 30 seconds, and then disappear. No widget space is reserved when there is nothing to show.
+The status widget above the editor shows role, short ID, phase, recent tool activity, and elapsed time. Waiting requests take priority. Active instances have a second activity line; finished instances collapse to one line, linger for 30 seconds, and then disappear. No widget space is reserved when there is nothing to show.
 
 ### Roster below the editor
 
@@ -67,7 +76,7 @@ Press **Ctrl+Alt+A** from Pi's main editor to open the full agent roster while c
 | `Esc` / `Left` | Return to the list. |
 | `q` | Close the panel. |
 
-The viewer is non-blocking with respect to child execution: closing it does not stop a child. It renders the child's own conversation in Pi's visual language: a bordered frame that uses your input box's border color, a header with role/phase/elapsed, user prompts on their message background, assistant replies as Markdown, and tool calls with their arguments and output (errors highlighted, long output clipped with a remaining-lines note).
+The viewer is non-blocking with respect to child execution: closing it does not stop a child. It renders the child's own conversation in Pi's visual language: a bordered frame that uses your input box's border color, a header with role, short ID, phase and elapsed time, user prompts on their message background, assistant replies as Markdown, and tool calls with their arguments and output (errors highlighted, long output clipped with a remaining-lines note).
 
 Scrolling follows Pi's transcript bindings, including user overrides from `keybindings.json`: **PageUp/PageDown** (or `tui.altScreen.pageUp/pageDown`) page through, **Home/End** jump to the top or back to live output, and **Up/Down** or **Shift+Up/Shift+Down** scroll a line at a time. Scrolling up pauses automatic following; returning to the end resumes it. The footer shows the follow state, total lines and scroll percentage, and the header shows the child's reported token usage and model.
 
@@ -86,7 +95,7 @@ Panels use temporary overlays, not a replacement editor. They are TUI-only; RPC 
 
 ## Custom roles
 
-Built-ins are `worker` and `reviewer`. Override or add roles in:
+Built-ins are `explore` (investigate without changing project files), `worker` (implement and verify), and `reviewer` (assess someone else's changes). Override or add roles in:
 
 - User: `~/.pi/agent/cli-subagents.roles.json`
 - Trusted project: `.pi/cli-subagents.roles.json`
@@ -117,6 +126,8 @@ If a worker is unreachable or an ownership lock remains, the extension refuses d
 `npm test` builds the extension and runs deterministic tests without model calls. Tests cover protocol framing, lifecycle and original-session resume, role trust, report receipts, UI rendering, keyboard actions, transcript streaming, and cleanup. `npm run check` checks TypeScript.
 
 `node test/real-smoke.mjs` is an explicit opt-in real-model test; it normally makes two small calls and writes only to `.test-output/`. Local real Pi RPC acceptance also exercised a notification-driven implement → review → original-implementer continuation without `list_agents` polling. A persisted parent session was reopened after an offline child completion, with one delivered report and no duplicate on a second reopen. A real parent Pi handled a fixture child's ambiguous permission request without approving it; the human denied the request and the child still sent its final report. Temporary drivers, tasks and raw artifacts remain local.
+
+The instance-history path has its own local driver (`.test-output/phase1-recall.mjs`, ignored by Git): one real parent dispatched two same-role workers with different tasks, exited, and a fresh process on the same session rebuilt the mapping from `list_agents` alone — resuming the correct instance by ID in its original native session while the other instance's run count stayed at one. It also caught a real defect during that check: a queued resume was briefly reported as finished, so `list_agents` now reports only runs the persisted state has acknowledged.
 
 Automated component tests are not full terminal acceptance. A no-model Windows ConPTY smoke test also loaded the actual Pi TUI in regular and fullscreen modes: the below-editor roster, arrow-key focus, opening a running child's live conversation, tool arguments, streaming output, resizing, scrolling, closing and exiting all passed. Its child was a deterministic RPC fixture, not another model call. Real TUI permission dialogs, parent TUI exit/replay, every terminal/key protocol and theme, and execution-owner crash recovery are not comprehensively verified. TUI approval is an optional compatibility path, not a blocker for the core Pi-to-Pi collaboration test. Safety-guard false positives remain unresolved; the parent-delegated decision path has deterministic protocol tests, but its real-model authorization behavior is not yet fully verified.
 

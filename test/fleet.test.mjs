@@ -36,6 +36,17 @@ test('no agents means no widget; below-editor roster is navigable without hijack
   h.fleet.dispose();assert.equal(h.state.handler,null);assert.equal(h.state.calls.at(-1).component,undefined);
 });
 
+test('narrow rosters keep same-role instances apart by identity',()=>{
+  const h=harness();const now=Date.now();
+  h.state.agents=[agent('3f2a9c1b-1111-4111-8111-111111111111',{startedAt:now-12000,updatedAt:now,task:'Add multiplication to the calculator module'}),
+    agent('b7e4d2a0-2222-4222-8222-222222222222',{startedAt:now-9000,updatedAt:now,task:'Add addition to the calculator module'})];
+  h.fleet.update();
+  const rows=h.state.widget.render(40);
+  assert.match(rows[2],/worker 3f2a9c1b/);assert.match(rows[3],/worker b7e4d2a0/);
+  assert.notEqual(rows[2],rows[3],'identical roles must not render identical rows');
+  assert.ok(rows.every(row=>visibleWidth(row)<=40));
+});
+
 test('Kitty release keys do not move selection; finished children linger, widths clamp and selection survives updates',()=>{
   const h=harness();h.state.agents=[agent('a'),agent('b',{startedAt:2000})];h.fleet.update();
   h.input('\x1b[B');h.input('\x1b[B');

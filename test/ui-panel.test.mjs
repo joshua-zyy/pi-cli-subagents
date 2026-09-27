@@ -20,10 +20,23 @@ test('list shows counts, hints, selection and right-aligned statistics', () => {
   const { render } = panel([view(), view({ id: 'a2', phase: 'completed', task: 'Review changes', updatedAt: 5000 })]);
   const rows = render(100);
   assert.match(rows[0], /^Subagents \(2\)$/); assert.match(rows[1], /↑↓ select · enter\/v conversation · i details · esc close/);
-  assert.match(rows[2], /^ {2}● ⠋ worker {2}Implement widget {2,}Running · 10\.0s$/);
-  assert.match(rows[3], /^ {2}○ ✓ worker {2}Review changes {2,}Completed · 4\.0s$/);
+  assert.match(rows[2], /^ {2}● ⠋ worker a1 {2}Implement widget {2,}Running · 10\.0s$/);
+  assert.match(rows[3], /^ {2}○ ✓ worker a2 {2}Review changes {2,}Completed · 4\.0s$/);
   for (const row of rows) assert.ok(visibleWidth(row) <= 100);
   assert.match(text(panel([view({ task: undefined })]).render()), /No task summary/);
+});
+test('same-role instances stay distinguishable when the task summary no longer fits', () => {
+  const rows = panel([
+    view({ id: '3f2a9c1b-1111-4111-8111-111111111111', task: 'Add multiplication to the calculator module' }),
+    view({ id: 'b7e4d2a0-2222-4222-8222-222222222222', task: 'Add addition to the calculator module' }),
+  ]).render(40);
+  assert.match(rows[2], /worker 3f2a9c1b/); assert.match(rows[3], /worker b7e4d2a0/);
+  assert.notEqual(rows[2], rows[3], 'identical roles must not render identical rows');
+  for (const row of rows) assert.ok(visibleWidth(row) <= 40);
+  // The full identifier stays available where there is room to act on it.
+  const detail = panel([view({ id: '3f2a9c1b-1111-4111-8111-111111111111' })]);
+  detail.instance.handleInput('i');
+  assert.match(text(detail.render(80)), /ID 3f2a9c1b-1111-4111-8111-111111111111/);
 });
 test('empty snapshots have an empty-state message and exit hint', () => {
   const rows = panel([]).render(40);

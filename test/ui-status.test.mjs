@@ -35,12 +35,12 @@ test('terminal elapsed time freezes at updatedAt', () => {
 test('active instances use two rows with a closing connector on the last entry', () => {
   const rows = lines([view({ lastActivity: 'tool_execution_start: bash' })]);
   assert.match(rows[0], /^● Subagents · 1 running · Ctrl\+Alt\+A view$/);
-  assert.match(rows[1], /^└─ ⠋ worker {2}Implement UI +· Running · 10\.0s$/);
+  assert.match(rows[1], /^└─ ⠋ worker a1 {2}Implement UI +· Running · 10\.0s$/);
   assert.match(rows[2], /^ {3}⎿ tool_execution_start: bash$/);
   const pair = lines([view({ id: 'a1', task: 'First' }), view({ id: 'a2', startedAt: 2000, task: 'Second' })]);
-  assert.match(pair[1], /^├─ ⠋ worker {2}First +· Running · 10\.0s$/);
+  assert.match(pair[1], /^├─ ⠋ worker a1 {2}First +· Running · 10\.0s$/);
   assert.match(pair[2], /^│ {4}⎿ /);
-  assert.match(pair[3], /^└─ ⠋ worker {2}Second +· Running · 9\.0s$/);
+  assert.match(pair[3], /^└─ ⠋ worker a2 {2}Second +· Running · 9\.0s$/);
   assert.match(pair[4], /^ {3}⎿ /);
 });
 test('narrow terminals retain status and elapsed time ahead of wide Unicode task text', () => {
@@ -54,19 +54,19 @@ test('waiting entries have priority, warning color and sanitized titles', () => 
   const waiting = view({ phase: 'waiting', questions: [{ id: 'q1', method: 'select', title: '\u001b[33mAllow bash?\u001b[39m' }] });
   const rows = lines([waiting, view({ id: 'a2' })], { theme: tagged });
   assert.ok(!rows.join('\n').includes('\u001b'));
-  assert.match(rows[1], /^\[dim\]├─ \[warning\]⚠ \[text\]worker {2}\[muted\]Implement UI +\[dim\]· Waiting · 10\.0s$/);
+  assert.match(rows[1], /^\[dim\]├─ \[warning\]⚠ \[text\]worker \[dim\]a1 {2}\[muted\]Implement UI +\[dim\]· Waiting · 10\.0s$/);
   assert.match(rows[2], /Allow bash\?/); assert.match(rows[0], /1 running · 1 waiting/);
 });
 test('finished entries collapse and disappear after their linger period', () => {
   const done = view({ phase: 'completed', updatedAt: 5000 });
   const rows = statusLines([done], { now: 5000 + FINISHED_LINGER_MS, frame: 0, width: 120, theme });
-  assert.equal(rows.length, 2); assert.match(rows[1], /^└─ ✓ worker {2}Implement UI +· Completed · 4\.0s$/);
+  assert.equal(rows.length, 2); assert.match(rows[1], /^└─ ✓ worker a1 {2}Implement UI +· Completed · 4\.0s$/);
   assert.deepEqual(statusLines([done], { now: 5001 + FINISHED_LINGER_MS, frame: 0, width: 120, theme }), []);
   assert.deepEqual(lines([]), []);
 });
 test('errors stay inline and waiting entries do not expire', () => {
   const rows = lines([view({ phase: 'failed', error: 'Child exited unexpectedly', updatedAt: 5000 })]);
-  assert.match(rows[1], /^└─ ✗ worker {2}Implement UI +· Failed: Child exited unexpectedly · 4\.0s$/);
+  assert.match(rows[1], /^└─ ✗ worker a1 {2}Implement UI +· Failed: Child exited unexpectedly · 4\.0s$/);
   const stuck = view({ phase: 'waiting', updatedAt: 1000, questions: [{ id: 'q1', method: 'select', title: 'Human response needed' }] });
   assert.equal(statusLines([stuck], { now: 10 * FINISHED_LINGER_MS, frame: 0, width: 120, theme }).length, 3);
 });

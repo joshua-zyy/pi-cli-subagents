@@ -5,9 +5,10 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
+import { randomUUID } from 'node:crypto';
 import { AgentManager } from '../dist/manager.js';
 import { defaultRoles } from '../dist/roles.js';
-import { processAlive, waitUntil, readJson } from '../dist/storage.js';
+import { processAlive, waitUntil, readJson, writeJson } from '../dist/storage.js';
 
 const fixture = fileURLToPath(new URL('./fixtures/pi.mjs', import.meta.url));
 const launch = { command: process.execPath, args: [fixture] };
@@ -105,6 +106,75 @@ test('failures and rejected commands are not empty successes', { timeout: 20_000
     const end = await complete(manager, start.id, 'failed');
     assert.ok(end.error); assert.equal(manager.reports().find(r => r.agentId === end.id).status, 'failed');
   }
+});
+
+test('task history records every assignment an instance handled, with its outcome', { timeout: 30_000 }, async t => {
+  const { cwd, manager } = setup(t);
+  const started = await manager.spawn('worker', defaultRoles.worker, cwd, 'REMEMBER first-assignment');
+  const first = manager.get(started.id);
+  assert.equal(first.runCount, 1);
+  assert.equal(first.history.length, 1);
+  assert.equal(first.history[0].task, 'REMEMBER first-assignment');
+  assert.equal(first.history[0].runId, first.runId);
+  assert.equal(typeof first.history[0].startedAt, 'number');
+  await complete(manager, started.id);
+  assert.equal(manager.get(started.id).history[0].status, 'completed');
+
+  await manager.send(started.id, 'RECALL second-assignment');
+  const second = await complete(manager, started.id);
+  assert.equal(second.runCount, 2);
+  assert.deepEqual(second.history.map(run => run.task), ['REMEMBER first-assignment', 'RECALL second-assignment']);
+  assert.deepEqual(second.history.map(run => run.status), ['completed', 'completed']);
+  assert.equal(second.task, 'RECALL second-assignment', 'task stays the current assignment');
+  assert.equal(second.history.at(-1).runId, second.runId);
+  assert.deepEqual(manager.eventLogs(started.id).map(file => path.basename(path.dirname(file))),
+    second.history.map(run => run.runId), 'logs must line up with the history order');
+});
+
+test('history keeps the five most recent runs and never invents an outcome', { timeout: 20_000 }, async t => {
+  const { cwd, manager } = setup(t);
+  const started = await manager.spawn('worker', defaultRoles.worker, cwd, 'run-1');
+  await complete(manager, started.id);
+  const dir = path.join(manager.root, started.id);
+  // Fabricate the way a long-lived instance accumulates runs: one crashed run without a report,
+  // and a current run the state has acknowledged but not yet resolved.
+  const runs = [manager.get(started.id).runId];
+  for (let index = 2; index <= 7; index++) {
+    const runId = randomUUID();
+    writeJson(path.join(dir, 'runs', runId, 'request.json'), { runId, message: `run-${index}`, createdAt: Date.now() + index });
+    if (index !== 6 && index !== 7) writeJson(path.join(dir, 'reports', `${runId}-result.json`), {
+      notificationId: `${runId}-result`, agentId: started.id, runId, parentFile: manager.parentFile,
+      status: 'failed', time: Date.now(), text: '', error: 'boom', logFile: 'events.jsonl',
+    });
+    runs.push(runId);
+  }
+  const stateFile = path.join(dir, 'state.json'), original = readJson(stateFile);
+  writeJson(stateFile, { ...original, runId: runs.at(-1), phase: 'running', workerPid: process.pid });
+  const view = manager.get(started.id);
+  assert.equal(view.runCount, 7);
+  assert.deepEqual(view.history.map(run => run.task), ['run-3', 'run-4', 'run-5', 'run-6', 'run-7']);
+  assert.deepEqual(view.history.map(run => run.status), ['failed', 'failed', 'failed', 'unknown', 'running'],
+    'a run without a report has no verdict; the current run reports its live phase');
+  assert.equal(view.task, 'run-7', 'the current assignment is the acknowledged run');
+  // Restore the real record so the shared teardown does not try to stop a fabricated live owner.
+  writeJson(stateFile, original);
+});
+
+test('a queued resume is not shown until the worker acknowledges it', { timeout: 20_000 }, async t => {
+  const { cwd, manager } = setup(t);
+  const started = await manager.spawn('worker', defaultRoles.worker, cwd, 'REMEMBER before-queue');
+  await complete(manager, started.id);
+  const settled = manager.get(started.id);
+  // A resume persists its run directory immediately but the worker only later replaces state.json.
+  const queued = randomUUID();
+  writeJson(path.join(manager.root, started.id, 'runs', queued, 'request.json'),
+    { runId: queued, message: 'queued follow-up', createdAt: Date.now() + 1000 });
+  const view = manager.get(started.id);
+  assert.equal(view.runId, settled.runId, 'the acknowledged run stays current until the worker takes over');
+  assert.equal(view.runCount, 1, 'run count must not count a run the state has not acknowledged');
+  assert.equal(view.task, 'REMEMBER before-queue');
+  assert.equal(view.history.at(-1).status, 'completed', 'the last acknowledged run keeps its own outcome');
+  assert.ok(!view.history.some((run) => run.task === 'queued follow-up'), 'a queued run must not appear as history yet');
 });
 
 test('permissions remain waiting until an explicit human reply', { timeout: 20_000 }, async t => {

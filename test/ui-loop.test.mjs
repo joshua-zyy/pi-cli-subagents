@@ -155,6 +155,44 @@ test('panel resumes the original session, confirms stops, and rejects non-TUI us
 
 function commands0(h) { return h.commands.get('agents').handler('', h.ctx); }
 
+test('direct human actions are recorded for the parent without interrupting it', { timeout: 30_000 }, async (t) => {
+  const h = harness(t);
+  h.start();
+  const holding = await h.spawn('HOLD human-sync');
+  await waitUntil('running', () => h.manager.get(holding.id).phase === 'running');
+  const human = () => h.messages.filter((entry) => entry.message.customType === 'cli-subagents-human-action');
+
+  // A routine instruction: the parent must see it, but sibling work must not be interrupted.
+  h.editorAnswer = 'HOLD and also check the docs';
+  await h.panel([['i', 's'], [keys.escape]]);
+  await waitUntil('instruction recorded', () => human().length === 1);
+  assert.equal(human()[0].options.triggerTurn, false);
+  assert.match(human()[0].message.content, new RegExp(holding.id));
+  assert.match(human()[0].message.content, /worker\] Sent an instruction: "HOLD and also check the docs"/);
+  assert.match(human()[0].message.content, /does not widen the task's original authorization/);
+  assert.equal(human()[0].message.details.agentId, holding.id);
+  assert.equal(human()[0].message.details.ids, undefined, 'human entries must not count as report receipts');
+  assert.equal(h.manager.get(holding.id).phase, 'running', 'steering must not end the run');
+
+  // A human permission decision is the most consequential direct action.
+  const asking = await h.spawn('WAIT');
+  await waitUntil('waiting', () => h.manager.get(asking.id).phase === 'waiting');
+  await h.panel([[keys.down, 'i', 'r'], [keys.escape]]);
+  await waitUntil('decision recorded', () => human().length === 2);
+  assert.match(human()[1].message.content, new RegExp(`${asking.id}.*worker\\] Answered pending request permission-1: approved once`, 's'));
+
+  // Stopping a child changes the plan the parent is coordinating.
+  await h.panel([['i', 'x'], [keys.escape]]);
+  await waitUntil('stop recorded', () => human().length === 3);
+  assert.match(human()[2].message.content, new RegExp(`${holding.id}.*Stopped active work`, 's'));
+  assert.equal(h.manager.get(holding.id).phase, 'stopped');
+
+  // Report delivery still works alongside the new entries.
+  await waitUntil('child reports still arrive', () => h.messages.some((entry) => entry.message.customType === 'cli-subagents-report'));
+  const reports = h.messages.filter((entry) => entry.message.customType === 'cli-subagents-report');
+  assert.ok(reports.every((entry) => entry.options.triggerTurn === true));
+});
+
 test('shortcut selects a running child and opens its live conversation directly', { timeout: 15000 }, async t => {
   const h = harness(t); h.start();
   assert.ok(h.shortcuts.has('ctrl+alt+a'));

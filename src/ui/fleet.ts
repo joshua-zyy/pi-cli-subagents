@@ -1,7 +1,7 @@
 import { isKeyRelease, matchesKey, truncateToWidth, type TUI } from "@earendil-works/pi-tui";
 import type { ExtensionUIContext } from "@earendil-works/pi-coding-agent";
 import type { AgentView } from "../types.js";
-import { formatElapsed, isActive, oneLine, phaseColor, phaseIcon, rightAlign, viewElapsed, viewStartedAt, type UiTheme } from "./format.js";
+import { formatElapsed, isActive, oneLine, phaseColor, phaseIcon, rightAlign, shortId, viewElapsed, viewStartedAt, type UiTheme } from "./format.js";
 
 const KEY = "cli-subagents-fleet";
 const LINGER_MS = 4000;
@@ -99,7 +99,7 @@ export class FleetView {
     for (const agent of visible) {
       const focused = this.active && agent.id === this.selectedId;
       const icon = isActive(agent.phase) ? "●" : phaseIcon(agent.phase);
-      const left = `  ${focused ? theme.fg("accent", "●") : theme.fg("dim", "○")} ${theme.fg(phaseColor(agent.phase), icon)} ${theme.fg("text", agent.role)}  ${theme.fg(focused ? "text" : "muted", oneLine(agent.task, 80) || "(No task summary)")}`;
+      const left = `  ${focused ? theme.fg("accent", "●") : theme.fg("dim", "○")} ${theme.fg(phaseColor(agent.phase), icon)} ${theme.fg("text", agent.role)} ${theme.fg("dim", shortId(agent.id))}  ${theme.fg(focused ? "text" : "muted", oneLine(agent.task, 80) || "(No task summary)")}`;
       const right = `${formatElapsed(viewElapsed(agent, now))} · ${agent.phase}`;
       lines.push(rightAlign(left, theme.fg("dim", right), width));
     }

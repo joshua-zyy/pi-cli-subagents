@@ -1,6 +1,6 @@
 import { truncateToWidth } from "@earendil-works/pi-tui";
 import type { AgentView } from "../types.js";
-import { SPINNER, formatElapsed, isActive, isTerminal, oneLine, phaseColor, phaseIcon, phaseLabel, rightAlign, viewElapsed, viewStartedAt, type UiColor, type UiTheme } from "./format.js";
+import { SPINNER, formatElapsed, isActive, isTerminal, oneLine, phaseColor, phaseIcon, phaseLabel, rightAlign, shortId, viewElapsed, viewStartedAt, type UiColor, type UiTheme } from "./format.js";
 
 export const STATUS_KEY = "cli-subagents";
 export const MAX_STATUS_LINES = 10;
@@ -49,7 +49,7 @@ export function statusLines(agents: AgentView[], options: StatusLinesOptions): s
   const row = (icon: string, color: UiColor, agent: AgentView, detail: string, activity?: string): Row => {
     const task = oneLine(agent.task, HEAD_LIMIT);
     const role = theme.fg("text", theme.bold(agent.role));
-    const left = `${theme.fg("dim", "├─")} ${theme.fg(color, icon)} ${role}${task ? `  ${theme.fg("muted", task)}` : ""}`;
+    const left = `${theme.fg("dim", "├─")} ${theme.fg(color, icon)} ${role} ${theme.fg("dim", shortId(agent.id))}${task ? `  ${theme.fg("muted", task)}` : ""}`;
     // Status and elapsed time take priority over the task summary on narrow terminals.
     const stats = theme.fg("dim", `· ${detail} · ${formatElapsed(viewElapsed(agent, now))}`);
     return {
