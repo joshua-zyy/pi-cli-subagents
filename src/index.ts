@@ -19,8 +19,10 @@ export function parentManager(ctx: Pick<ExtensionContext, "sessionManager">, lau
 }
 
 function visible(state: AgentView) {
-  const { id, role, phase, runId, sessionId, cwd, updatedAt, lastActivity, questions, text, truncated, error, logFile } = state;
-  return { id, role, phase, runId, sessionId, cwd, updatedAt, lastActivity, questions, text, truncated, error, logFile };
+  // `task` and `startedAt` let the parent match an instance to its assignment without reading the TUI.
+  const { id, role, phase, task, runId, sessionId, cwd, startedAt, updatedAt, lastActivity, questions, text, truncated, error, logFile } = state;
+  return { id, role, phase, runId, sessionId, cwd, updatedAt, lastActivity, questions, text, truncated, error, logFile,
+    ...(task ? { task } : {}), ...(startedAt ? { startedAt } : {}) };
 }
 const view = (state: AgentView): string => JSON.stringify(visible(state));
 const content = (text: string) => ({ content: [{ type: "text" as const, text }], details: undefined });

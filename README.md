@@ -37,7 +37,7 @@ These command-line flags do not modify global settings. For project-level loadin
 | --- | --- |
 | `spawn_agent` | Start a `worker`, `reviewer`, or custom role in a chosen working directory. |
 | `send_input` | Steer a running child, queue a `followUp`, or resume a finished child's original session. |
-| `list_agents` | List this parent's instances, roles, results, errors, and pending questions. |
+| `list_agents` | List this parent's instances with their task summary, start time, roles, results, errors, and pending questions. |
 | `close_agent` | Stop active work without deleting the session or its history. |
 | `list_pending_permissions` | Inspect unresolved requests from subagents owned by this parent session. |
 | `respond_to_permission` | Send one explicit, reasoned decision for a current request. |
