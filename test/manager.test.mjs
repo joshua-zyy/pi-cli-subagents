@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { execFile, spawn } from 'node:child_process';
+import { execFile, execFileSync, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { randomUUID } from 'node:crypto';
 import { AgentManager } from '../dist/manager.js';
@@ -13,6 +13,21 @@ import { processAlive, waitUntil, readJson, writeJson } from '../dist/storage.js
 const fixture = fileURLToPath(new URL('./fixtures/pi.mjs', import.meta.url));
 const launch = { command: process.execPath, args: [fixture] };
 const output = path.resolve('.test-output'); fs.mkdirSync(output, { recursive: true });
+// A saved PID can belong to another process after this CLI exits, especially on Windows.
+// The unique instance directory is present in both first-start and resume argv.
+function originalCliAlive(state, instanceDirectory) {
+  if (!processAlive(state.cliPid)) return false;
+  let commandLine;
+  if (process.platform === 'win32') {
+    commandLine = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
+      `(Get-CimInstance Win32_Process -Filter "ProcessId = ${state.cliPid}").CommandLine`], { encoding: 'utf8', windowsHide: true, timeout: 10_000 });
+  } else {
+    try { commandLine = execFileSync('ps', ['-p', String(state.cliPid), '-o', 'args='], { encoding: 'utf8' }); }
+    catch (error) { if (error.status === 1) return false; throw error; }
+  }
+  const normalize = text => text.replace(/\\/g, '/').toLowerCase();
+  return normalize(commandLine).includes(normalize(instanceDirectory));
+}
 function setup(t) {
   const cwd = fs.mkdtempSync(path.join(output, 'manager-'));
   const parent = path.join(cwd, 'parent.jsonl'); fs.writeFileSync(parent, '{}\n');
@@ -21,7 +36,9 @@ function setup(t) {
     for (const state of manager.list()) {
       if (processAlive(state.workerPid)) await manager.close(state.id);
       assert.equal(processAlive(manager.get(state.id).workerPid), false, 'worker must be reaped');
-      assert.equal(processAlive(manager.get(state.id).cliPid), false, 'CLI must be reaped');
+      const final = manager.get(state.id);
+      assert.notEqual(final.exitCode, undefined, 'worker must have observed the CLI close event');
+      assert.equal(originalCliAlive(final, path.join(manager.root, state.id)), false, 'the original CLI must be reaped, not just its old PID');
     }
   });
   return { cwd, parent, manager };
@@ -30,6 +47,18 @@ const complete = (manager, id, phase = 'completed') => waitUntil('terminal state
   const state = manager.get(id);
   return state.phase === phase && !processAlive(state.workerPid) ? state : undefined;
 }, 15_000);
+
+test('CLI cleanup checks distinguish the live original CLI from an unrelated reused PID', { timeout: 30_000 }, async t => {
+  const { cwd, manager } = setup(t);
+  const state = await manager.spawn('worker', defaultRoles.worker, cwd, 'HOLD identity');
+  const directory = path.join(manager.root, state.id);
+  assert.equal(originalCliAlive(state, directory), true, 'must detect a real running child');
+  assert.equal(processAlive(process.pid), true);
+  assert.equal(originalCliAlive({ ...state, cliPid: process.pid }, directory), false,
+    'PID existence alone must not report an unrelated process as a leaked child');
+  await manager.close(state.id);
+  assert.equal(originalCliAlive(manager.get(state.id), directory), false);
+});
 
 test('complete, release, then resume the original native session', { timeout: 20_000 }, async t => {
   const { cwd, manager } = setup(t);

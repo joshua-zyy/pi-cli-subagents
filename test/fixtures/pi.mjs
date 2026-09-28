@@ -30,6 +30,8 @@ function handle(cmd) {
   if (cmd.message === 'REJECT') return emit({ type: 'response', id: cmd.id, success: false, error: 'rejected by fixture' });
   if (active && !cmd.streamingBehavior) return emit({ type: 'response', id: cmd.id, success: false, error: 'already running' });
   session.messages.push({ role: 'user', content: cmd.message }); save();
+  // Keep the actual baseline notice in the native transcript, then execute the fixture task.
+  if (cmd.message.includes('\n\n[Workspace baseline]\n')) cmd = { ...cmd, message: cmd.message.split('\n\n[Workspace baseline]\n')[0] };
   active = true; response(cmd); emit({ type: 'agent_start' });
   if (cmd.message.startsWith('HOLD')) return;
   if (cmd.message === 'STREAM') {
@@ -54,6 +56,14 @@ function handle(cmd) {
   if (cmd.message === 'CRASH') return process.exit(2);
   if (cmd.message.startsWith('REMEMBER ')) { session.token = cmd.message.slice(9); save(); return finish('OK'); }
   if (cmd.message === 'RECALL') return finish(session.token ?? 'MISSING');
+  if (cmd.message === 'CWD') return finish(process.cwd());
+  if (cmd.message.startsWith('FILE ')) {
+    const { file, content } = JSON.parse(cmd.message.slice(5));
+    const target = path.resolve(file), relative = path.relative(process.cwd(), target);
+    if (path.isAbsolute(relative) || relative === '..' || relative.startsWith(`..${path.sep}`)) throw new Error('Fixture files must stay in cwd');
+    if (content !== undefined) { fs.mkdirSync(path.dirname(target), { recursive: true }); fs.writeFileSync(target, content); }
+    return finish(fs.readFileSync(target, 'utf8'));
+  }
   if (cmd.message === 'UNICODE') return finish('A\u2028B\u2029\u96ea');
   finish(cmd.message);
 }

@@ -2,6 +2,7 @@ import { Type } from "@earendil-works/pi-ai";
 import { Key } from "@earendil-works/pi-tui";
 import { getAgentDir, getMarkdownTheme, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { AgentManager } from "./manager.js";
+import { WorkspaceDecisionRequired, type ResumeOptions } from "./workspace.js";
 import { deliverReports } from "./notifier.js";
 import { loadRoles } from "./roles.js";
 import { AgentsPanel, type PanelAction } from "./ui/panel.js";
@@ -23,7 +24,7 @@ function visible(state: AgentView) {
   // after its own context is compacted, without reading the child's transcript.
   const { id, role, phase, task, history, runCount, runId, sessionId, cwd, startedAt, updatedAt, lastActivity, questions, text, truncated, error, logFile } = state;
   return { id, role, phase, runId, sessionId, cwd, updatedAt, lastActivity, questions, text, truncated, error, logFile, history, runCount,
-    ...(task ? { task } : {}), ...(startedAt ? { startedAt } : {}) };
+    ...(state.workspace ? { workspace: state.workspace, workspaceBaseline: state.workspaceBaseline } : {}), ...(task ? { task } : {}), ...(startedAt ? { startedAt } : {}) };
 }
 const view = (state: AgentView): string => JSON.stringify(visible(state));
 const content = (text: string) => ({ content: [{ type: "text" as const, text }], details: undefined });
@@ -85,31 +86,54 @@ export default function extension(pi: ExtensionAPI): void {
   pi.on("session_shutdown", () => stopMonitor());
 
   pi.registerTool({
+    name: "create_workspace", label: "Create managed worktree",
+    description: "Create a parent-owned detached Git worktree. Default: committed HEAD, reporting but not inheriting dirty files. Explicitly authorized includeUncommitted creates an internal baseline commit without updating the parent's HEAD, index or branches. One independently integrable change per workspace. No dependency installs, pushes or cleanup.",
+    parameters: Type.Object({
+      includeUncommitted: Type.Optional(Type.Object({ reason: Type.String({ description: "Why the user authorized inheriting ALL current uncommitted parent changes. Inspect them first; never assume unrelated edits belong to the task.", minLength: 1 }) })),
+    }),
+    async execute(_id, args, _signal, _update, ctx) {
+      return content(JSON.stringify(await parentManager(ctx, launch).workspaces.create(ctx.cwd, args)));
+    },
+  });
+  pi.registerTool({
+    name: "integrate_workspace", label: "Integrate managed worktree",
+    description: "Apply an idle managed workspace's changes to its original parent directory without changing the index, HEAD or branches. Requires in-scope independent review. Includes untracked, non-ignored files; conflicts reject the entire patch before writing. Retains the worktree and patch. After deliberate continuation, integrates only the subsequent increment. Old instances must choose a baseline before resuming; unfinished operations require inspection, not blind retries.",
+    parameters: Type.Object({ workspace: Type.String({ description: "Workspace ID returned by create_workspace" }) }),
+    async execute(_id, args, _signal, _update, ctx) {
+      return content(JSON.stringify(await parentManager(ctx, launch).workspaces.integrate(args.workspace)));
+    },
+  });
+  pi.registerTool({
     name: "spawn_agent", label: "Spawn Pi subagent",
     description: "Start an independent, reusable Pi CLI subagent asynchronously. Returns an ID; keep working while completion reports arrive automatically. Roles: explore/worker/reviewer or custom roles. Reuse an existing instance with send_input when the new work depends on what it already did.",
     parameters: Type.Object({
       role: Type.String({ description: "Role name; use list_agents to discover available roles" }),
       task: Type.String({ description: "Concrete goal, authorized files and verification criteria; do not widen CLI permissions" }),
-      cwd: Type.Optional(Type.String({ description: "Working directory; defaults to the parent directory" })),
+      cwd: Type.Optional(Type.String({ description: "Shared working directory; defaults to the parent directory. Cannot be combined with workspace." })),
+      workspace: Type.Optional(Type.String({ description: "Managed workspace ID; worker and independent reviewer use the same ID, sequentially. Cannot be combined with cwd." })),
     }),
     async execute(_id, args, _signal, _update, ctx) {
       const roles = loadRoles(getAgentDir(), ctx.cwd, ctx.isProjectTrusted());
       const role = roles[args.role];
       if (!role) throw new Error(`Unknown role: ${args.role}; available: ${Object.keys(roles).join(", ")}`);
-      const state = await parentManager(ctx, launch).spawn(args.role, role, args.cwd ?? ctx.cwd, args.task);
+      if (args.workspace !== undefined && args.cwd !== undefined) throw new Error("Pass workspace or cwd, not both");
+      const state = await parentManager(ctx, launch).spawn(args.role, role, args.cwd ?? ctx.cwd, args.task, args.workspace);
       return content(`Pi subagent dispatched: ${view(state)}\nThe parent may continue working. Completion and waiting reports return to this parent session.`);
     },
   });
   pi.registerTool({
     name: "send_input", label: "Message Pi subagent",
-    description: "Send instructions to a running child (steer after its current tool, followUp after the current run), or resume a completed child in its original session. Never silently creates a replacement session.",
+    description: "Send instructions to a running child (steer after its current tool, followUp after the current run), or resume a completed child in its original session. Never silently creates a replacement session. Managed workspaces reject messages while another instance occupies them. After integration or another instance's sync, explicitly choose keep (current workspace unchanged) or sync (update to parent state only if no unintegrated/staged work). Sync never runs while the instance is active.",
     parameters: Type.Object({
       id: Type.String({ description: "Subagent instance ID" }),
       message: Type.String({ description: "Instructions or a new task for the same child" }),
       mode: Type.Optional(Type.Union([Type.Literal("steer"), Type.Literal("followUp")], { description: "Delivery while running; defaults to steer" })),
+      baseline: Type.Optional(Type.Union([Type.Literal("keep"), Type.Literal("sync")], { description: "Required after integration/baseline changes. keep preserves current workspace files, not the old session's remembered files. sync safely updates an idle, fully integrated workspace." })),
+      includeUncommitted: Type.Optional(Type.Object({ reason: Type.String({ description: "For sync only: why the user authorized inheriting ALL current uncommitted parent changes. Inspect first; unrelated changes require confirmation.", minLength: 1 }) })),
     }),
     async execute(_id, args, _signal, _update, ctx) {
-      const state = await parentManager(ctx, launch).send(args.id, args.message, (args.mode ?? "steer") as Delivery);
+      const state = await parentManager(ctx, launch).send(args.id, args.message, (args.mode ?? "steer") as Delivery,
+        { baseline: args.baseline, includeUncommitted: args.includeUncommitted });
       return content(`Message accepted; wait for the final report: ${view(state)}`);
     },
   });
@@ -121,7 +145,7 @@ export default function extension(pi: ExtensionAPI): void {
       const roles = loadRoles(getAgentDir(), ctx.cwd, ctx.isProjectTrusted());
       const manager = parentManager(ctx, launch);
       return content(JSON.stringify({ roles: Object.fromEntries(Object.entries(roles).map(([name, role]) => [name, role.description])),
-        agents: (args.id ? [manager.get(args.id)] : manager.list()).map(visible) }));
+        agents: (args.id ? [manager.get(args.id)] : manager.list()).map(visible), workspaces: await manager.workspaces.list() }));
     },
   });
   pi.registerTool({
@@ -199,6 +223,30 @@ export default function extension(pi: ExtensionAPI): void {
     },
   });
 
+  async function sendHuman(ctx: ExtensionContext, manager: AgentManager, id: string, message: string, epoch: number, action: string): Promise<AgentView | undefined> {
+    let state: AgentView;
+    let options: ResumeOptions = {};
+    try { state = await manager.send(id, message); }
+    catch (error) {
+      if (!(error instanceof WorkspaceDecisionRequired) || error.decision !== "baseline") throw error;
+      ctx.ui.notify(error.message, "warning");
+      const choice = await ctx.ui.select("Choose workspace baseline", ["keep — current workspace, no parent sync", "sync — update workspace from parent"]);
+      if (!choice || epoch !== sessionEpoch) return;
+      options = { baseline: choice.startsWith("keep") ? "keep" : "sync", expectedRevision: error.workspace.revision };
+      try { state = await manager.send(id, message, "steer", options); }
+      catch (error) {
+        if (!(error instanceof WorkspaceDecisionRequired) || error.decision !== "inherit") throw error;
+        const confirmed = await ctx.ui.confirm("Inherit these uncommitted parent changes?", `${error.parentChanges.join("\n")}\n\nConfirm only if ALL these changes are authorized for this task. The parent index, HEAD and branches will not change.`);
+        if (!confirmed || epoch !== sessionEpoch) return;
+        options = { ...options, expectedParentTree: error.parentTree,
+          includeUncommitted: { reason: "The human explicitly confirmed the displayed parent changes in the TUI." } };
+        state = await manager.send(id, message, "steer", options);
+      }
+    }
+    recordHumanAction(ctx, state, `${action}${options.baseline ? ` (workspace baseline: ${options.baseline})` : ""}`);
+    return state;
+  }
+
   let panelBusy = false;
   async function openAgents(ctx: ExtensionContext, selectedId?: string): Promise<void> {
       // custom() returns undefined in RPC mode; terminal panels are TUI-only.
@@ -238,7 +286,13 @@ export default function extension(pi: ExtensionAPI): void {
                     const agent = manager.get(id);
                     return { agent, ...await reader.read(manager.eventLogs(id)) };
                   }, { keybindings, markdownTheme: getMarkdownTheme(),
-                    onSend: async (message) => { recordHumanAction(ctx, await manager.send(id, message), `Sent an instruction: "${oneLine(message, 400)}"`); },
+                    onSend: async (message) => {
+                      try { recordHumanAction(ctx, await manager.send(id, message), `Sent an instruction: "${oneLine(message, 400)}"`); }
+                      catch (error) {
+                        if (error instanceof WorkspaceDecisionRequired) return { kind: "message", id, resume: true, message };
+                        throw error;
+                      }
+                    },
                     // Match Pi's input box: its border follows the main session's thinking level.
                     frameColor: (text) => ctx.ui.theme.getThinkingBorderColor(ctx.thinkingLevel ?? "off")(text) });
                   return viewer;
@@ -261,11 +315,12 @@ export default function extension(pi: ExtensionAPI): void {
             }
             if (state.phase === "waiting") { ctx.ui.notify("This child has a pending interaction: use r, /agent-reply, or the parent permission tool.", "error"); continue; }
             const steerable = canSteer(state.phase);
-            const message = await ctx.ui.editor(steerable ? `Message ${state.role}` : `Resume ${state.role} in the original session`, "");
+            const message = action.message ?? await ctx.ui.editor(steerable ? `Message ${state.role}` : `Resume ${state.role} in the original session`, "");
             if (!message?.trim() || epoch !== sessionEpoch) continue;
             if (!steerable) ctx.ui.notify("Starting a new turn in the original session; this can take up to about 60 seconds...", "info");
-            recordHumanAction(ctx, await manager.send(action.id, message),
+            const sent = await sendHuman(ctx, manager, action.id, message, epoch,
               `${steerable ? "Sent an instruction" : "Resumed the original session with"}: "${oneLine(message, 400)}"`);
+            if (!sent) { if (fromFleet) return; continue; }
             ctx.ui.notify(steerable ? "Instructions accepted; a completion report will follow." : "New turn accepted in the original session; a completion report will follow.", "info");
             if (fromFleet) return;
           } catch (error) { ctx.ui.notify((error as Error).message, "error"); if (fromFleet) return; }

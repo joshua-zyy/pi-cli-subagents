@@ -4,6 +4,7 @@ import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { control } from "./control.js";
+import { WorkspaceStore, type ResumeOptions } from "./workspace.js";
 import { directories, jsonFiles, processAlive, readJson, shorten, waitUntil, writeJson } from "./storage.js";
 import type { AgentSpec, AgentState, AgentView, Control, Delivery, Endpoint, Launch, Report, Role, SessionHandle, StartRequest, TaskRun } from "./types.js";
 
@@ -21,9 +22,11 @@ function summarize(message: string | undefined, limit = 200): string | undefined
 export class AgentManager {
   readonly root: string;
   readonly parentFile: string;
+  readonly workspaces: WorkspaceStore;
   constructor(parentFile: string, private readonly launch: Launch) {
     this.parentFile = path.resolve(parentFile);
     this.root = `${this.parentFile}.subagents`;
+    this.workspaces = new WorkspaceStore(this.parentFile);
   }
 
   private directory(id: string): string {
@@ -59,7 +62,7 @@ export class AgentManager {
       };
     });
     const latest = history.at(-1);
-    return { ...state, role: spec.roleName, cwd: spec.cwd, history, runCount: runs.length,
+    return { ...state, role: spec.roleName, cwd: spec.cwd, ...(spec.workspace ? { workspace: spec.workspace, workspaceBaseline: spec.workspaceBaseline } : {}), history, runCount: runs.length,
       ...(latest?.runId === current && latest.task ? { task: latest.task } : {}), ...(report ? shorten(report.text) : {}) };
   }
   list(): AgentView[] { return directories(this.root).filter((id) => idPattern.test(id)).map((id) => this.get(id)); }
@@ -86,15 +89,20 @@ export class AgentManager {
     return this.runs(id).map((run) => path.join(run.folder, "events.jsonl"));
   }
 
-  async spawn(roleName: string, role: Role, cwd: string, message: string): Promise<AgentView> {
+  async spawn(roleName: string, role: Role, cwd: string, message: string, workspace?: string): Promise<AgentView> {
     if (!message.trim()) throw new Error("Task must not be empty");
-    cwd = path.resolve(cwd);
-    if (!statSync(cwd).isDirectory()) throw new Error("cwd must be an existing directory");
     const id = randomUUID(), dir = this.directory(id);
-    mkdirSync(dir, { recursive: true, mode: 0o700 });
-    const spec: AgentSpec = { version: 1, id, parentFile: this.parentFile, cwd, roleName, role, launch: this.launch, createdAt: Date.now() };
-    writeJson(path.join(dir, "spec.json"), spec);
-    return this.start(id, message);
+    const start = async (directory: string, baseline?: AgentSpec["workspaceBaseline"], notice?: string): Promise<AgentView> => {
+      directory = path.resolve(directory);
+      if (!statSync(directory).isDirectory()) throw new Error("cwd must be an existing directory");
+      mkdirSync(dir, { recursive: true, mode: 0o700 });
+      const spec: AgentSpec = { version: 1, id, parentFile: this.parentFile, cwd: directory, roleName, role, launch: this.launch, createdAt: Date.now(), ...(workspace ? { workspace, workspaceBaseline: baseline } : {}) };
+      writeJson(path.join(dir, "spec.json"), spec);
+      return this.start(id, notice ? `${message}\n\n[Workspace baseline]\n${notice}` : message);
+    };
+    if (workspace !== undefined) return this.workspaces.runAgent(workspace, id, (ws, notice) => start(ws.cwd, { commit: ws.baseCommit, revision: ws.revision }, notice));
+    this.workspaces.assertShared(cwd);
+    return start(cwd);
   }
 
   private async start(id: string, message: string, session?: SessionHandle): Promise<AgentView> {
@@ -136,20 +144,39 @@ export class AgentManager {
     await control(endpoint, input);
   }
 
-  async send(id: string, message: string, mode: Delivery = "steer"): Promise<AgentView> {
+  async send(id: string, message: string, mode: Delivery = "steer", options: ResumeOptions = {}): Promise<AgentView> {
     if (!message.trim()) throw new Error("Message must not be empty");
-    let state = this.get(id);
-    if (state.phase === "unreachable") throw new Error(state.error);
-    if (["starting", "running", "waiting"].includes(state.phase)) {
-      await this.request(id, { type: "send", message, mode });
+    const spec = this.spec(id);
+    if (!spec.workspace && (options.baseline !== undefined || options.includeUncommitted !== undefined)) throw new Error("Baseline choices require a managed workspace");
+    if (options.baseline === "sync") {
+      const state = this.get(id);
+      if (["starting", "running", "waiting", "stopping", "unreachable"].includes(state.phase)) throw new Error("Cannot sync a running or uncertain instance; wait for it to finish or inspect it first");
+      if (!state.sessionFile || !state.sessionId) throw new Error("No resumable original session; cannot sync for continuation");
+      if (!existsSync(state.sessionFile)) throw new Error(`Original session file is missing: ${state.sessionFile}; no synchronization was performed`);
+    }
+    const send = async (notice?: string): Promise<AgentView> => {
+      const prompt = notice ? `${message}\n\n[Workspace baseline]\n${notice}` : message;
+      let state = this.get(id);
+      if (state.phase === "unreachable") throw new Error(state.error);
+      if (["starting", "running", "waiting"].includes(state.phase)) {
+        await this.request(id, { type: "send", message: prompt, mode });
+        return this.get(id);
+      }
+      if (processAlive(state.workerPid)) {
+        await waitUntil("Previous worker release", () => !processAlive(state.workerPid), 15_000);
+        state = this.get(id);
+      }
+      if (!state.sessionFile || !state.sessionId) throw new Error("No resumable original session; will not silently create a new session");
+      return this.start(id, prompt, { sessionFile: state.sessionFile, sessionId: state.sessionId });
+    };
+    if (!spec.workspace) return send();
+    return this.workspaces.runAgent(spec.workspace, id, async (ws, notice) => {
+      const state = await send(notice);
+      if (state.accepted || state.phase === "completed") writeJson(path.join(this.directory(id), "spec.json"), {
+        ...spec, workspaceBaseline: { commit: ws.baseCommit, revision: ws.revision },
+      });
       return this.get(id);
-    }
-    if (processAlive(state.workerPid)) {
-      await waitUntil("Previous worker release", () => !processAlive(state.workerPid), 15_000);
-      state = this.get(id);
-    }
-    if (!state.sessionFile || !state.sessionId) throw new Error("No resumable original session; will not silently create a new session");
-    return this.start(id, message, { sessionFile: state.sessionFile, sessionId: state.sessionId });
+    }, options);
   }
 
   async close(id: string): Promise<AgentView> {

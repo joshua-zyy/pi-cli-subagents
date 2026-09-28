@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { execFileSync } from 'node:child_process';
 import extension from '../dist/index.js';
 import { waitUntil, processAlive } from '../dist/storage.js';
 import { AgentManager } from '../dist/manager.js';
@@ -20,7 +21,7 @@ function harness(t) {
   const parent = path.join(cwd, 'parent.jsonl'); fs.writeFileSync(parent, '{}\n');
   const state = {
     cwd, parent, entries: [], messages: [], notices: [], widgetCalls: [], editors: [], confirms: [],
-    scripts: [], customCalls: 0, mode: 'tui', editorAnswer: '', confirmAnswer: true, listeners: [],
+    scripts: [], customCalls: 0, customActive: 0, mode: 'tui', editorAnswer: '', confirmAnswer: true, listeners: [], selections: [], selectAnswer: undefined,
   };
   const ctx = {
     cwd, hasUI: true, isProjectTrusted: () => false,
@@ -34,10 +35,10 @@ function harness(t) {
       onTerminalInput(listener) { state.listeners.push(listener); return () => { state.listeners.splice(state.listeners.indexOf(listener), 1); }; },
       getEditorText() { return ''; },
       custom(factory) {
-        state.customCalls += 1;
+        state.customCalls += 1; state.customActive += 1;
         return new Promise((resolve, reject) => {
           let settled = false;
-          const done = (result) => { if (!settled) { settled = true; resolve(result); } };
+          const done = (result) => { if (!settled) { settled = true; state.customActive -= 1; resolve(result); } };
           const component = factory({ terminal: { columns: 120, rows: 35 }, requestRender() {} }, theme, {}, done);
           const script = state.scripts.shift() ?? [];
           if (typeof script === 'function') { Promise.resolve(script(component, done)).catch(reject); return; }
@@ -47,7 +48,11 @@ function harness(t) {
       },
       async editor(title) { state.editors.push(title); return state.editorAnswer; },
       async confirm(title, message) { state.confirms.push({ title, message }); return state.confirmAnswer; },
-      async select() { return undefined; },
+      async select(title, options) {
+        assert.equal(state.customActive, 0, 'close custom overlays before opening a baseline dialog');
+        state.selections.push({ title, options });
+        return typeof state.selectAnswer === 'function' ? state.selectAnswer(title, options) : state.selectAnswer;
+      },
       async input() { return undefined; },
     },
   };
@@ -269,6 +274,91 @@ test('conversation is wired to live worker logs and remains open after completio
   assert.equal(h.manager.get(agent.id).phase, 'completed');
   assert.equal(h.manager.eventLogs(agent.id).length, 1);
   assert.throws(() => h.manager.eventLogs('foreign'), /id/);
+});
+
+test('panel and inline messages cannot bypass managed workspace review or integration guards', { timeout: 30_000 }, async t => {
+  const h = harness(t); h.start();
+  const repo = path.join(h.state.cwd, 'repo'); fs.mkdirSync(repo);
+  const git = (...args) => execFileSync('git', ['-C', repo, ...args], { windowsHide: true });
+  git('init', '-q'); git('config', 'user.name', 'Test'); git('config', 'user.email', 'test@example.invalid');
+  git('config', 'core.autocrlf', 'false');
+  fs.writeFileSync(path.join(repo, 'base.txt'), 'base\n'); git('add', '.'); git('commit', '-qm', 'fixture');
+  h.ctx.cwd = repo;
+  const ws = JSON.parse(await h.invoke('create_workspace', {}));
+  const worker = json(await h.invoke('spawn_agent', { role: 'worker', task: 'CWD', workspace: ws.id }));
+  await waitUntil('worker released', () => h.manager.get(worker.id).phase === 'completed' && !processAlive(h.manager.get(worker.id).workerPid));
+  const reviewer = json(await h.invoke('spawn_agent', { role: 'reviewer', task: 'HOLD review', workspace: ws.id }));
+  h.editorAnswer = 'CWD';
+  await h.panel([['i', 's'], [keys.escape]]);
+  assert.ok(h.notices.some(notice => /occupied/.test(notice.message)));
+  assert.equal(h.manager.get(worker.id).runCount, 1);
+  await h.manager.send(reviewer.id, 'review complete');
+  await waitUntil('reviewer released', () => h.manager.get(reviewer.id).phase === 'completed' && !processAlive(h.manager.get(reviewer.id).workerPid));
+  fs.writeFileSync(path.join(ws.path, 'base.txt'), 'new\n');
+  await h.invoke('integrate_workspace', { workspace: ws.id });
+  await h.panel([['i', 's'], [keys.escape]]);
+  assert.ok(h.notices.some(notice => /integrated/.test(notice.message)));
+  await h.panel([[keys.enter], async viewer => {
+    await waitUntil('viewer ready', () => viewer.render(120).join('\n').includes(worker.id.slice(0, 8)));
+    viewer.handleInput(keys.enter);
+    for (const key of 'CWD') viewer.handleInput(key);
+    viewer.handleInput(keys.enter);
+    await waitUntil('inline baseline dialog after closing viewer', () => h.state.selections.length >= 2);
+  }, [keys.escape]]);
+  assert.equal(h.manager.get(worker.id).runCount, 1);
+  assert.equal(h.manager.get(worker.id).sessionId, worker.sessionId);
+});
+
+test('TUI sync requires dirty-state confirmation and inline continuation preserves the original session', { timeout: 40_000 }, async t => {
+  const h = harness(t); h.start();
+  const repo = path.join(h.state.cwd, 'repo'); fs.mkdirSync(repo);
+  const git = (...args) => execFileSync('git', ['-C', repo, ...args], { windowsHide: true, encoding: 'utf8' });
+  git('init', '-q'); git('config', 'user.name', 'Test'); git('config', 'user.email', 'test@example.invalid'); git('config', 'core.autocrlf', 'false');
+  fs.writeFileSync(path.join(repo, 'base.txt'), 'base\n'); git('add', '.'); git('commit', '-qm', 'fixture');
+  h.ctx.cwd = repo;
+  const ws = JSON.parse(await h.invoke('create_workspace', {}));
+  const worker = json(await h.invoke('spawn_agent', { role: 'worker', task: 'CWD', workspace: ws.id }));
+  await waitUntil('worker released', () => h.manager.get(worker.id).phase === 'completed' && !processAlive(h.manager.get(worker.id).workerPid));
+  fs.writeFileSync(path.join(ws.path, 'base.txt'), 'integrated\n'); await h.invoke('integrate_workspace', { workspace: ws.id });
+  fs.writeFileSync(path.join(repo, 'parent-new.txt'), 'new parent content');
+  h.state.selectAnswer = (_title, choices) => choices[1]; h.state.confirmAnswer = false; h.editorAnswer = 'CWD';
+  await h.panel([['i', 's'], [keys.escape]]);
+  assert.match(h.confirms.at(-1).message, /parent-new.txt/);
+  assert.equal(h.manager.get(worker.id).runCount, 1);
+  assert.equal(fs.existsSync(path.join(ws.path, 'parent-new.txt')), false, 'declining inheritance must not change the worktree');
+  h.state.confirmAnswer = true;
+  await h.panel([[keys.enter], async viewer => {
+    await waitUntil('viewer ready', () => viewer.render(120).join('\n').includes(worker.id.slice(0, 8)));
+    viewer.handleInput(keys.enter);
+    for (const key of 'CWD') viewer.handleInput(key);
+    viewer.handleInput(keys.enter);
+  }, [keys.escape]]);
+  await waitUntil('resumed instance completed', () => h.manager.get(worker.id).runCount === 2 && h.manager.get(worker.id).phase === 'completed' && !processAlive(h.manager.get(worker.id).workerPid));
+  assert.equal(h.manager.get(worker.id).sessionId, worker.sessionId);
+  assert.equal(fs.readFileSync(path.join(ws.path, 'parent-new.txt'), 'utf8'), 'new parent content');
+  assert.equal(git('-C', ws.path, 'status', '--porcelain'), '');
+  assert.ok(h.messages.some(entry => entry.message.customType === 'cli-subagents-human-action' && /workspace baseline: sync/.test(entry.message.content)));
+  assert.equal(h.editors.length, 1, 'inline text is retained when the viewer closes for a baseline dialog');
+});
+
+test('TUI refuses parent changes made after the inheritance dialog was displayed', { timeout: 30_000 }, async t => {
+  const h = harness(t); h.start();
+  const repo = path.join(h.state.cwd, 'repo'); fs.mkdirSync(repo);
+  const git = (...args) => execFileSync('git', ['-C', repo, ...args], { windowsHide: true });
+  git('init', '-q'); git('config', 'user.name', 'Test'); git('config', 'user.email', 'test@example.invalid'); git('config', 'core.autocrlf', 'false');
+  fs.writeFileSync(path.join(repo, 'base.txt'), 'base\n'); git('add', '.'); git('commit', '-qm', 'fixture');
+  h.ctx.cwd = repo;
+  const ws = JSON.parse(await h.invoke('create_workspace', {}));
+  const worker = json(await h.invoke('spawn_agent', { role: 'worker', task: 'CWD', workspace: ws.id }));
+  await waitUntil('worker released', () => h.manager.get(worker.id).phase === 'completed' && !processAlive(h.manager.get(worker.id).workerPid));
+  fs.writeFileSync(path.join(ws.path, 'base.txt'), 'integrated\n'); await h.invoke('integrate_workspace', { workspace: ws.id });
+  h.state.selectAnswer = (_title, choices) => choices[1]; h.editorAnswer = 'CWD';
+  h.ctx.ui.confirm = async () => { fs.writeFileSync(path.join(repo, 'unconfirmed.txt'), 'arrived during dialog'); return true; };
+  await h.panel([['i', 's'], [keys.escape]]);
+  assert.ok(h.notices.some(notice => /confirmed snapshot/.test(notice.message)));
+  assert.equal(h.manager.get(worker.id).runCount, 1);
+  assert.equal(fs.existsSync(path.join(ws.path, 'unconfirmed.txt')), false);
+  assert.equal(h.manager.workspaces.get(ws.id).baseCommit, ws.baseCommit);
 });
 
 test('session shutdown dismisses a live viewer without stopping its child or reopening the list', { timeout: 15000 }, async t => {

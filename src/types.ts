@@ -17,6 +17,10 @@ export interface AgentSpec {
   id: string;
   parentFile: string;
   cwd: string;
+  /** Parent-owned managed workspace; absent for shared-directory instances. */
+  workspace?: string;
+  /** The code baseline explicitly delivered to this native session. */
+  workspaceBaseline?: { commit: string; revision: number };
   roleName: string;
   role: Role;
   launch: Launch;
@@ -80,6 +84,8 @@ export interface Report {
 export interface AgentView extends AgentState {
   role: string;
   cwd: string;
+  workspace?: string;
+  workspaceBaseline?: AgentSpec["workspaceBaseline"];
   /** Optional one-line summary of the current run's task. */
   task?: string;
   /** Most recent assignments, oldest first; `runCount` reports how many exist in total. */

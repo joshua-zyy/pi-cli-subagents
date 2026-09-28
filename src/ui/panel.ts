@@ -4,7 +4,7 @@ import { canMessage, canSteer, formatElapsed, isActive, isTerminal, oneLine, pha
 
 export type PanelAction =
   | { kind: "view"; id: string }
-  | { kind: "message"; id: string; resume: boolean }
+  | { kind: "message"; id: string; resume: boolean; message?: string }
   | { kind: "stop"; id: string }
   | { kind: "reply"; id: string; questionId: string };
 

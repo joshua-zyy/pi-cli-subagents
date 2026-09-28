@@ -38,8 +38,8 @@ export interface ConversationViewerOptions {
   markdownTheme?: ViewerMarkdownTheme;
   /** Frame color, normally Pi's editor border so the overlay matches the input box. */
   frameColor?: (text: string) => string;
-  /** Deliver an inline message to the child without leaving the viewer. */
-  onSend?: (message: string) => Promise<void> | void;
+  /** Deliver inline, or return an action to close the overlay before opening a decision dialog. */
+  onSend?: (message: string) => Promise<void | PanelAction> | void | PanelAction;
 }
 
 /** Border, header, two separators, footer and bottom border. */
@@ -65,7 +65,7 @@ export class ConversationViewer {
   private readonly keybindings?: KeybindingsManager;
   private readonly markdownTheme?: ViewerMarkdownTheme;
   private readonly frameColor?: (text: string) => string;
-  private readonly onSend?: (message: string) => Promise<void> | void;
+  private readonly onSend?: ConversationViewerOptions["onSend"];
   private composer?: Input;
   private notice?: { text: string; color: string; revision?: number };
   private sending = false;
@@ -145,13 +145,14 @@ export class ConversationViewer {
     this.notice = { text: resuming ? "Starting a new turn in the original session..." : "Delivering to the running child...", color: "dim", revision: this.snapshot?.revision };
     this.tui.requestRender();
     try {
-      await this.onSend(message);
+      const action = await this.onSend(message);
+      if (action) { this.finish(action); return; }
       this.notice = { text: resuming ? "Turn accepted in the original session; a report will follow." : "Message accepted; the child continues in the same session.", color: "success", revision: this.snapshot?.revision };
     } catch (error) {
       this.notice = { text: `Send failed: ${(error as Error).message}`, color: "error" };
     } finally {
       this.sending = false;
-      this.tui.requestRender();
+      if (!this.closed) this.tui.requestRender();
     }
   }
 
