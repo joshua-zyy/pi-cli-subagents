@@ -188,13 +188,14 @@ export class CodexAdapter implements CliAdapter {
     const item = object(p) ? this.approvalItems.get(p.itemId) : undefined;
     const scope = this.thread && object(p) && p.threadId === this.thread.threadId && p.turnId === this.activeTurn && typeof p.itemId === "string";
     const decisions = object(p) && Array.isArray(p.availableDecisions) ? p.availableDecisions : undefined;
-    const unsupportedDecisions = object(p) && p.availableDecisions != null && (!decisions || !decisions.includes("accept") || !decisions.includes("decline"));
+    const unsupportedDecisions = object(p) && p.availableDecisions != null &&
+      (!decisions || !decisions.includes("accept") || !(decisions.includes("decline") || decisions.includes("cancel")));
     let details = "";
     if (scope && command && p.additionalPermissions == null && !unsupportedDecisions && (p.kind === undefined || p.kind === "command") && typeof p.command === "string" && p.command.trim() && typeof p.cwd === "string")
       details = `Command: ${p.command}\nDirectory: ${p.cwd}\nReason: ${String(p.reason ?? "Not provided")}`;
     if (scope && file && !p.grantRoot && item?.type === "fileChange" && Array.isArray(item.changes) && item.changes.length &&
       item.changes.every((change: RecordValue) => typeof change.path === "string" && typeof change.diff === "string"))
-      details = `File changes:\n${item.changes.map((change: RecordValue) => `${change.kind}: ${change.path}\n${change.diff}`).join("\n")}\nReason: ${String(p.reason ?? "Not provided")}`;
+      details = `File changes:\n${item.changes.map((change: RecordValue) => `${JSON.stringify(change.kind)}: ${change.path}\n${change.diff}`).join("\n")}\nReason: ${String(p.reason ?? "Not provided")}`;
     if (details && scope && command && p.networkApprovalContext) details += `\nNetwork context: ${JSON.stringify(p.networkApprovalContext)}`;
     if (!scope || !(command || file) || !details || details.length > 12_000 || !(typeof rpcId === "string" || Number.isSafeInteger(rpcId)) || this.approvalByRpcId.has(requestKey(rpcId))) {
       await this.write({ id: rpcId, ...(scope && (command || file) && (!command || !object(p) || p.availableDecisions == null || decisions?.includes("decline"))
@@ -206,12 +207,42 @@ export class CodexAdapter implements CliAdapter {
     const approval: Approval = { id, rpcId, threadId: p.threadId, turnId: p.turnId, attempted: false,
       ...(command && decisions ? { allowed: new Set(decisions.filter((value: unknown) => typeof value === "string")) } : {}) }; 
     this.approvals.set(id, approval); this.approvalByRpcId.set(requestKey(rpcId), approval);
-    this.options.onEvent({ type: "question", question: { id, method: "confirm", title: command ? "Approve one Codex command?" : "Approve one Codex file change?", message: details } });
+    const cancelOnly = command && decisions && !decisions.includes("decline");
+    this.options.onEvent({ type: "question", question: { id, method: cancelOnly ? "select" : "confirm",
+      title: command ? "Approve one Codex command?" : "Approve one Codex file change?",
+      message: details + (cancelOnly ? "\nThe native server offers no decline-and-continue option. Cancel turn ends this turn without approving the command." : ""),
+      ...(cancelOnly ? { options: ["Approve once", "Cancel turn"] } : {}) } });
   }
   private rejectInteraction(error: string): void {
     if (this.failed || this.ending) return;
     this.failed = true;
     this.options.onEvent({ type: "settled", status: "failed", text: "", error, stop: true });
+  }
+
+  private checkedSession(thread: RecordValue | undefined): Extract<NativeSession, { cli: "codex" }> {
+    const previous = this.options.session;
+    if (!thread || typeof thread.id !== "string" || !thread.id || typeof thread.sessionId !== "string" || !thread.sessionId || thread.ephemeral !== false)
+      throw new Error("Codex did not provide a persistent thread and session ID");
+    if (typeof thread.cwd !== "string" || !thread.cwd || path.resolve(thread.cwd) !== path.resolve(this.options.spec.cwd)) throw new Error("Codex returned a different or missing working directory");
+    if (previous && (previous.cli !== "codex" || thread.id !== previous.threadId || thread.sessionId !== previous.sessionId)) throw new Error("Codex returned a different thread or session; refusing to continue");
+    return { cli: "codex", threadId: thread.id, sessionId: thread.sessionId, codexHome: this.options.spec.codexHome! };
+  }
+
+  /** Metadata-only preflight on a separate process. Never loads/resumes a thread or starts a turn. */
+  async inspectSession(): Promise<void> {
+    try {
+      const previous = this.options.session;
+      if (previous?.cli !== "codex") throw new Error("Original Codex session is required for preflight");
+      await this.request("initialize", { clientInfo: { name: "pi_cli_subagents", title: "Pi CLI Subagents", version: "0.1.0" } });
+      await this.write({ method: "initialized", params: {} });
+      const { thread } = await this.request("thread/read", { threadId: previous.threadId, includeTurns: false });
+      this.checkedSession(thread);
+      if (!["idle", "notLoaded"].includes(thread?.status?.type)) throw new Error("Original Codex thread is not idle or its status is unknown; inspect before syncing");
+      if (this.failed || this.exitError) throw new Error("Codex preflight failed; inspect the native event log");
+    } finally {
+      const result = await this.end();
+      if (result.forced || result.exit.code !== 0 || this.failed) throw new Error("Codex preflight did not close cleanly; no synchronization was performed");
+    }
   }
 
   async ready(): Promise<NativeSession> {
@@ -222,12 +253,9 @@ export class CodexAdapter implements CliAdapter {
       developerInstructions: `# Delegated role: ${this.options.spec.roleName}\n${this.options.spec.role.instructions}` };
     const result = previous ? await this.request("thread/resume", { ...params, threadId: (previous as Extract<NativeSession, { cli: "codex" }>).threadId }) :
       await this.request("thread/start", { ...params, allowProviderModelFallback: false });
-    const thread = result.thread;
-    if (typeof thread?.id !== "string" || typeof thread.sessionId !== "string" || thread.ephemeral === true) throw new Error("Codex did not provide a persistent thread and session ID");
-    if (thread.cwd && path.resolve(thread.cwd) !== path.resolve(this.options.spec.cwd)) throw new Error("Codex returned a different working directory");
-    if (previous && (thread.id !== (previous as Extract<NativeSession, { cli: "codex" }>).threadId || thread.sessionId !== previous.sessionId)) throw new Error("Codex returned a different thread or session; refusing to continue");
-    this.thread = { cli: "codex", threadId: thread.id, sessionId: thread.sessionId, codexHome: this.options.spec.codexHome! };
-    return this.thread;
+    const session = this.checkedSession(result.thread);
+    this.thread = session;
+    return session;
   }
 
   async start(message: string): Promise<void> {
@@ -250,9 +278,12 @@ export class CodexAdapter implements CliAdapter {
     const approval = this.approvals.get(answer.id);
     if (!approval || approval.attempted || approval.threadId !== this.thread?.threadId || approval.turnId !== this.activeTurn)
       throw new Error("Codex approval is no longer pending or was already answered; inspect before retrying");
-    if (Number(answer.cancelled === true) + Number(typeof answer.confirmed === "boolean") !== 1 || answer.value !== undefined)
-      throw new Error("Codex approvals require one explicit confirmed or cancelled decision");
-    const decision = answer.cancelled ? "cancel" : answer.confirmed ? "accept" : "decline";
+    if (Number(answer.cancelled === true) + Number(typeof answer.confirmed === "boolean") + Number(typeof answer.value === "string") !== 1)
+      throw new Error("Codex approvals require one explicit decision");
+    const cancelOnly = approval.allowed && !approval.allowed.has("decline");
+    if (cancelOnly ? answer.confirmed !== undefined || answer.value !== undefined && !["Approve once", "Cancel turn"].includes(answer.value) : answer.value !== undefined)
+      throw new Error("Use the explicit choices offered by this Codex request");
+    const decision = answer.cancelled || answer.value === "Cancel turn" ? "cancel" : answer.confirmed || answer.value === "Approve once" ? "accept" : "decline";
     if (approval.allowed && !approval.allowed.has(decision)) throw new Error(`Codex decision ${decision} was not offered for this request`);
     approval.attempted = true;
     let timer: NodeJS.Timeout | undefined;

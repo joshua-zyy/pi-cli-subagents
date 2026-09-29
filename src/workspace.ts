@@ -234,7 +234,7 @@ export class WorkspaceStore {
     const ws = this.records().find(ws => inside(ws.path, resolved));
     if (ws) throw new Error(`Use workspace: "${ws.id}" instead of cwd for this managed directory; raw cwd cannot bypass its workspace lease.`);
   }
-  async runAgent<T>(id: string, agentId: string, action: (ws: Workspace, notice?: string) => Promise<T>, options: ResumeOptions = {}): Promise<T> {
+  async runAgent<T>(id: string, agentId: string, action: (ws: Workspace, notice?: string) => Promise<T>, options: ResumeOptions = {}, beforeSync?: () => Promise<void>): Promise<T> {
     if (!idPattern.test(agentId)) throw new Error("Invalid agent id");
     if (options.baseline !== undefined && options.baseline !== "keep" && options.baseline !== "sync") throw new Error("Choose baseline keep or sync");
     if (options.includeUncommitted !== undefined && (options.baseline !== "sync" || !options.includeUncommitted?.reason?.trim())) throw new Error("Only sync may inherit uncommitted changes, with an explicit authorization reason");
@@ -248,7 +248,7 @@ export class WorkspaceStore {
       if (!options.baseline && (stale || (!spec && ws.integration && !ws.continuation))) {
         throw new WorkspaceDecisionRequired("baseline", ws, `Workspace ${id} was integrated or its baseline changed. Choose baseline keep (current workspace, no parent sync) or sync (only with no unintegrated or staged changes). Resume the original instance deliberately before spawning new work here.`);
       }
-      if (options.baseline === "sync") await this.synchronize(ws, options);
+      if (options.baseline === "sync") await this.synchronize(ws, options, beforeSync);
       if (options.baseline === "keep" && ws.integration) { ws.continuation = true; this.save(ws); }
       let notice: string | undefined;
       if (options.baseline || stale || (!spec && ws.integration)) {
@@ -280,7 +280,7 @@ export class WorkspaceStore {
     });
     return options.baseline === "sync" ? this.parentOperation("sync", run) : run();
   }
-  private async synchronize(ws: Workspace, options: ResumeOptions): Promise<void> {
+  private async synchronize(ws: Workspace, options: ResumeOptions, beforeSync?: () => Promise<void>): Promise<void> {
     const folder = path.join(this.directory(ws.id), "syncs", randomUUID());
     const currentTree = await this.snapshot(ws.path, ws.baseCommit, path.join(folder, "current"));
     const checkpoint = ws.integration?.tree ?? (await git(ws.path, ["rev-parse", `${ws.baseCommit}^{tree}`])).toString().trim();
@@ -299,6 +299,9 @@ export class WorkspaceStore {
         if ((await git(ws.path, ["cat-file", "-t", `${tree}:${prefix}`])).toString().trim() !== "tree") throw new Error("not a directory");
       } catch (error) { throw new Error(`The sync baseline does not contain the original child cwd ${ws.cwd}; choose keep or a new workspace. ${(error as Error).message}`); }
     }
+    // The execution backend verifies the original session under this workspace's lock,
+    // after Git/authorization checks but before changing the baseline. Not a cross-system transaction.
+    await beforeSync?.();
     const nextBase = await this.internalCommit(ws.repo, tree, parentCommit);
     if (nextBase === ws.baseCommit && !ws.integration) return;
     const changedFiles = split(await git(ws.path, ["diff", "--no-renames", "--name-only", "-z", currentTree, tree, "--"]));

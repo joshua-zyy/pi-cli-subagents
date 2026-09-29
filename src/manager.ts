@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { control } from "./control.js";
 import { codexHome, codexLaunch } from "./codex-launch.js";
+import { CodexAdapter } from "./codex-adapter.js";
 import { nativeSession } from "./cli-adapter.js";
 import { WorkspaceStore, type ResumeOptions } from "./workspace.js";
 import { directories, jsonFiles, processAlive, readJson, shorten, waitUntil, writeJson } from "./storage.js";
@@ -93,7 +94,6 @@ export class AgentManager {
 
   async spawn(roleName: string, role: Role, cwd: string, message: string, workspace?: string): Promise<AgentView> {
     if (!message.trim()) throw new Error("Task must not be empty");
-    if (role.cli === "codex" && workspace !== undefined) throw new Error("Codex managed workspaces are not supported in protocol stage A");
     if (role.cli === "codex" && (!role.model || role.provider || role.thinking)) throw new Error("Codex requires an explicit model without Pi provider/thinking fields");
     if (role.cli !== "codex" && role.effort) throw new Error("Codex effort requires cli: codex");
     const id = randomUUID(), dir = this.directory(id);
@@ -155,14 +155,21 @@ export class AgentManager {
   async send(id: string, message: string, mode: Delivery = "steer", options: ResumeOptions = {}): Promise<AgentView> {
     if (!message.trim()) throw new Error("Message must not be empty");
     const spec = this.spec(id);
-    if (spec.cli === "codex" && spec.workspace) throw new Error("Codex managed workspaces are not supported in protocol stage A");
     if (!spec.workspace && (options.baseline !== undefined || options.includeUncommitted !== undefined)) throw new Error("Baseline choices require a managed workspace");
-    if (options.baseline === "sync") {
+    const beforeSync = async (): Promise<void> => {
       const state = this.get(id);
       if (["starting", "running", "waiting", "stopping", "unreachable"].includes(state.phase)) throw new Error("Cannot sync a running or uncertain instance; wait for it to finish or inspect it first");
-      if (!state.sessionFile || !state.sessionId) throw new Error("No resumable original session; cannot sync for continuation");
-      if (!existsSync(state.sessionFile)) throw new Error(`Original session file is missing: ${state.sessionFile}; no synchronization was performed`);
-    }
+      const session = nativeSession(state.session ?? (state.sessionFile && state.sessionId ? { sessionFile: state.sessionFile, sessionId: state.sessionId } : undefined));
+      if (!session || session.cli !== (spec.cli ?? "pi")) throw new Error("No resumable original session; cannot sync for continuation");
+      if (session.cli === "pi") {
+        if (!existsSync(session.sessionFile)) throw new Error(`Original session file is missing: ${session.sessionFile}; no synchronization was performed`);
+      } else {
+        const logFile = path.join(this.directory(id), `preflight-${randomUUID()}.jsonl`);
+        try {
+          await new CodexAdapter({ spec, session, logFile, onEvent: () => {} }).inspectSession();
+        } catch (error) { throw new Error(`Codex original-thread preflight failed; no synchronization was performed. ${(error as Error).message}; inspect ${logFile}`); }
+      }
+    };
     const send = async (notice?: string): Promise<AgentView> => {
       const prompt = notice ? `${message}\n\n[Workspace baseline]\n${notice}` : message;
       let state = this.get(id);
@@ -188,7 +195,7 @@ export class AgentManager {
         ...spec, workspaceBaseline: { commit: ws.baseCommit, revision: ws.revision },
       });
       return this.get(id);
-    }, options);
+    }, options, beforeSync);
   }
 
   async close(id: string): Promise<AgentView> {

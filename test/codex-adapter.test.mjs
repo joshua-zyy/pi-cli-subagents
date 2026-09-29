@@ -46,6 +46,39 @@ test('Codex correlates fast events, keeps native IDs distinct, and resumes the e
   assert.ok(calls.every(c => !['thread/delete', 'thread/archive', 'thread/fork'].includes(c.method)));
 });
 
+test('Codex preflight reads only original metadata, submits no turn and reaps its process', async t => {
+  const { client, requests, home } = setup(t);
+  const first = client(); const original = await first.c.ready(); await first.c.end();
+  const before = fs.readFileSync(path.join(home, `${original.threadId}.json`));
+  const check = client(original); await check.c.inspectSession();
+  assert.equal((await check.c.closed).code, 0);
+  assert.deepEqual(requests().slice(3).map(r => r.method), ['initialize', 'initialized', 'thread/read']);
+  assert.equal(requests().at(-1).params.includeTurns, false);
+  assert.equal(requests().at(-1).params.threadId, original.threadId);
+  assert.deepEqual(fs.readFileSync(path.join(home, `${original.threadId}.json`)), before);
+  assert.deepEqual(check.events, []);
+});
+
+test('Codex preflight refuses foreign, missing, active, malformed and timed-out native threads', async t => {
+  const { client, home, requests } = setup(t);
+  const first = client(); const original = await first.c.ready(); await first.c.end();
+  const file = path.join(home, `${original.threadId}.json`), saved = JSON.parse(fs.readFileSync(file));
+  for (const change of [{ id: 'foreign' }, { sessionId: 'foreign' }, { cwd: path.dirname(saved.cwd) }, { cwd: null }, { ephemeral: true }, { status: { type: 'active' } }, { status: { type: 'systemError' } }, { status: {} }]) {
+    fs.writeFileSync(file, JSON.stringify({ ...saved, ...change }));
+    const check = client(original);
+    await assert.rejects(check.c.inspectSession(), /persistent|different|directory|idle|status/i);
+    assert.equal((await check.c.closed).code, 0);
+  }
+  fs.unlinkSync(file);
+  const missing = client(original); await assert.rejects(missing.c.inspectSession(), /missing/i);
+  assert.equal((await missing.c.closed).code, 0);
+  fs.writeFileSync(file, JSON.stringify(saved));
+  const timeout = client(original, ['--read-timeout']); await assert.rejects(timeout.c.inspectSession(), /timed out/i);
+  assert.equal((await timeout.c.closed).code, 0);
+  assert.equal(requests().filter(r => r.method === 'thread/start').length, 1);
+  assert.equal(requests().filter(r => r.method === 'turn/start' || r.method === 'thread/resume').length, 0);
+});
+
 test('Codex ignores foreign thread/turn completion and does not double cumulative text', async t => {
   const { client } = setup(t); const { c, events } = client();
   await c.ready(); await c.start('FOREIGN_EVENTS');
@@ -123,12 +156,18 @@ test('Codex command/file approvals return only one-action decisions for a scoped
   for (const [task, answer, decision, result] of [
     ['APPROVAL', { confirmed: true }, 'accept', 'ALLOW'],
     ['APPROVAL_FILE', { confirmed: false }, 'decline', 'DENY'],
+    ['APPROVAL_FILE_MOVE', { confirmed: false }, 'decline', 'DENY'],
     ['APPROVAL_STRING_ID', { cancelled: true }, 'cancel', 'CANCELLED'],
   ]) {
     const { c, events } = client(); await c.ready(); await c.start(task);
     const q = await waitUntil('Codex approval', () => events.find(e => e.type === 'question')?.question);
     assert.equal(q.method, 'confirm'); assert.match(q.message, /fixture/);
-    if (task === 'APPROVAL_FILE') assert.match(q.message, /work\.txt/);
+    if (task.startsWith('APPROVAL_FILE')) {
+      assert.match(q.message, /work\.txt/); assert.match(q.message, /"type":"update"/);
+      assert.ok(!q.message.includes('[object Object]'));
+      if (task.includes('MOVE')) assert.match(q.message, /renamed\.txt/);
+      else assert.match(q.message, /"move_path":null/);
+    }
     await c.reply({ type: 'reply', id: q.id, ...answer });
     assert.equal((await settled(events)).text, result);
     const incoming = requests().filter(r => !r.method && r.result?.decision === decision);
@@ -137,6 +176,32 @@ test('Codex command/file approvals return only one-action decisions for a scoped
     await c.end();
   }
   assert.ok(!requests().some(c => ['acceptForSession', 'acceptWithExecpolicyAmendment'].includes(c.result?.decision)));
+});
+
+test('Codex accept/cancel-only commands expose explicit choices without a persistent grant', async t => {
+  const { client, requests } = setup(t);
+  for (const [answer, native, status] of [
+    [{ value: 'Approve once' }, 'accept', 'completed'],
+    [{ value: 'Cancel turn' }, 'cancel', 'stopped'],
+    [{ cancelled: true }, 'cancel', 'stopped'],
+  ]) {
+    const { c, events } = client(); await c.ready(); await c.start('APPROVAL_ACCEPT_CANCEL');
+    const q = events.find(e => e.type === 'question')?.question;
+    assert.ok(q, 'native accept/cancel must remain answerable without a decline option');
+    assert.equal(q.method, 'select'); assert.deepEqual(q.options, ['Approve once', 'Cancel turn']);
+    assert.match(q.message, /cancel.*end.*turn/i);
+    for (const invalid of [{ confirmed: false }, { value: 'acceptForSession' }, { value: 'Apply policy amendment' }, { value: 'Approve once', cancelled: true }]) {
+      await assert.rejects(c.reply({ type: 'reply', id: q.id, ...invalid }), /choice|option|explicit/i);
+    }
+    const before = requests().filter(r => !r.method).length;
+    await c.reply({ type: 'reply', id: q.id, ...answer });
+    assert.equal((await settled(events)).status, status);
+    const decisions = requests().filter(r => !r.method).slice(before);
+    assert.equal(decisions.length, 1); assert.equal(decisions[0].result.decision, native);
+    await assert.rejects(c.reply({ type: 'reply', id: q.id, ...answer }), /answered|pending/);
+    await c.end();
+  }
+  assert.ok(requests().filter(r => !r.method).every(r => ['accept', 'cancel'].includes(r.result?.decision)));
 });
 
 test('Codex distinguishes callbacks with the same itemId and rejects duplicate/expired answers', async t => {

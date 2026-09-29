@@ -121,6 +121,7 @@ async function run(dir: string, runId: string): Promise<void> {
       appendFileSync(path.join(runDir, "permissions.jsonl"), `${JSON.stringify({ time: Date.now(), runId, questionId: q.id,
         actor: input.actor ?? "human", decision: input.cancelled ? "cancelled" : q.method === "confirm" ? input.confirmed ? "approved" : "denied" : "answered",
         delivery: "attempted", ...(input.reason ? { reason: input.reason.slice(0, 2000) } : {}),
+        ...(q.method === "select" && input.value !== undefined ? { selectedOption: input.value } : {}),
       })}\n`, { mode: 0o600 });
       await rpc.reply(input);
       state.questions = state.questions.filter((item) => item !== q);

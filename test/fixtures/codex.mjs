@@ -17,7 +17,8 @@ function item(text, id = 'answer') {
 }
 function finish(text, status = 'completed', mode = '') {
   turn.status = status;
-  turn.items = text === null ? [] : [item(text)];
+  thread.status = { type: 'idle' };
+  turn.items = [...turn.items.filter(i => i.type === 'userMessage'), ...(text === null ? [] : [item(text)])];
   if (status === 'failed') turn.error = { message: 'fixture model failure' };
   thread.turns.push(structuredClone(turn)); save();
   if (text !== null && mode !== 'BACKFILL') {
@@ -28,6 +29,16 @@ function finish(text, status = 'completed', mode = '') {
   notify('turn/completed', { threadId: thread.id, turn: { ...turn, items: [], itemsView: 'summary' } });
 }
 function execute(message) {
+  // Retain the full baseline notice in requests and native items; only dispatch the fixture task.
+  message = message.split('\n\n[Workspace baseline]\n')[0];
+  if (message === 'CWD') return finish(process.cwd());
+  if (message.startsWith('FILE ')) {
+    const { file, content } = JSON.parse(message.slice(5));
+    const target = path.resolve(file), relative = path.relative(process.cwd(), target);
+    if (path.isAbsolute(relative) || relative === '..' || relative.startsWith(`..${path.sep}`)) throw Error('Fixture files must stay in cwd');
+    if (content !== undefined) { fs.mkdirSync(path.dirname(target), { recursive: true }); fs.writeFileSync(target, content); }
+    return finish(fs.readFileSync(target, 'utf8'));
+  }
   if (message.startsWith('HOLD')) return;
   if (message === 'CRASH') return process.exit(2);
   if (message === 'NOISE') return process.stdout.write('not-json\n');
@@ -37,7 +48,7 @@ function execute(message) {
     const kind = fileChange ? 'fileChange' : 'commandExecution';
     const itemId = fileChange ? 'patch' : 'cmd';
     if (!message.includes('NO_DETAILS')) notify('item/started', { threadId: thread.id, turnId: turn.id,
-      item: fileChange ? { type: kind, id: itemId, status: 'inProgress', changes: [{ path: path.join(home, 'work.txt'), kind: 'update', diff: '+one line' }] } :
+      item: fileChange ? { type: kind, id: itemId, status: 'inProgress', changes: [{ path: path.join(home, 'work.txt'), kind: { type: 'update', move_path: message.includes('MOVE') ? path.join(home, 'renamed.txt') : null }, diff: '+one line' }] } :
         { type: kind, id: itemId, status: 'inProgress', command: 'write fixture-only', cwd: process.cwd() } });
     const count = message.includes('DOUBLE') ? 2 : 1;
     for (let n = 0; n < count; n++) {
@@ -51,7 +62,8 @@ function execute(message) {
               ...(message.includes('EXTRA_PERMISSIONS') ? { additionalPermissions: { fileSystem: { write: [home] } } } : {}),
               ...(message.includes('NETWORK') ? { networkApprovalContext: { host: 'example.test' } } : {}),
               ...(message.includes('ONLY_SESSION') ? { availableDecisions: ['acceptForSession', 'decline'] } : {}),
-              ...(message.includes('NO_CANCEL') ? { availableDecisions: ['accept', 'decline'] } : {}) }) } });
+              ...(message.includes('NO_CANCEL') ? { availableDecisions: ['accept', 'decline'] } : {}),
+              ...(message.includes('ACCEPT_CANCEL') ? { availableDecisions: ['accept', { acceptWithExecpolicyAmendment: { execpolicy_amendment: ['fixture-only'] } }, 'cancel'] } : {}) }) } });
       if (message.includes('AUTO_RESOLVE')) setTimeout(() => {
         notify('serverRequest/resolved', { threadId: thread.id, requestId: id }); approvals.delete(`${typeof id}:${id}`);
         if (!approvals.size) finish('AUTO-RESOLVED');
@@ -113,24 +125,35 @@ function handle(cmd) {
   if (!acknowledged) return error(cmd, 'Not initialized');
   if (cmd.method === 'thread/start') {
     if (!cmd.params.model) return error(cmd, 'Explicit model required');
-    thread = { id: randomUUID(), sessionId: randomUUID(), path: null, cwd: cmd.params.cwd, ephemeral: false, turns: [], model: cmd.params.model };
+    thread = { id: randomUUID(), sessionId: randomUUID(), path: null, cwd: cmd.params.cwd, ephemeral: false, status: { type: 'idle' }, turns: [], model: cmd.params.model };
     save();
     return response(cmd, { thread, model: cmd.params.model, cwd: thread.cwd });
   }
   if (cmd.method === 'thread/resume' || cmd.method === 'thread/read') {
+    if (cmd.method === 'thread/resume' && process.argv.includes('--reject-resume')) return error(cmd, 'Fixture resume rejected after preflight');
+    if (cmd.method === 'thread/read' && process.argv.includes('--read-timeout')) return;
     if (!fs.existsSync(file(cmd.params.threadId))) return error(cmd, 'Original thread missing');
     thread = JSON.parse(fs.readFileSync(file(cmd.params.threadId), 'utf8'));
     const result = structuredClone(thread);
     if (process.argv.includes('--wrong-resume') && cmd.method === 'thread/resume') result.id = randomUUID();
     if (process.argv.includes('--wrong-session') && cmd.method === 'thread/resume') result.sessionId = randomUUID();
     if (process.argv.includes('--wrong-read') && cmd.method === 'thread/read') result.id = randomUUID();
-    return response(cmd, { thread: result, model: cmd.params.model ?? thread.model, cwd: thread.cwd });
+    if (cmd.method === 'thread/read' && !cmd.params.includeTurns) result.turns = [];
+    const reply = () => response(cmd, { thread: result, model: cmd.params.model ?? thread.model, cwd: thread.cwd });
+    if (cmd.method === 'thread/read' && process.argv.includes('--hold-read')) {
+      const timer = setInterval(() => {
+        if (fs.existsSync(path.join(home, 'release-read'))) { clearInterval(timer); reply(); }
+      }, 10);
+      return;
+    }
+    return reply();
   }
   if (cmd.method === 'turn/start') {
     if (cmd.params.threadId !== thread.id) return error(cmd, 'Wrong thread');
     const message = cmd.params.input[0].text;
     if (message === 'REJECT') return error(cmd, 'fixture rejected submission');
-    turn = { id: randomUUID(), status: 'inProgress', items: [] };
+    turn = { id: randomUUID(), status: 'inProgress', items: [{ type: 'userMessage', id: 'user', content: cmd.params.input }] };
+    thread.status = { type: 'active', activeFlags: [] }; save();
     // Emit events before the response to exercise notification/response interleaving.
     notify('turn/started', { threadId: thread.id, turn: structuredClone(turn) });
     if (message === 'TIMEOUT') return;

@@ -111,6 +111,27 @@ test('Codex approval is visible to the parent and one reasoned decision is audit
   await assert.rejects(manager.reply(started.id, waiting.questions[0].id, { confirmed: true }), /exited|ended/);
 });
 
+test('Codex accept/cancel-only choices route through the worker and record the exact selection', { timeout: 20_000 }, async t => {
+  const { cwd, manager, done, home } = setup(t);
+  for (const [value, phase] of [['Approve once', 'completed'], ['Cancel turn', 'stopped']]) {
+    const started = await manager.spawn('codex-worker', role, cwd, 'APPROVAL_ACCEPT_CANCEL');
+    const waiting = await waitUntil('native approval or failure', () => {
+      const state = manager.get(started.id); return ['waiting', 'failed', 'stopped', 'completed'].includes(state.phase) ? state : undefined;
+    });
+    assert.equal(waiting.phase, 'waiting');
+    const q = waiting.questions[0]; assert.equal(q.method, 'select'); assert.deepEqual(q.options, ['Approve once', 'Cancel turn']);
+    await assert.rejects(manager.reply(started.id, q.id, { confirmed: false }), /Response type/);
+    await assert.rejects(manager.reply(started.id, q.id, { value: 'acceptForSession' }), /available options/);
+    await manager.reply(started.id, q.id, { value }, { actor: 'parent', reason: 'Only this explicit fixture choice is authorized.' });
+    const final = await done(started.id, phase);
+    const audit = fs.readFileSync(path.join(manager.root, final.id, 'runs', final.runId, 'permissions.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+    assert.equal(audit.length, 1); assert.equal(audit[0].selectedOption, value);
+    assert.equal(final.questions.length, 0);
+  }
+  const decisions = fs.readFileSync(path.join(home, 'requests.jsonl'), 'utf8').trim().split('\n').map(JSON.parse).filter(r => !r.method);
+  assert.deepEqual(decisions.map(r => r.result.decision), ['accept', 'cancel']);
+});
+
 test('Codex cancelled/auto-resolved interactions do not remain answerable', { timeout: 20_000 }, async t => {
   const { cwd, manager, done } = setup(t);
   const cancelled = await manager.spawn('codex-worker', role, cwd, 'APPROVAL_FILE');
@@ -124,9 +145,9 @@ test('Codex cancelled/auto-resolved interactions do not remain answerable', { ti
   assert.ok(manager.reports().every(r => r.status !== 'waiting'));
 });
 
-test('Codex still rejects workspace and missing model before creating instances', async t => {
+test('Codex rejects invalid workspace and missing model before creating instances', async t => {
   const { cwd, manager } = setup(t);
-  await assert.rejects(manager.spawn('codex-worker', role, cwd, 'DO', 'any-workspace'), /not supported/);
+  await assert.rejects(manager.spawn('codex-worker', role, cwd, 'DO', 'any-workspace'), /Invalid workspace/);
   await assert.rejects(manager.spawn('codex-worker', { ...role, model: undefined }, cwd, 'DO'), /explicit model/);
   assert.deepEqual(manager.list(), []);
 });

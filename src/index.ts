@@ -198,7 +198,7 @@ export default function extension(pi: ExtensionAPI): void {
     let answer: { value?: string; confirmed?: boolean; cancelled?: boolean };
     if (q.method === "confirm") answer = { confirmed: await ctx.ui.confirm(q.title, q.message ?? "") };
     else if (q.method === "select") {
-      const value = await ctx.ui.select(q.title, q.options ?? []);
+      const value = await ctx.ui.select(q.message ? `${q.title}\n\n${q.message}` : q.title, q.options ?? []);
       answer = value === undefined ? { cancelled: true } : { value };
     } else if (q.method === "editor") {
       const value = await ctx.ui.editor(q.title, q.prefill);

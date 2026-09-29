@@ -198,6 +198,26 @@ test('direct human actions are recorded for the parent without interrupting it',
   assert.ok(reports.every((entry) => entry.options.triggerTurn === true));
 });
 
+test('Codex choice dialogs retain the command details and cancel without a persistent grant', { timeout: 20_000 }, async t => {
+  const h = harness(t); h.start();
+  const home = path.join(h.state.cwd, 'codex-home'); fs.mkdirSync(home); fs.writeFileSync(path.join(home, 'fixture-home'), '');
+  const codexFixture = fileURLToPath(new URL('./fixtures/codex.mjs', import.meta.url));
+  const manager = new AgentManager(h.state.parent, { command: process.execPath, args: [fixture] }, { home, launch: { command: process.execPath, args: [codexFixture] } });
+  for (const mode of ['tui', 'rpc']) {
+    h.mode = mode;
+    const child = await manager.spawn('codex-worker', { cli: 'codex', model: 'gpt-6-luna', description: 'fixture', instructions: 'test' }, h.state.cwd, 'APPROVAL_ACCEPT_CANCEL');
+    const q = await waitUntil('Codex choice', () => manager.get(child.id).questions[0]);
+    h.state.selectAnswer = 'Cancel turn';
+    await h.commands.get('agent-reply').handler(`${child.id} ${q.id}`, h.ctx);
+    const dialog = h.state.selections.at(-1);
+    assert.match(dialog.title, /Command: write fixture-only/); assert.match(dialog.title, /Directory:/);
+    assert.match(dialog.title, /Cancel turn ends this turn/); assert.deepEqual(dialog.options, ['Approve once', 'Cancel turn']);
+    await waitUntil('cancelled native task', () => manager.get(child.id).phase === 'stopped');
+    assert.ok(h.messages.some(e => e.message.customType === 'cli-subagents-human-action' && e.message.content.includes('Cancel turn')));
+  }
+  assert.equal(h.confirms.length, 0, 'no boolean dialog may hide cancel-vs-decline semantics');
+});
+
 test('shortcut selects a running child and opens its live conversation directly', { timeout: 15000 }, async t => {
   const h = harness(t); h.start();
   assert.ok(h.shortcuts.has('ctrl+alt+a'));
