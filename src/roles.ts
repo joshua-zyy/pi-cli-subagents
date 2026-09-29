@@ -1,6 +1,6 @@
 import path from "node:path";
 import { readJson } from "./storage.js";
-import type { Role, Thinking } from "./types.js";
+import type { Effort, Role, Thinking } from "./types.js";
 
 export const defaultRoles: Record<string, Role> = {
   explore: {
@@ -17,6 +17,7 @@ export const defaultRoles: Record<string, Role> = {
   },
 };
 const levels = new Set<Thinking>(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
+const efforts = new Set<Effort>(["none", "minimal", "low", "medium", "high", "xhigh"]);
 
 export function loadRoles(agentDir: string, cwd: string, projectTrusted: boolean): Record<string, Role> {
   const roles = structuredClone(defaultRoles);
@@ -29,14 +30,20 @@ export function loadRoles(agentDir: string, cwd: string, projectTrusted: boolean
     for (const [name, raw] of Object.entries(value)) {
       if (!/^[a-z][a-z0-9-]*$/.test(name) || !raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error(`${file}: invalid role ${name}`);
       const role = raw as Record<string, unknown>;
-      const allowed = ["description", "instructions", "provider", "model", "thinking"];
+      const allowed = ["description", "instructions", "provider", "model", "thinking", "cli", "effort"];
       if (Object.keys(role).some((key) => !allowed.includes(key))) throw new Error(`${file}: ${name} contains unknown fields`);
       if (typeof role.description !== "string" || typeof role.instructions !== "string" || !role.description.trim() || !role.instructions.trim()) throw new Error(`${file}: ${name} requires description and instructions`);
       for (const key of ["provider", "model", "thinking"]) {
         if (role[key] !== undefined && (typeof role[key] !== "string" || !(role[key] as string).trim())) throw new Error(`${file}: ${name}.${key} must be a non-empty string`);
       }
       if (role.thinking !== undefined && !levels.has(role.thinking as Thinking)) throw new Error(`${file}: invalid thinking level`);
+      if (role.cli !== undefined && role.cli !== "pi" && role.cli !== "codex") throw new Error(`${file}: ${name}.cli must be pi or codex`);
+      if (role.effort !== undefined && !efforts.has(role.effort as Effort)) throw new Error(`${file}: invalid Codex effort`);
+      if (role.cli === "codex" && (!role.model || role.provider || role.thinking)) throw new Error(`${file}: ${name} Codex role requires model and does not accept Pi provider/thinking fields`);
+      if (role.cli !== "codex" && role.effort !== undefined) throw new Error(`${file}: ${name}.effort requires cli: codex`);
       roles[name] = {
+        ...(role.cli ? { cli: role.cli as Role["cli"] } : {}),
+        ...(role.effort ? { effort: role.effort as Effort } : {}),
         description: role.description as string,
         instructions: role.instructions as string,
         ...(role.provider ? { provider: role.provider as string } : {}),

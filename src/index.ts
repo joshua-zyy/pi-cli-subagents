@@ -22,8 +22,8 @@ export function parentManager(ctx: Pick<ExtensionContext, "sessionManager">, lau
 function visible(state: AgentView) {
   // `task`, `history` and `startedAt` let the parent match an instance to its assignments
   // after its own context is compacted, without reading the child's transcript.
-  const { id, role, phase, task, history, runCount, runId, sessionId, cwd, startedAt, updatedAt, lastActivity, questions, text, truncated, error, logFile } = state;
-  return { id, role, phase, runId, sessionId, cwd, updatedAt, lastActivity, questions, text, truncated, error, logFile, history, runCount,
+  const { id, cli, role, phase, task, history, runCount, runId, sessionId, session, cwd, startedAt, updatedAt, lastActivity, questions, text, truncated, error, logFile } = state;
+  return { id, cli, role, phase, runId, sessionId, ...(session?.cli === "codex" ? { threadId: session.threadId } : {}), cwd, updatedAt, lastActivity, questions, text, truncated, error, logFile, history, runCount,
     ...(state.workspace ? { workspace: state.workspace, workspaceBaseline: state.workspaceBaseline } : {}), ...(task ? { task } : {}), ...(startedAt ? { startedAt } : {}) };
 }
 const view = (state: AgentView): string => JSON.stringify(visible(state));
@@ -104,8 +104,8 @@ export default function extension(pi: ExtensionAPI): void {
     },
   });
   pi.registerTool({
-    name: "spawn_agent", label: "Spawn Pi subagent",
-    description: "Start an independent, reusable Pi CLI subagent asynchronously. Returns an ID; keep working while completion reports arrive automatically. Roles: explore/worker/reviewer or custom roles. Reuse an existing instance with send_input when the new work depends on what it already did.",
+    name: "spawn_agent", label: "Spawn CLI subagent",
+    description: "Start an independent, reusable Pi or Codex CLI subagent asynchronously. Returns an ID; keep working while completion reports arrive automatically. Roles: explore/worker/reviewer or custom roles. Reuse an existing instance with send_input when the new work depends on what it already did.",
     parameters: Type.Object({
       role: Type.String({ description: "Role name; use list_agents to discover available roles" }),
       task: Type.String({ description: "Concrete goal, authorized files and verification criteria; do not widen CLI permissions" }),
@@ -118,12 +118,12 @@ export default function extension(pi: ExtensionAPI): void {
       if (!role) throw new Error(`Unknown role: ${args.role}; available: ${Object.keys(roles).join(", ")}`);
       if (args.workspace !== undefined && args.cwd !== undefined) throw new Error("Pass workspace or cwd, not both");
       const state = await parentManager(ctx, launch).spawn(args.role, role, args.cwd ?? ctx.cwd, args.task, args.workspace);
-      return content(`Pi subagent dispatched: ${view(state)}\nThe parent may continue working. Completion and waiting reports return to this parent session.`);
+      return content(`${state.cli === "codex" ? "Codex" : "Pi"} subagent dispatched: ${view(state)}\nThe parent may continue working. Completion and waiting reports return to this parent session.`);
     },
   });
   pi.registerTool({
-    name: "send_input", label: "Message Pi subagent",
-    description: "Send instructions to a running child (steer after its current tool, followUp after the current run), or resume a completed child in its original session. Never silently creates a replacement session. Managed workspaces reject messages while another instance occupies them. After integration or another instance's sync, explicitly choose keep (current workspace unchanged) or sync (update to parent state only if no unintegrated/staged work). Sync never runs while the instance is active.",
+    name: "send_input", label: "Message CLI subagent",
+    description: "Send instructions to a running child (steer after its current tool; Pi-only followUp after the current run), or resume a completed child in its original session. Codex running followUp is not supported. Never silently creates a replacement session. Managed workspaces reject messages while another instance occupies them. After integration or another instance's sync, explicitly choose keep (current workspace unchanged) or sync (update to parent state only if no unintegrated/staged work). Sync never runs while the instance is active.",
     parameters: Type.Object({
       id: Type.String({ description: "Subagent instance ID" }),
       message: Type.String({ description: "Instructions or a new task for the same child" }),
@@ -138,7 +138,7 @@ export default function extension(pi: ExtensionAPI): void {
     },
   });
   pi.registerTool({
-    name: "list_agents", label: "List Pi subagents",
+    name: "list_agents", label: "List CLI subagents",
     description: "List this parent's subagent instances with the assignments each one has already handled (history, oldest first) and the available roles. Use it to recover which instance did what before reusing one; do not poll it for completion. Does not access other parent sessions.",
     parameters: Type.Object({ id: Type.Optional(Type.String({ description: "If provided, return only this instance" })) }),
     async execute(_id, args, _signal, _update, ctx) {
@@ -149,8 +149,8 @@ export default function extension(pi: ExtensionAPI): void {
     },
   });
   pi.registerTool({
-    name: "close_agent", label: "Stop Pi subagent",
-    description: "Stop active work but retain the native Pi session and identity for later send_input. Does not delete history.",
+    name: "close_agent", label: "Stop CLI subagent",
+    description: "Stop active work but retain the native session and identity for later send_input. Does not delete history.",
     parameters: Type.Object({ id: Type.String({ description: "Subagent instance ID" }) }),
     async execute(_id, args, _signal, _update, ctx) {
       return content(`Processes stopped; original session retained: ${view(await parentManager(ctx, launch).close(args.id))}`);
@@ -159,7 +159,7 @@ export default function extension(pi: ExtensionAPI): void {
 
   pi.registerTool({
     name: "list_pending_permissions", label: "List pending child interactions",
-    description: "List unresolved interactions from this parent's Pi subagents. Inspect the request and the original task before deciding; do not assume every request is safe to approve.",
+    description: "List unresolved interactions from this parent's subagents. Inspect the request and the original task before deciding; do not assume every request is safe to approve.",
     parameters: Type.Object({}),
     async execute(_id, _args, _signal, _update, ctx) {
       const pending = parentManager(ctx, launch).list().filter((agent) => agent.questions.length && agent.phase === "waiting")
@@ -277,7 +277,8 @@ export default function extension(pi: ExtensionAPI): void {
           try {
             if (action.kind === "view") {
               const id = action.id;
-              const reader = new TranscriptReader();
+              const selected = manager.get(id);
+              const reader = new TranscriptReader(selected.cli ?? "pi", selected.session?.cli === "codex" ? selected.session.threadId : undefined);
               let viewer: ConversationViewer | undefined;
               try {
                 action = await ctx.ui.custom<PanelAction | undefined>((tui, theme, keybindings, done) => {

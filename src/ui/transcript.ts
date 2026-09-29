@@ -1,5 +1,6 @@
 import { open } from "node:fs/promises";
 import { StringDecoder } from "node:string_decoder";
+import type { Cli } from "../types.js";
 
 export interface TranscriptEntry {
   id: string;
@@ -51,6 +52,8 @@ export class TranscriptReader {
   private usage?: TranscriptUsage;
   private provider?: string;
   private model?: string;
+
+  constructor(private readonly cli: Cli = "pi", private threadId?: string) {}
 
   async read(files: string[]): Promise<TranscriptSnapshot> {
     // A different instance/history or a truncated file must not share parsing state.
@@ -164,7 +167,56 @@ export class TranscriptReader {
     if (typeof cost === "number" && Number.isFinite(cost) && cost > 0) total.cost += cost;
     this.usage = total;
   }
+  private codexItem(id: string, kind: TranscriptEntry["kind"], title: string): TranscriptEntry {
+    const key = `${this.fileIndex}:codex:${id}`;
+    return this.entries.get(key) ?? this.add({ id: key, kind, title, text: "" });
+  }
+  private codex(record: Record<string, any>): void {
+    const response = object(record.result);
+    if (!this.threadId && typeof response?.thread?.id === "string") this.threadId = response.thread.id;
+    if (!this.threadId) return;
+    if (response?.thread?.id === this.threadId) {
+      if (typeof response.model === "string") this.model = response.model;
+      if (typeof response.modelProvider === "string") this.provider = response.modelProvider;
+      return;
+    }
+    const p = object(record.params);
+    if (!p || p.threadId !== this.threadId) return;
+    const item = object(p.item);
+    if (record.method === "thread/tokenUsage/updated") {
+      const total = object(p.tokenUsage)?.total;
+      if (!object(total)) return;
+      const input = Number(total.inputTokens), cached = Number(total.cachedInputTokens), write = Number(total.cacheWriteInputTokens ?? 0), output = Number(total.outputTokens);
+      if (![input, cached, write, output].every(value => Number.isSafeInteger(value) && value >= 0)) return;
+      this.usage = { input: Math.max(0, input - cached - write), cacheRead: cached, cacheWrite: write, output, cost: 0 };
+      return;
+    }
+    if (record.method === "item/agentMessage/delta" && typeof p.itemId === "string" && typeof p.delta === "string") {
+      const entry = this.codexItem(p.itemId, "assistant", "Assistant");
+      entry.text = bounded(entry.text + p.delta);
+      return;
+    }
+    if (record.method === "item/commandExecution/outputDelta" && typeof p.itemId === "string" && typeof p.delta === "string") {
+      const entry = this.codexItem(p.itemId, "tool", "Shell command");
+      entry.text = bounded(entry.text + p.delta);
+      return;
+    }
+    if (!item || typeof item.id !== "string") return;
+    if (record.method === "item/completed" && item.type === "userMessage") {
+      this.codexItem(item.id, "user", "User").text = textOf(item.content);
+    } else if (item.type === "agentMessage" && record.method === "item/completed") {
+      if (typeof item.text === "string") this.codexItem(item.id, "assistant", "Assistant").text = bounded(item.text);
+    } else if (["item/started", "item/completed"].includes(record.method) && ["commandExecution", "fileChange"].includes(item.type)) {
+      const command = item.type === "commandExecution";
+      const entry = this.codexItem(item.id, "tool", command ? "Shell command" : "File change");
+      const input = command ? { command: item.command, cwd: item.cwd } : item.changes;
+      if (input !== undefined) entry.input = argumentsOf(input);
+      entry.status = record.method === "item/started" ? "running" : ["failed", "declined"].includes(item.status) ? "error" : "done";
+      if (command && record.method === "item/completed" && typeof item.aggregatedOutput === "string") entry.text = bounded(item.aggregatedOutput);
+    }
+  }
   private event(record: Record<string, any>): void {
+    if (this.cli === "codex") { this.codex(record); return; }
     if (["message_start", "message_end", "message_update"].includes(record.type) && object(record.message)) {
       this.message(record.message, record.type);
       return; // Legacy cumulative snapshots already include the delta.

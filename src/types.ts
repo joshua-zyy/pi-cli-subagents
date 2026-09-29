@@ -2,7 +2,12 @@ export type Phase = "starting" | "running" | "waiting" | "stopping" | "completed
 export type Delivery = "steer" | "followUp";
 export type Thinking = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 
+export type Cli = "pi" | "codex";
+export type Effort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh";
+
 export interface Role {
+  cli?: Cli;
+  effort?: Effort;
   description: string;
   instructions: string;
   provider?: string;
@@ -13,7 +18,11 @@ export interface Role {
 // An argv launch, not a shell command. Injectable for protocol tests.
 export interface Launch { command: string; args: string[] }
 export interface AgentSpec {
-  version: 1;
+  version: 1 | 2;
+  /** Missing only in legacy Pi records. Backend selection is immutable per instance. */
+  cli?: Cli;
+  /** Resolved once at creation; never switch native stores on continuation. */
+  codexHome?: string;
   id: string;
   parentFile: string;
   cwd: string;
@@ -36,7 +45,11 @@ export interface Question {
   prefill?: string;
   expiresAt?: number;
 }
+/** Legacy Pi fields remain readable, including pre-adapter request/state records. */
 export interface SessionHandle { sessionId: string; sessionFile: string }
+export type NativeSession =
+  | ({ cli: "pi" } & SessionHandle)
+  | { cli: "codex"; threadId: string; sessionId: string; codexHome: string };
 /**
  * One assignment this instance has already been given. It answers "what did this instance do"
  * after the parent's own context is compacted, without replaying the child's transcript.
@@ -49,6 +62,7 @@ export interface TaskRun {
   status: Phase | "unknown";
 }
 export interface AgentState extends Partial<SessionHandle> {
+  session?: NativeSession;
   id: string;
   runId: string;
   phase: Phase;
@@ -66,7 +80,7 @@ export interface AgentState extends Partial<SessionHandle> {
   exitCode?: number | null;
   forced?: boolean;
 }
-export interface StartRequest { runId: string; message: string; session?: SessionHandle; createdAt?: number }
+export interface StartRequest { runId: string; message: string; session?: NativeSession | SessionHandle; createdAt?: number }
 export interface Endpoint { port: number; token: string; runId: string }
 export interface Report {
   notificationId: string;
@@ -82,6 +96,7 @@ export interface Report {
   logFile: string;
 }
 export interface AgentView extends AgentState {
+  cli?: Cli;
   role: string;
   cwd: string;
   workspace?: string;

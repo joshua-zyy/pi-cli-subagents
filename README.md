@@ -1,19 +1,19 @@
 # pi-cli-subagents
 
-A lightweight Pi extension for delegating work to real, reusable Pi CLI sessions. The parent agent chooses what to delegate; the extension manages execution and lifecycle, and a bundled skill guides delegation.
+A lightweight Pi extension for delegating work to reusable CLI sessions. Pi is fully supported; Codex has an initial app-server adapter with single-action approvals and bounded conversation rendering. The parent agent chooses what to delegate; the extension manages execution and lifecycle, and a bundled skill guides delegation.
 
-**Status: managed workspaces, authorized uncommitted-state snapshots, explicit baseline continuation and safe synchronization are implemented with deterministic tests.** The initial create → parallel implementation → independent review → integration loop also has real Pi RPC acceptance, as does phase 1 instance recall after reopening. Real Pi RPC acceptance also covers authorized snapshot inheritance, original-worker sync continuation, and original-reviewer keep continuation. Real-terminal baseline dialogs and arbitrary crash/I/O recovery are unverified; non-Pi CLI adapters are not implemented. This is not a general production-readiness claim.
+**Status: Pi managed workspaces, authorized uncommitted-state snapshots, explicit baseline continuation and safe synchronization are implemented with deterministic tests. The Codex app-server adapter, single-action approvals and conversation rendering are covered by deterministic fake-CLI tests. One opt-in real Codex text-only turn completed in an isolated sandbox, and its saved event log rendered correctly; native approval and live-terminal behavior remain untested.** The initial create → parallel implementation → independent review → integration loop also has real Pi RPC acceptance, as does phase 1 instance recall after reopening. Real Pi RPC acceptance also covers authorized snapshot inheritance, original-worker sync continuation, and original-reviewer keep continuation. Real-terminal baseline dialogs and arbitrary crash/I/O recovery are unverified. Codex managed-workspace integration remains unimplemented; real-model approval and live-terminal rendering remain unverified; other CLI adapters are not implemented. This is not a general production-readiness claim.
 
 ## Scope
 
-- Dispatch independent Pi CLI sessions asynchronously, send further instructions, inspect instances, stop work, and receive reports.
+- Dispatch independent CLI sessions asynchronously, send further instructions, inspect instances, stop work, and receive reports. The Codex subset is limited as described below.
 - Preserve the agent ID and native session across turns. Finished CLI processes may exit; later instructions resume the original session, never a silent replacement.
 - Recover which instance handled which task from persisted history, so a compacted or reopened parent session does not have to remember it.
 - Keep accepted child work running when the parent Pi exits. Results are saved and replayed when the original persistent parent session returns.
 - Let the parent choose a shared directory or explicitly create a managed worktree. A worker and its independent reviewer use the same worktree in separate conversations, one active instance at a time.
 - Inherit CLI model and permission configuration unless a role overrides the model. Report unresolved interactions instead of silently approving them.
 
-The current version targets **Pi → Pi**. It does not introduce a workflow DSL, remote service, web dashboard, nested delegation, or token budgeting. The lifecycle takes inspiration from Paseo; live child navigation takes inspiration from tintinweb/pi-subagents. Later work covers Codex and other CLI adapters with their lifecycle and permission mapping.
+The tested full-workflow target remains **Pi → Pi**. Codex currently supports shared-directory spawn, steer, close, same-thread resume, single-action command/file approvals and a bounded live conversation view. It does not introduce a workflow DSL, remote service, web dashboard, nested delegation, or token budgeting. The lifecycle takes inspiration from Paseo; live child navigation takes inspiration from tintinweb/pi-subagents. Later work covers Codex managed workspaces and other CLI adapters.
 
 ## Development and local loading
 
@@ -38,8 +38,8 @@ These command-line flags do not modify global settings. For project-level loadin
 | --- | --- |
 | `create_workspace` | Create a detached worktree from HEAD, or explicitly inherit authorized working files through an internal baseline commit. |
 | `integrate_workspace` | Apply an idle workspace's changes to its original parent directory without committing or changing the index. |
-| `spawn_agent` | Start an `explore`, `worker`, `reviewer`, or custom role with either `cwd` or a managed `workspace` ID. |
-| `send_input` | Steer, queue a `followUp`, or resume the original session; choose `baseline: "keep"` / `"sync"` when its workspace baseline needs confirmation. |
+| `spawn_agent` | Start an `explore`, `worker`, `reviewer`, or custom role with either `cwd` or a managed `workspace` ID. Codex roles accept `cwd` only; managed workspaces are not yet supported. |
+| `send_input` | Steer, queue a Pi-only `followUp`, or resume the original session; choose `baseline: "keep"` / `"sync"` when its Pi workspace baseline needs confirmation. Codex running `followUp` is refused, not silently converted to steer. |
 | `list_agents` | List this parent's instances with each one's earlier assignments and outcomes, roles, results, errors, and pending questions. |
 | `close_agent` | Stop active work without deleting the session or its history. |
 | `list_pending_permissions` | Inspect unresolved requests from subagents owned by this parent session. |
@@ -87,7 +87,7 @@ For manual cleanup, first inspect `git -C <repo> worktree list` and `git -C <wor
 
 ## Instances, roles, and task history
 
-A role is a template; an instance is a colleague with a stable identity and its own native Pi session. The same role can run as several instances at once, so lists identify each one by role plus the first eight characters of its ID, and detail views keep the full ID for commands.
+A role is a template; an instance has a stable identity and its own native Pi session or Codex thread. The same role can run as several instances at once, so lists identify each one by role plus the first eight characters of its ID, and detail views keep the full ID for commands.
 
 `list_agents` reports each instance's `history`: the assignments it already handled, oldest first, each with the task summary, its run ID, its start time, and its outcome. `runCount` is the total number of runs, and `history` holds the five most recent. A run that ended without a result report is reported as `unknown` rather than being assumed successful. This is how the parent recovers *who did what* after its own context is compacted or the session is reopened, instead of relying on recall. Reuse an instance when the new task depends on what it already learned; start a new one for unrelated work. Session memory is not a current view of the code: when earlier work has since been integrated or changed, the follow-up task must say what to re-read.
 
@@ -140,7 +140,7 @@ Built-ins are `explore` (investigate without changing project files), `worker` (
 - User: `~/.pi/agent/cli-subagents.roles.json`
 - Trusted project: `.pi/cli-subagents.roles.json`
 
-Project roles replace user roles with the same name; user roles replace built-ins. Replacements are whole role definitions, not field-by-field merges. `description` and `instructions` are required. `provider`, `model`, and `thinking` are optional. Allowed thinking values: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` (the selected model must support the value).
+Project roles replace user roles with the same name; user roles replace built-ins. Replacements are whole role definitions, not field-by-field merges. `description` and `instructions` are required. Pi roles: `provider`, `model`, and `thinking` are optional. Codex roles require `"cli": "codex"` and an explicit `model`; optional `effort` is one of `none`, `minimal`, `low`, `medium`, `high`, `xhigh`. Pi-only `provider`/`thinking` cannot appear on a Codex role. Allowed Pi thinking values: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` (the selected model must support the value).
 
 ```json
 {
@@ -151,11 +151,27 @@ Project roles replace user roles with the same name; user roles replace built-in
 }
 ```
 
-Role instructions are not a security sandbox. Per-role tool/skill restrictions are not implemented.
+A Codex role can be configured in the same trusted JSON file, for example:
+
+```json
+{
+  "codex-worker": {
+    "cli": "codex",
+    "description": "Execute a task in Codex",
+    "instructions": "Complete only the authorized task and report what you verified.",
+    "model": "YOUR_AVAILABLE_CODEX_MODEL",
+    "effort": "medium"
+  }
+}
+```
+
+On Windows, the extension launches the `@openai/codex` Node entrypoint found on `PATH` with `shell:false`, rather than launching an npm `.cmd` shim. It pins the resolved `CODEX_HOME` (or the default `~/.codex`) to the instance for later turns, inherits existing native login and policies, and never changes global configuration. No model fallback or permission downgrade occurs if a request fails. Codex native `threadId` is the resume target; `sessionId` is a separate session-tree identity. `close_agent` does not archive or delete threads.
+
+**Current Codex limits:** Managed workspaces and baseline sync remain unavailable. The Codex conversation viewer reads its existing native JSON-RPC event log without contacting the CLI; it shows bounded messages, command/file activity, and cumulative reported token usage. Unknown/broad Codex interactions fail closed, rather than being converted into a session-wide authorization. Use Pi for managed workspaces until a later stage. A Codex role's instructions and the inherited sandbox are not OS isolation. Per-role tool/skill restrictions are not implemented.
 
 ## Interactions and local data
 
-Native Pi has no default permission-approval workflow. Other extensions can request interaction. Those requests enter `waiting`; the parent Pi may inspect them with `list_pending_permissions` and answer one current request with `respond_to_permission`, giving a reason. The parent must compare the requested action to the user's authorized task; ambiguous or out-of-scope requests should remain pending for the user. Approvals are per request, not permanent permission grants, and do not disable or reconfigure safety extensions. The human can still answer through `/agent-reply <agentId> <questionId>` or the panel. Decisions are recorded in the run's local `permissions.jsonl` next to the event log; a response being sent does not prove that the action later completed. This is a policy/interface boundary, **not OS isolation**: processes under the same user can access local control files.
+Native Pi has no default permission-approval workflow; other extensions can request interaction. Codex's command and file-change approvals enter `waiting` only when the current thread/turn and exact command/cwd or proposed file changes fit in the bounded request payload. Inspect the raw log if the TUI cannot show every line; otherwise deny. `respond_to_permission` and `/agent-reply` support only per-request accept, decline or cancel. Session-wide approvals, persistent policy amendments, `writeStdin`, `grantRoot`, and additional filesystem/network permissions are not offered; only single-action decisions actually offered by the native server may be returned. Unsupported/unscoped requests are rejected and fail the run. An unanswered Codex request resolved by the native server is removed; a response with uncertain native resolution cannot be sent twice. In both CLIs, answerable requests enter `waiting`; the parent Pi may inspect them with `list_pending_permissions` and answer one current request with `respond_to_permission`, giving a reason. The parent must compare the requested action to the user's authorized task; ambiguous or out-of-scope requests should remain pending for the user. Approvals are per request, not permanent permission grants, and do not disable or reconfigure safety extensions. The human can still answer through `/agent-reply <agentId> <questionId>` or the panel. Decisions are recorded in the run's local `permissions.jsonl` next to the event log; a response being sent does not prove that the action later completed. This is a policy/interface boundary, **not OS isolation**: processes under the same user can access local control files.
 
 Sessions, reports, and event logs live beside the parent session in `<parent-session-file>.subagents/`. They can contain sensitive task data; do not publish them. Control credentials are not included in tool results. Closing an instance does not delete these files.
 
@@ -163,7 +179,7 @@ If a worker is unreachable or an ownership lock remains, the extension refuses d
 
 ## Verification and limits
 
-`npm test` builds the extension and runs deterministic tests without model calls. Tests cover protocol framing, lifecycle and original-session resume, role trust, report receipts, UI rendering, keyboard actions, transcript streaming, and cleanup. Managed-workspace tests use real temporary Git repositories and deterministic child CLIs: isolated parallel edits, independent review of uncommitted files, cross-controller leases, integration/conflict handling, CRLF/binary/deletion cases, index/HEAD preservation, and tool/TUI rejection of stale continuation. Additional deterministic tests cover authorized snapshot inheritance, incremental keep continuation, synchronization without losing unintegrated/staged/ignored data, old-instance notices across multiple syncs, preserved native session IDs, and TUI confirmation/cancellation with changing parent content. CLI cleanup checks distinguish the original instance's command line from an unrelated reused PID. `npm run check` checks TypeScript.
+`npm test` builds the extension and runs deterministic tests without model calls. Codex tests use a fake JSON-RPC app-server in a unique `.test-output/` home: native thread/session/turn identity, fast and foreign events, empty-summary recovery, same-thread continuation, running steer, unsupported follow-up, interrupt, scoped command/file approvals, denial/cancel, native resolution and timeout races, cumulative usage, bounded transcript output, parent-controller exit and old Pi-record compatibility. These fixtures alone do not verify real Codex availability, permission enforcement, real-terminal dialogs or working-directory side effects. A separate local opt-in read-only Codex turn completed with the explicitly selected model and no tools, and the resulting native log parsed as one user message, one assistant answer and cumulative token usage. This does **not** verify real Codex approval routing, writes, resume across processes, or the live TUI. Tests cover protocol framing, lifecycle and original-session resume, role trust, report receipts, UI rendering, keyboard actions, transcript streaming, and cleanup. Managed-workspace tests use real temporary Git repositories and deterministic child CLIs: isolated parallel edits, independent review of uncommitted files, cross-controller leases, integration/conflict handling, CRLF/binary/deletion cases, index/HEAD preservation, and tool/TUI rejection of stale continuation. Additional deterministic tests cover authorized snapshot inheritance, incremental keep continuation, synchronization without losing unintegrated/staged/ignored data, old-instance notices across multiple syncs, preserved native session IDs, and TUI confirmation/cancellation with changing parent content. CLI cleanup checks distinguish the original instance's command line from an unrelated reused PID. `npm run check` checks TypeScript.
 
 The local opt-in managed-workspace driver (`.test-output/phase2-real-flow.mjs`, ignored by Git) exercised one real Pi parent, two concurrent real workers, and two independent real reviewers. The parent used `create_workspace` twice and `integrate_workspace` twice, progressing through four terminal notifications without completion polling. Each worker changed only its own assigned operation, each reviewer inspected that workspace without edits, and the main sandbox passed both checks after integration while each worktree retained the other operation's original code. The external observer additionally verified review-time exclusion, duplicate-integration no-op behavior, and refusal of post-integration continuation without a baseline choice against those real instances. A separate read-only audit checked native session/model identities, actual tool calls, unchanged sandbox HEAD/refs/index, unchanged plugin files during the run, and release of all owned processes. These checks do not constitute real-terminal or crash-recovery acceptance; conflict/CRLF coverage comes from the deterministic Git tests.
 

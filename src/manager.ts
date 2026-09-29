@@ -4,9 +4,11 @@ import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { control } from "./control.js";
+import { codexHome, codexLaunch } from "./codex-launch.js";
+import { nativeSession } from "./cli-adapter.js";
 import { WorkspaceStore, type ResumeOptions } from "./workspace.js";
 import { directories, jsonFiles, processAlive, readJson, shorten, waitUntil, writeJson } from "./storage.js";
-import type { AgentSpec, AgentState, AgentView, Control, Delivery, Endpoint, Launch, Report, Role, SessionHandle, StartRequest, TaskRun } from "./types.js";
+import type { AgentSpec, AgentState, AgentView, Control, Delivery, Endpoint, Launch, NativeSession, Report, Role, SessionHandle, StartRequest, TaskRun } from "./types.js";
 
 const workerFile = fileURLToPath(new URL("./worker.js", import.meta.url));
 const idPattern = /^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/;
@@ -23,7 +25,7 @@ export class AgentManager {
   readonly root: string;
   readonly parentFile: string;
   readonly workspaces: WorkspaceStore;
-  constructor(parentFile: string, private readonly launch: Launch) {
+  constructor(parentFile: string, private readonly launch: Launch, private readonly codex?: { launch: Launch; home: string }) {
     this.parentFile = path.resolve(parentFile);
     this.root = `${this.parentFile}.subagents`;
     this.workspaces = new WorkspaceStore(this.parentFile);
@@ -35,7 +37,7 @@ export class AgentManager {
   }
   private spec(id: string): AgentSpec {
     const spec = readJson<AgentSpec>(path.join(this.directory(id), "spec.json"));
-    if (!spec || spec.version !== 1 || spec.parentFile !== this.parentFile || spec.id !== id) throw new Error("This subagent does not belong to the current parent session, or its record is missing");
+    if (!spec || ![1, 2].includes(spec.version) || (spec.version === 2 && (spec.cli !== "codex" || !spec.codexHome)) || spec.parentFile !== this.parentFile || spec.id !== id) throw new Error("This subagent does not belong to the current parent session, or its record is missing");
     return spec;
   }
   get(id: string): AgentView {
@@ -62,7 +64,7 @@ export class AgentManager {
       };
     });
     const latest = history.at(-1);
-    return { ...state, role: spec.roleName, cwd: spec.cwd, ...(spec.workspace ? { workspace: spec.workspace, workspaceBaseline: spec.workspaceBaseline } : {}), history, runCount: runs.length,
+    return { ...state, cli: spec.cli ?? "pi", role: spec.roleName, cwd: spec.cwd, ...(spec.workspace ? { workspace: spec.workspace, workspaceBaseline: spec.workspaceBaseline } : {}), history, runCount: runs.length,
       ...(latest?.runId === current && latest.task ? { task: latest.task } : {}), ...(report ? shorten(report.text) : {}) };
   }
   list(): AgentView[] { return directories(this.root).filter((id) => idPattern.test(id)).map((id) => this.get(id)); }
@@ -91,12 +93,18 @@ export class AgentManager {
 
   async spawn(roleName: string, role: Role, cwd: string, message: string, workspace?: string): Promise<AgentView> {
     if (!message.trim()) throw new Error("Task must not be empty");
+    if (role.cli === "codex" && workspace !== undefined) throw new Error("Codex managed workspaces are not supported in protocol stage A");
+    if (role.cli === "codex" && (!role.model || role.provider || role.thinking)) throw new Error("Codex requires an explicit model without Pi provider/thinking fields");
+    if (role.cli !== "codex" && role.effort) throw new Error("Codex effort requires cli: codex");
     const id = randomUUID(), dir = this.directory(id);
     const start = async (directory: string, baseline?: AgentSpec["workspaceBaseline"], notice?: string): Promise<AgentView> => {
       directory = path.resolve(directory);
       if (!statSync(directory).isDirectory()) throw new Error("cwd must be an existing directory");
       mkdirSync(dir, { recursive: true, mode: 0o700 });
-      const spec: AgentSpec = { version: 1, id, parentFile: this.parentFile, cwd: directory, roleName, role, launch: this.launch, createdAt: Date.now(), ...(workspace ? { workspace, workspaceBaseline: baseline } : {}) };
+      const selected = role.cli === "codex" ? this.codex ?? { launch: codexLaunch(), home: codexHome() } : undefined;
+      const spec: AgentSpec = { version: selected ? 2 : 1, ...(selected ? { cli: "codex", codexHome: path.resolve(selected.home) } : {}),
+        id, parentFile: this.parentFile, cwd: directory, roleName, role,
+        launch: selected?.launch ?? this.launch, createdAt: Date.now(), ...(workspace ? { workspace, workspaceBaseline: baseline } : {}) };
       writeJson(path.join(dir, "spec.json"), spec);
       return this.start(id, notice ? `${message}\n\n[Workspace baseline]\n${notice}` : message);
     };
@@ -105,10 +113,10 @@ export class AgentManager {
     return start(cwd);
   }
 
-  private async start(id: string, message: string, session?: SessionHandle): Promise<AgentView> {
+  private async start(id: string, message: string, session?: NativeSession | SessionHandle): Promise<AgentView> {
     const dir = this.directory(id);
     if (existsSync(path.join(dir, "owner.lock"))) throw new Error("The previous worker still owns this session or a stale lock remains. Inspect it before resuming; concurrent owners are not allowed.");
-    if (session && !existsSync(session.sessionFile)) throw new Error(`Original session file is missing: ${session.sessionFile}; will not silently create a new session.`);
+    if (session && "sessionFile" in session && !existsSync(session.sessionFile)) throw new Error(`Original session file is missing: ${session.sessionFile}; will not silently create a new session.`);
     const runId = randomUUID(), runDir = path.join(dir, "runs", runId);
     mkdirSync(runDir, { recursive: true, mode: 0o700 });
     const initial: StartRequest = { runId, message, createdAt: Date.now(), session };
@@ -147,6 +155,7 @@ export class AgentManager {
   async send(id: string, message: string, mode: Delivery = "steer", options: ResumeOptions = {}): Promise<AgentView> {
     if (!message.trim()) throw new Error("Message must not be empty");
     const spec = this.spec(id);
+    if (spec.cli === "codex" && spec.workspace) throw new Error("Codex managed workspaces are not supported in protocol stage A");
     if (!spec.workspace && (options.baseline !== undefined || options.includeUncommitted !== undefined)) throw new Error("Baseline choices require a managed workspace");
     if (options.baseline === "sync") {
       const state = this.get(id);
@@ -159,6 +168,7 @@ export class AgentManager {
       let state = this.get(id);
       if (state.phase === "unreachable") throw new Error(state.error);
       if (["starting", "running", "waiting"].includes(state.phase)) {
+        if (spec.cli === "codex" && mode === "followUp") throw new Error("Codex followUp while running is not supported; wait for this run to finish");
         await this.request(id, { type: "send", message: prompt, mode });
         return this.get(id);
       }
@@ -166,8 +176,10 @@ export class AgentManager {
         await waitUntil("Previous worker release", () => !processAlive(state.workerPid), 15_000);
         state = this.get(id);
       }
-      if (!state.sessionFile || !state.sessionId) throw new Error("No resumable original session; will not silently create a new session");
-      return this.start(id, prompt, { sessionFile: state.sessionFile, sessionId: state.sessionId });
+      const session = nativeSession(state.session ?? (state.sessionFile && state.sessionId ? { sessionFile: state.sessionFile, sessionId: state.sessionId } : undefined));
+      if (!session || session.cli !== (spec.cli ?? "pi")) throw new Error("No resumable original session; will not silently create a new session");
+      if (session.cli === "codex" && session.codexHome !== spec.codexHome) throw new Error("Codex native home changed; refusing to resume a different session store");
+      return this.start(id, prompt, session);
     };
     if (!spec.workspace) return send();
     return this.workspaces.runAgent(spec.workspace, id, async (ws, notice) => {

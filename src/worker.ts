@@ -1,8 +1,10 @@
 import { createServer, type Server } from "node:http";
-import { openSync, closeSync, unlinkSync, writeFileSync, mkdirSync, appendFileSync } from "node:fs";
+import { openSync, closeSync, unlinkSync, writeFileSync, appendFileSync } from "node:fs";
 import { randomBytes, randomUUID } from "node:crypto";
 import path from "node:path";
-import { PiProcess, type WireRecord } from "./pi-process.js";
+import { PiAdapter } from "./pi-adapter.js";
+import { CodexAdapter } from "./codex-adapter.js";
+import { nativeSession, type CliAdapter, type AdapterEvent } from "./cli-adapter.js";
 import { readJson, writeJson } from "./storage.js";
 import type { AgentSpec, AgentState, Control, Question, Report, StartRequest } from "./types.js";
 
@@ -10,17 +12,19 @@ async function run(dir: string, runId: string): Promise<void> {
   const runDir = path.join(dir, "runs", runId);
   const spec = readJson<AgentSpec>(path.join(dir, "spec.json"))!;
   const start = readJson<StartRequest>(path.join(runDir, "request.json"))!;
-  if (!spec || spec.version !== 1 || start?.runId !== runId) throw new Error("Invalid startup record");
+  if (!spec || (spec.version !== 1 && spec.version !== 2) || (spec.version === 2 && (spec.cli !== "codex" || !spec.codexHome)) || start?.runId !== runId) throw new Error("Invalid startup record");
   const lockFile = path.join(dir, "owner.lock");
   const lock = openSync(lockFile, "wx", 0o600);
   writeFileSync(lock, JSON.stringify({ pid: process.pid, runId }));
   const state: AgentState = {
     id: spec.id, runId, phase: "starting", workerPid: process.pid, startedAt: Date.now(),
     updatedAt: Date.now(), accepted: false, questions: [], logFile: path.join(runDir, "events.jsonl"),
+    ...(start.session ? { session: nativeSession(start.session), sessionId: start.session.sessionId,
+      ...("sessionFile" in start.session ? { sessionFile: start.session.sessionFile } : {}) } : {}),
   };
   const save = () => { state.updatedAt = Date.now(); writeJson(path.join(dir, "state.json"), state); };
-  let rpc: PiProcess | undefined, server: Server | undefined, ending = false;
-  let assistant: WireRecord | undefined;
+  let rpc: CliAdapter | undefined, server: Server | undefined, ending = false;
+  let finalText = "";
   let commandQueue = Promise.resolve();
   const timers = new Set<NodeJS.Timeout>();
   let resolveFinished!: () => void;
@@ -47,39 +51,31 @@ async function run(dir: string, runId: string): Promise<void> {
       if (rpc) {
         if (stop) {
           for (const question of state.questions) {
-            try { await rpc.reply({ id: question.id, cancelled: true }); } catch { /* stop() still reaps this CLI tree */ }
+            try { await rpc.reply({ type: "reply", id: question.id, cancelled: true }); } catch { /* stop() still reaps this CLI tree */ }
           }
         }
         const result = await (stop ? rpc.stop() : rpc.end());
         state.exitCode = result.exit.code; state.forced = result.forced;
         if (status === "completed" && (result.exit.code !== 0 || result.forced)) {
-          status = "failed"; error = "The turn ended but child Pi did not exit cleanly; inspect the logs.";
+          status = "failed"; error = "The turn ended but child CLI did not exit cleanly; inspect the logs.";
         }
       }
-      const text = Array.isArray(assistant?.content) ? assistant.content.filter((part: WireRecord) => part.type === "text").map((part: WireRecord) => part.text).join("") : "";
       state.phase = status; state.error = error; state.questions = [];
-      report(status, text, error); save();
+      report(status, finalText, error); save();
     } finally {
       if (server?.listening) server.close(() => resolveFinished());
       else resolveFinished();
     }
   }
 
-  function event(record: WireRecord): void {
+  function event(record: AdapterEvent): void {
     if (ending) return;
-    if (record.type === "message_end" && typeof record.message === "object" && record.message?.role === "assistant") assistant = record.message;
-    if (record.type === "agent_start" || record.type === "tool_execution_start" || record.type === "tool_execution_end") {
-      state.lastActivity = record.type === "agent_start" ? "agent_start" : `${record.type}: ${record.toolName}`;
+    if (record.type === "activity") {
+      state.lastActivity = record.detail;
       state.phase = state.questions.length ? "waiting" : "running"; save();
     }
-    if (record.type === "extension_ui_request" &&
-      (record.method === "select" || record.method === "confirm" || record.method === "input" || record.method === "editor")) {
-      const question: Question = {
-        id: String(record.id), method: record.method, title: String(record.title ?? "Subagent needs a response"),
-        message: typeof record.message === "string" ? record.message : undefined,
-        options: record.options, placeholder: record.placeholder, prefill: record.prefill,
-        ...(typeof record.timeout === "number" ? { expiresAt: Date.now() + record.timeout } : {}),
-      };
+    if (record.type === "question") {
+      const question: Question = record.question;
       report("waiting", `${question.title}\n${question.message ?? ""}`, undefined, question.id);
       state.questions.push(question); state.phase = "waiting"; save();
       if (question.expiresAt !== undefined) {
@@ -91,10 +87,13 @@ async function run(dir: string, runId: string): Promise<void> {
         timers.add(timer);
       }
     }
-    if (record.type === "agent_settled") {
-      const reason = assistant?.stopReason;
-      void finish(reason === "stop" ? "completed" : reason === "aborted" ? "stopped" : "failed",
-        reason === "stop" || reason === "aborted" ? undefined : String(assistant?.errorMessage ?? `Did not complete normally: ${reason ?? "missing final message"}`));
+    if (record.type === "resolved") {
+      state.questions = state.questions.filter(q => q.id !== record.id);
+      state.phase = state.questions.length ? "waiting" : state.accepted ? "running" : "starting"; save();
+    }
+    if (record.type === "settled") {
+      finalText = record.text;
+      void finish(record.status, record.error, record.stop);
     }
   }
 
@@ -106,7 +105,7 @@ async function run(dir: string, runId: string): Promise<void> {
       if (!state.accepted) throw new Error("Initial task has not been accepted; resolve any startup interaction first.");
       if (state.questions.length) throw new Error("The child has an unresolved interaction. Use respond_to_permission or /agent-reply; a message is not an approval.");
       if (typeof input.message !== "string" || !input.message.trim() || !["steer", "followUp"].includes(input.mode)) throw new Error("Invalid message or delivery mode");
-      await rpc.request({ type: "prompt", message: input.message, streamingBehavior: input.mode });
+      await rpc.send(input.message, input.mode);
     } else if (input.type === "reply") {
       const q = state.questions.find((q) => q.id === input.id);
       if (!q || (q.expiresAt !== undefined && q.expiresAt <= Date.now())) throw new Error("The interaction has ended or does not exist");
@@ -123,7 +122,7 @@ async function run(dir: string, runId: string): Promise<void> {
         actor: input.actor ?? "human", decision: input.cancelled ? "cancelled" : q.method === "confirm" ? input.confirmed ? "approved" : "denied" : "answered",
         delivery: "attempted", ...(input.reason ? { reason: input.reason.slice(0, 2000) } : {}),
       })}\n`, { mode: 0o600 });
-      await rpc.reply({ id: q.id, value: input.value, confirmed: input.confirmed, cancelled: input.cancelled });
+      await rpc.reply(input);
       state.questions = state.questions.filter((item) => item !== q);
       if (!ending) { state.phase = state.questions.length ? "waiting" : state.accepted ? "running" : "starting"; save(); }
     } else throw new Error("Unknown control operation");
@@ -153,24 +152,20 @@ async function run(dir: string, runId: string): Promise<void> {
     const address = server.address();
     if (!address || typeof address === "string") throw new Error("Local control address is unavailable");
     writeJson(path.join(dir, "endpoint.json"), { port: address.port, token, runId });
-    const sessions = path.join(dir, "sessions"); mkdirSync(sessions, { recursive: true, mode: 0o700 });
-    const args = ["--mode", "rpc", "--session-dir", sessions, "--append-system-prompt", `# Delegated role: ${spec.roleName}\n${spec.role.instructions}`];
-    if (start.session) args.push("--session", start.session.sessionFile);
-    else args.push("--name", `${spec.roleName}:${spec.id}`);
-    if (spec.role.provider) args.push("--provider", spec.role.provider);
-    if (spec.role.model) args.push("--model", spec.role.model);
-    if (spec.role.thinking) args.push("--thinking", spec.role.thinking);
-    rpc = new PiProcess(spec.launch, args, spec.cwd, state.logFile, event);
-    state.cliPid = rpc.child.pid; save();
+    const session = nativeSession(start.session);
+    rpc = (spec.cli ?? "pi") === "codex"
+      ? new CodexAdapter({ spec, session, logFile: state.logFile, onEvent: event })
+      : new PiAdapter({ spec, session, logFile: state.logFile, onEvent: event });
+    state.cliPid = rpc.pid; save();
     rpc.closed.then((exit) => {
-      if (!ending) void finish("failed", `Child Pi exited before agent_settled (${exit.code ?? exit.signal})`);
+      if (!ending) void finish("failed", `Child CLI exited before a terminal event (${exit.code ?? exit.signal})`);
     });
-    const initial = await rpc.request({ type: "get_state" });
-    if (typeof initial.sessionId !== "string" || typeof initial.sessionFile !== "string") throw new Error("Pi did not provide persistent session handles");
-    if (start.session && (initial.sessionId !== start.session.sessionId || path.resolve(initial.sessionFile) !== path.resolve(start.session.sessionFile))) throw new Error("Resume returned a different session; refusing to continue");
-    state.sessionId = initial.sessionId; state.sessionFile = initial.sessionFile; save();
+    const initial = await rpc.ready();
+    state.session = initial; state.sessionId = initial.sessionId;
+    if (initial.cli === "pi") state.sessionFile = initial.sessionFile;
+    save();
     if (!ending) {
-      await rpc.request({ type: "prompt", message: start.message });
+      await rpc.start(start.message);
       state.accepted = true; if (!ending && !state.questions.length) state.phase = "running"; save();
     }
     await finished;
