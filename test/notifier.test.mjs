@@ -37,7 +37,7 @@ test('error and waiting messages keep actionable details without embedding file 
   deliverReports(h.manager,h.pi,h.ctx,new Set());
   const content=h.sent[0].message.content;
   assert.match(content,/Permission denied/);assert.match(content,/Approve one operation\?/);
-  assert.match(content, /Question ID: q.*list_pending_permissions/s);
+  assert.match(content, /Question ID: q.*respond_to_permission/s);
   assert.doesNotMatch(content,/C:\\long|Full event log|Result file/);
   assert.deepEqual(h.sent[0].message.details.ids,['failed','waiting']);
 });

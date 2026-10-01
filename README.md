@@ -73,11 +73,10 @@ Open **`/agents`** or press **Ctrl+Alt+A**. Select an instance with **↑/↓**;
 | --- | --- |
 | `spawn_agent` | Start a role with a task and either `cwd` or `workspace` |
 | `send_input` | Continue the same instance in its original session |
-| `list_agents` | Find instances, assignment history, and configured roles; not for completion polling |
+| `list_agents` | Find instances, assignment history, configured roles, and an unresolved request; not for completion polling |
 | `close_agent` | Stop active work without deleting its session |
 | `create_workspace` | Create a managed Git worktree |
 | `integrate_workspace` | Apply reviewed workspace changes to the parent directory |
-| `list_pending_permissions` | Inspect this parent's unresolved requests |
 | `respond_to_permission` | Answer one current request with an explicit reason |
 
 Pi and Codex accept running `steer` messages; running `followUp` is Pi-only. Wait for Claude to finish before sending more instructions. Panels are TUI-only; the tools also work in RPC/non-interactive modes.

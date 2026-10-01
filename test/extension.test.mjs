@@ -47,7 +47,7 @@ test('extension tools implement → separate review → resume same implementer;
     process.argv[1] = savedArgv;
   });
   extension(pi);
-  assert.deepEqual([...tools.keys()], ['create_workspace', 'integrate_workspace', 'spawn_agent', 'send_input', 'list_agents', 'close_agent', 'list_pending_permissions', 'respond_to_permission']);
+  assert.deepEqual([...tools.keys()], ['create_workspace', 'integrate_workspace', 'spawn_agent', 'send_input', 'list_agents', 'close_agent', 'respond_to_permission']);
   assert.ok(commands.has('agent-reply')); assert.ok(commands.has('cli-agents-setting'));
   handlers.session_start({ type: 'session_start', reason: 'startup' }, ctx);
   const invoke = async (tool, params) => (await tools.get(tool).execute('id', params, undefined, undefined, ctx)).content[0].text;

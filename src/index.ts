@@ -167,7 +167,7 @@ export default function extension(pi: ExtensionAPI): void {
   });
   pi.registerTool({
     name: "list_agents", label: "List CLI subagents",
-    description: "List this parent's subagent instances with the assignments each one has already handled (history, oldest first) and the available roles. Use it to recover which instance did what before reusing one; do not poll it for completion. Does not access other parent sessions.",
+    description: "List this parent's subagent instances with the assignments each one has already handled (history, oldest first), the available roles, and any unresolved request a `waiting` instance is blocked on. Use it to recover which instance did what before reusing one, and to inspect a request before answering it with respond_to_permission; do not poll it for completion. Does not access other parent sessions.",
     parameters: Type.Object({ id: Type.Optional(Type.String({ description: "If provided, return only this instance" })) }),
     async execute(_id, args, _signal, _update, ctx) {
       const roles = loadRoles(getAgentDir(), ctx.cwd, ctx.isProjectTrusted());
@@ -186,20 +186,10 @@ export default function extension(pi: ExtensionAPI): void {
   });
 
   pi.registerTool({
-    name: "list_pending_permissions", label: "List pending child interactions",
-    description: "List unresolved interactions from this parent's subagents. Inspect the request and the original task before deciding; do not assume every request is safe to approve.",
-    parameters: Type.Object({}),
-    async execute(_id, _args, _signal, _update, ctx) {
-      const pending = parentManager(ctx, launch).list().filter((agent) => agent.questions.length && agent.phase === "waiting")
-        .map(({ id, role, cwd, task, runId, questions }) => ({ id, role, cwd, task, runId, questions }));
-      return content(JSON.stringify(pending));
-    },
-  });
-  pi.registerTool({
     name: "respond_to_permission", label: "Answer child interaction",
     description: "Answer one current request from a child owned by this parent. Compare the requested operation with the user's task authorization; approve only within scope, otherwise deny/cancel or ask the user. A humanOnly request cannot be approved by this tool: ask the human UI, or deny/cancel. This does not change global permissions or disable safety extensions. Every decision is recorded locally.",
     parameters: Type.Object({
-      id: Type.String({ description: "Subagent instance ID returned by list_pending_permissions" }),
+      id: Type.String({ description: "Subagent instance ID from list_agents" }),
       questionId: Type.String({ description: "Exact current interaction ID" }),
       confirmed: Type.Optional(Type.Boolean({ description: "For confirm: true to approve once, false to deny" })),
       value: Type.Optional(Type.String({ description: "For select: an exact offered option; for input/editor: response text" })),

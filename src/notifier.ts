@@ -37,11 +37,11 @@ export function deliverReports(
     let raw = report.text;
     if (report.error) raw = `Error: ${report.error}\n${raw}`.trim();
     if (!raw) raw = report.status === "waiting"
-      ? "Waiting for a response; inspect with list_pending_permissions or /agent-reply."
+      ? "Waiting for a response; inspect it with list_agents or /agent-reply."
       : "No text response; inspect with list_agents or /agents.";
     const clipped = raw.length > 2400;
     const summary = clipped ? `${raw.slice(0, 1000)}\n…\n${raw.slice(-1300)}\n(truncated; inspect list_agents({id: \"${report.agentId}\"}) or /agents; raw log holds the full transcript)` : raw;
-    const replyHint = report.status === "waiting" ? `\nQuestion ID: ${report.questionId ?? "inspect pending requests"}; use list_pending_permissions and respond_to_permission, or /agent-reply.` : "";
+    const replyHint = report.status === "waiting" ? `\nQuestion ID: ${report.questionId ?? "inspect the instance with list_agents"}; answer it with respond_to_permission, or /agent-reply.` : "";
     return `[Subagent ${report.agentId} · ${report.status}]\n${summary}${replyHint}`;
   }).join("\n\n");
   for (const id of ids) pending.add(id);

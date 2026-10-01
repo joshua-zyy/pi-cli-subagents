@@ -21,7 +21,7 @@ test('parent can explicitly review a child request while the human command remai
   extension({on(){},registerTool(tool){tools.set(tool.name,tool)},registerCommand(name,def){commands.set(name,def)},registerShortcut(){}});
   const manager = new AgentManager(parent,{command:process.execPath,args:[fixture]});
   t.after(async()=>{for(const s of manager.list())if(processAlive(s.workerPid))await manager.close(s.id);process.argv[1]=saved;});
-  assert.ok(tools.has('list_pending_permissions'));
+  assert.ok(tools.has('list_agents'));
   assert.ok(tools.has('respond_to_permission'));
   assert.equal(tools.has('agent-reply'),false);
   const result = await tools.get('spawn_agent').execute('id',{role:'worker',task:'WAIT',cwd},undefined,undefined,ctx);
@@ -29,7 +29,9 @@ test('parent can explicitly review a child request while the human command remai
   await waitUntil('waiting',()=>manager.get(id).phase==='waiting');
   assert.equal(confirmations,0);
   const invoke = async (name, args, context=ctx) => (await tools.get(name).execute('id',args,undefined,undefined,context)).content[0].text;
-  const pending=JSON.parse(await invoke('list_pending_permissions',{}));
+  // The roster is the only listing tool; a `waiting` instance carries its unresolved request.
+  const waiting = async (context=ctx) => JSON.parse(await invoke('list_agents',{},context)).agents.filter(agent=>agent.phase==='waiting');
+  const pending=await waiting();
   assert.equal(pending.length,1); assert.equal(pending[0].id,id);
   assert.equal(pending[0].questions[0].id,'permission-1');
   assert.equal(pending[0].questions[0].message,'Requires a human answer');
@@ -40,7 +42,7 @@ test('parent can explicitly review a child request while the human command remai
   await waitUntil('complete',()=>manager.get(id).phase==='completed'&&!processAlive(manager.get(id).workerPid));
   assert.equal(confirmations,0);
   assert.equal(manager.get(id).text,'ALLOW');
-  assert.deepEqual(JSON.parse(await invoke('list_pending_permissions',{})),[]);
+  assert.deepEqual(await waiting(),[]);
   await assert.rejects(invoke('respond_to_permission',{id,questionId:'permission-1',confirmed:true,reason:'duplicate'}),/ended|exist|exited/);
   const audit=fs.readFileSync(path.join(manager.root,id,'runs',manager.get(id).runId,'permissions.jsonl'),'utf8').trim().split('\n').map(JSON.parse);
   assert.equal(audit.length,1); assert.equal(audit[0].actor,'parent'); assert.equal(audit[0].reason,'Within the parent-assigned task');
@@ -64,20 +66,21 @@ test('permission tools reject foreign parents, missing persistent sessions and i
   let current=parent;
   const context={cwd,isProjectTrusted:()=>false,sessionManager:{getSessionFile:()=>current}};
   const invoke=async(name,args)=>(await tools.get(name).execute('id',args,undefined,undefined,context)).content[0].text;
+  const waiting=async()=>JSON.parse(await invoke('list_agents',{})).agents.filter(agent=>agent.phase==='waiting');
   const spawned=JSON.parse((await invoke('spawn_agent',{role:'worker',task:'WAIT',cwd})).match(/\{.+\}/)[0]);
   await waitUntil('waiting',()=>manager.get(spawned.id).phase==='waiting');
   await assert.rejects(invoke('respond_to_permission',{id:spawned.id,questionId:'permission-1',confirmed:true,value:'mixed',reason:'invalid'}),/exactly|type|response/i);
   await assert.rejects(invoke('respond_to_permission',{id:spawned.id,questionId:'permission-1',confirmed:true,reason:'  '}),/reason/i);
   current=foreign;
-  assert.deepEqual(JSON.parse(await invoke('list_pending_permissions',{})),[]);
+  assert.deepEqual(await waiting(),[]);
   await assert.rejects(invoke('respond_to_permission',{id:spawned.id,questionId:'permission-1',confirmed:true,reason:'foreign'}),/belong|missing/i);
   current=undefined;
-  await assert.rejects(invoke('list_pending_permissions',{}),/persistent parent session/);
+  await assert.rejects(invoke('list_agents',{}),/persistent parent session/);
   current=parent;
   assert.equal(manager.get(spawned.id).phase,'waiting');
   const select=JSON.parse((await invoke('spawn_agent',{role:'worker',task:'WAIT_SELECT',cwd})).match(/\{.+\}/)[0]);
   await waitUntil('select waiting',()=>manager.get(select.id).phase==='waiting');
-  const options=JSON.parse(await invoke('list_pending_permissions',{})).find(entry=>entry.id===select.id).questions[0].options;
+  const options=(await waiting()).find(entry=>entry.id===select.id).questions[0].options;
   assert.deepEqual(options,['Allow once','Deny']);
   await assert.rejects(invoke('respond_to_permission',{id:select.id,questionId:'permission-1',confirmed:true,reason:'wrong method'}),/type/);
   await assert.rejects(invoke('respond_to_permission',{id:select.id,questionId:'permission-1',value:'Allow forever',reason:'not offered'}),/available options/);
