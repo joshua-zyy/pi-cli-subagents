@@ -99,10 +99,15 @@ test('empty widgets do not register; active widgets register once and request re
   assert.match(component.render(100).join('\n'), /worker/); widget.update(); assert.ok(state.ticks >= 1);
   widget.dispose(); assert.equal(active.calls.at(-1).content, undefined);
 });
-test('disposing stops timers and prevents further widget side effects', async () => {
-  const active = host(); const widget = new StatusWidget(active, () => [view()], { intervalMs: 10 });
+test('animation redraws without rereading state and disposal stops all side effects', async t => {
+  let reads = 0;
+  const active = host(); const widget = new StatusWidget(active, () => { reads++; return [view()]; }, { intervalMs: 10 });
+  t.after(() => widget.dispose());
   widget.update(); const { state, tui } = ticker(); active.calls[0].content(tui, theme);
-  await sleep(50); assert.ok(state.ticks >= 2); widget.dispose();
+  await sleep(50); assert.ok(state.ticks >= 2);
+  assert.equal(reads, 1, 'animation must reuse the latest snapshot');
+  widget.update(); assert.equal(reads, 2, 'explicit refresh reads new state');
+  widget.dispose();
   const calls = active.calls.length, ticks = state.ticks;
   await sleep(30); assert.equal(active.calls.length, calls); assert.equal(state.ticks, ticks);
   widget.update(); assert.equal(active.calls.length, calls);

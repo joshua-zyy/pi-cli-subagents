@@ -45,6 +45,7 @@ export interface ConversationViewerOptions {
 /** Border, header, two separators, footer and bottom border. */
 const CHROME_LINES = 6;
 const MAX_TOOL_OUTPUT_LINES = 12;
+const graphemes = new Intl.Segmenter(undefined, { granularity: "grapheme" });
 const clean = (value: string): string => stripTerminalSequences(value).replace(/[\x00-\x08\x0b-\x1f\x7f]/g, "");
 
 /**
@@ -322,18 +323,19 @@ function rank(hint: string): number {
   return 3;
 }
 
-/** Wrap a plain (already sanitized) line to the given visible width. */
+/** Hard-wrap sanitized text without dropping whitespace or splitting graphemes. */
 function wrapPlain(line: string, width: number): string[] {
   const limit = Math.max(1, width);
-  if (!line) return [""];
+  if (visibleWidth(line) <= limit) return [line];
   const out: string[] = [];
-  let rest = line;
-  while (visibleWidth(rest) > limit) {
-    let cut = rest.length;
-    while (cut > 1 && visibleWidth(rest.slice(0, cut)) > limit) cut--;
-    out.push(rest.slice(0, cut));
-    rest = rest.slice(cut);
+  let current = "", columns = 0;
+  for (const { segment } of graphemes.segment(line)) {
+    const size = visibleWidth(segment);
+    if (current && columns + size > limit) {
+      out.push(current); current = ""; columns = 0;
+    }
+    current += segment; columns += size;
   }
-  out.push(rest);
+  out.push(current);
   return out;
 }

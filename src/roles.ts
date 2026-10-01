@@ -37,7 +37,8 @@ export function loadRoles(agentDir: string, cwd: string, projectTrusted: boolean
         if (role[key] !== undefined && (typeof role[key] !== "string" || !(role[key] as string).trim())) throw new Error(`${file}: ${name}.${key} must be a non-empty string`);
       }
       if (role.thinking !== undefined && !levels.has(role.thinking as Thinking)) throw new Error(`${file}: invalid thinking level`);
-      if (role.cli !== undefined && role.cli !== "pi" && role.cli !== "codex") throw new Error(`${file}: ${name}.cli must be pi or codex`);
+      if (role.cli !== undefined && role.cli !== "pi" && role.cli !== "codex" && role.cli !== "claude") throw new Error(`${file}: ${name}.cli must be pi, codex or claude`);
+      if (role.cli === "claude" && (role.provider || role.thinking)) throw new Error(`${file}: ${name} Claude role does not accept Pi provider/thinking fields`);
       if (role.effort !== undefined && !efforts.has(role.effort as Effort)) throw new Error(`${file}: invalid Codex effort`);
       if (role.cli === "codex" && (!role.model || role.provider || role.thinking)) throw new Error(`${file}: ${name} Codex role requires model and does not accept Pi provider/thinking fields`);
       if (role.cli !== "codex" && role.effort !== undefined) throw new Error(`${file}: ${name}.effort requires cli: codex`);

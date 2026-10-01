@@ -3,9 +3,12 @@ import { existsSync, mkdirSync, openSync, closeSync, statSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
+import os from "node:os";
 import { control } from "./control.js";
 import { codexHome, codexLaunch } from "./codex-launch.js";
 import { CodexAdapter } from "./codex-adapter.js";
+import { claudeLaunch } from "./claude-launch.js";
+import { inspectClaudeSession } from "./claude-adapter.js";
 import { nativeSession } from "./cli-adapter.js";
 import { WorkspaceStore, type ResumeOptions } from "./workspace.js";
 import { directories, jsonFiles, processAlive, readJson, shorten, waitUntil, writeJson } from "./storage.js";
@@ -26,7 +29,8 @@ export class AgentManager {
   readonly root: string;
   readonly parentFile: string;
   readonly workspaces: WorkspaceStore;
-  constructor(parentFile: string, private readonly launch: Launch, private readonly codex?: { launch: Launch; home: string }) {
+  private historyCache = new Map<string, { version: string; value: unknown }>();
+  constructor(parentFile: string, private readonly launch: Launch, private readonly codex?: { launch: Launch; home: string }, private readonly claude?: { launch: Launch; home: string }) {
     this.parentFile = path.resolve(parentFile);
     this.root = `${this.parentFile}.subagents`;
     this.workspaces = new WorkspaceStore(this.parentFile);
@@ -38,8 +42,31 @@ export class AgentManager {
   }
   private spec(id: string): AgentSpec {
     const spec = readJson<AgentSpec>(path.join(this.directory(id), "spec.json"));
-    if (!spec || ![1, 2].includes(spec.version) || (spec.version === 2 && (spec.cli !== "codex" || !spec.codexHome)) || spec.parentFile !== this.parentFile || spec.id !== id) throw new Error("This subagent does not belong to the current parent session, or its record is missing");
+    if (!spec || ![1, 2, 3].includes(spec.version) || (spec.version === 1 && spec.cli !== undefined && spec.cli !== "pi") || (spec.version === 2 && (spec.cli !== "codex" || !spec.codexHome)) || (spec.version === 3 && (spec.cli !== "claude" || !spec.claudeHome)) || spec.parentFile !== this.parentFile || spec.id !== id) throw new Error("This subagent does not belong to the current parent session, or its record is missing");
     return spec;
+  }
+  /** Cache only bounded request/report summaries, never live state, ownership or endpoints. */
+  private readHistory<T>(file: string, load: (mtimeMs: number) => T | undefined): T | undefined {
+    try {
+      const stat = statSync(file, { bigint: true });
+      const version = `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeNs}:${stat.ctimeNs}`;
+      const cached = this.historyCache.get(file);
+      if (cached?.version === version) return cached.value as T;
+      const value = load(Number(stat.mtimeNs) / 1e6);
+      if (value === undefined) this.historyCache.delete(file);
+      else this.historyCache.set(file, { version, value });
+      return value;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      this.historyCache.delete(file);
+      return undefined;
+    }
+  }
+  private report(file: string): (Report & { truncated: boolean }) | undefined {
+    return this.readHistory(file, () => {
+      const report = readJson<Report>(file);
+      return report ? { ...report, ...shorten(report.text) } : undefined;
+    });
   }
   get(id: string): AgentView {
     const spec = this.spec(id), dir = this.directory(id);
@@ -48,7 +75,7 @@ export class AgentManager {
     if (["starting", "running", "waiting", "stopping"].includes(state.phase) && !processAlive(state.workerPid)) {
       state = { ...state, phase: "unreachable", error: "The worker exited and task status is uncertain. Do not start duplicate work; inspect the logs and owner.lock." };
     }
-    const report = state.resultFile ? readJson<Report>(state.resultFile) : undefined;
+    const report = state.resultFile ? this.report(state.resultFile) : undefined;
     const current = state.runId, phase = state.phase;
     // A resume writes its run directory before the worker replaces state.json. Report only runs
     // the persisted state has acknowledged, so a queued run is never paired with the previous
@@ -56,7 +83,7 @@ export class AgentManager {
     const all = this.runs(id), acknowledged = all.findIndex((run) => run.runId === current), runs = acknowledged < 0 ? all : all.slice(0, acknowledged + 1);
     const history = runs.slice(-HISTORY_LIMIT).map<TaskRun>((run) => {
       const task = summarize(run.request.message);
-      const outcome = readJson<Report>(path.join(dir, "reports", `${run.runId}-result.json`))?.status;
+      const outcome = this.report(path.join(dir, "reports", `${run.runId}-result.json`))?.status;
       const final = outcome === "completed" || outcome === "failed" || outcome === "stopped" ? outcome : undefined;
       return {
         runId: run.runId, startedAt: run.time, ...(task ? { task } : {}),
@@ -66,7 +93,7 @@ export class AgentManager {
     });
     const latest = history.at(-1);
     return { ...state, cli: spec.cli ?? "pi", role: spec.roleName, cwd: spec.cwd, ...(spec.workspace ? { workspace: spec.workspace, workspaceBaseline: spec.workspaceBaseline } : {}), history, runCount: runs.length,
-      ...(latest?.runId === current && latest.task ? { task: latest.task } : {}), ...(report ? shorten(report.text) : {}) };
+      ...(latest?.runId === current && latest.task ? { task: latest.task } : {}), ...(report ? { text: report.text, truncated: report.truncated } : {}) };
   }
   list(): AgentView[] { return directories(this.root).filter((id) => idPattern.test(id)).map((id) => this.get(id)); }
 
@@ -78,10 +105,12 @@ export class AgentManager {
       if (!idPattern.test(runId)) continue;
       const folder = path.join(root, runId), file = path.join(folder, "request.json");
       // A run directory exists before its request file is durable; skip it rather than failing a poll.
-      const request = readJson<StartRequest>(file);
+      const request = this.readHistory(file, (mtimeMs) => {
+        const saved = readJson<StartRequest>(file);
+        return saved ? { runId: saved.runId, message: summarize(saved.message) ?? "", createdAt: saved.createdAt ?? mtimeMs } : undefined;
+      });
       if (!request || request.runId !== runId) continue;
-      try { runs.push({ runId, folder, request, time: request.createdAt ?? statSync(file).mtimeMs }); }
-      catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+      runs.push({ runId, folder, request, time: request.createdAt });
     }
     return runs.sort((a, b) => a.time - b.time || a.runId.localeCompare(b.runId));
   }
@@ -94,17 +123,21 @@ export class AgentManager {
 
   async spawn(roleName: string, role: Role, cwd: string, message: string, workspace?: string): Promise<AgentView> {
     if (!message.trim()) throw new Error("Task must not be empty");
+    if (role.cli !== undefined && !["pi", "codex", "claude"].includes(role.cli)) throw new Error("Unsupported CLI");
+    if (role.cli === "claude" && (role.provider || role.thinking)) throw new Error("Claude does not accept Pi provider/thinking fields");
     if (role.cli === "codex" && (!role.model || role.provider || role.thinking)) throw new Error("Codex requires an explicit model without Pi provider/thinking fields");
     if (role.cli !== "codex" && role.effort) throw new Error("Codex effort requires cli: codex");
     const id = randomUUID(), dir = this.directory(id);
     const start = async (directory: string, baseline?: AgentSpec["workspaceBaseline"], notice?: string): Promise<AgentView> => {
       directory = path.resolve(directory);
       if (!statSync(directory).isDirectory()) throw new Error("cwd must be an existing directory");
-      mkdirSync(dir, { recursive: true, mode: 0o700 });
-      const selected = role.cli === "codex" ? this.codex ?? { launch: codexLaunch(), home: codexHome() } : undefined;
-      const spec: AgentSpec = { version: selected ? 2 : 1, ...(selected ? { cli: "codex", codexHome: path.resolve(selected.home) } : {}),
+      const selected = role.cli === "codex" ? this.codex ?? { launch: codexLaunch(), home: codexHome() } :
+        role.cli === "claude" ? this.claude ?? { launch: claudeLaunch(), home: process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), ".claude") } : undefined;
+      const spec: AgentSpec = { version: role.cli === "claude" ? 3 : selected ? 2 : 1,
+        ...(selected ? role.cli === "claude" ? { cli: "claude", claudeHome: path.resolve(selected.home) } : { cli: "codex", codexHome: path.resolve(selected.home) } : {}),
         id, parentFile: this.parentFile, cwd: directory, roleName, role,
         launch: selected?.launch ?? this.launch, createdAt: Date.now(), ...(workspace ? { workspace, workspaceBaseline: baseline } : {}) };
+      mkdirSync(dir, { recursive: true, mode: 0o700 });
       writeJson(path.join(dir, "spec.json"), spec);
       return this.start(id, notice ? `${message}\n\n[Workspace baseline]\n${notice}` : message);
     };
@@ -163,6 +196,9 @@ export class AgentManager {
       if (!session || session.cli !== (spec.cli ?? "pi")) throw new Error("No resumable original session; cannot sync for continuation");
       if (session.cli === "pi") {
         if (!existsSync(session.sessionFile)) throw new Error(`Original session file is missing: ${session.sessionFile}; no synchronization was performed`);
+      } else if (session.cli === "claude") {
+        try { inspectClaudeSession(spec, session); }
+        catch (error) { throw new Error(`Claude original-session preflight failed; no synchronization was performed. ${(error as Error).message}`); }
       } else {
         const logFile = path.join(this.directory(id), `preflight-${randomUUID()}.jsonl`);
         try {
@@ -186,6 +222,7 @@ export class AgentManager {
       const session = nativeSession(state.session ?? (state.sessionFile && state.sessionId ? { sessionFile: state.sessionFile, sessionId: state.sessionId } : undefined));
       if (!session || session.cli !== (spec.cli ?? "pi")) throw new Error("No resumable original session; will not silently create a new session");
       if (session.cli === "codex" && session.codexHome !== spec.codexHome) throw new Error("Codex native home changed; refusing to resume a different session store");
+      if (session.cli === "claude") inspectClaudeSession(spec, session);
       return this.start(id, prompt, session);
     };
     if (!spec.workspace) return send();
@@ -213,15 +250,15 @@ export class AgentManager {
     return this.get(id);
   }
 
-  reports(now = Date.now()): Report[] {
+  reports(now = Date.now(), states: readonly AgentView[] = this.list()): Report[] {
     const reports: Report[] = [];
-    for (const state of this.list()) {
+    for (const state of states) {
       const folder = path.join(this.directory(state.id), "reports");
       for (const file of jsonFiles(folder)) {
-        const report = readJson<Report>(path.join(folder, file))!;
+        const report = this.report(path.join(folder, file))!;
         if (report.parentFile !== this.parentFile) continue;
         if (report.status === "waiting" && !state.questions.some((q) => q.id === report.questionId)) continue;
-        reports.push({ ...report, text: shorten(report.text).text });
+        reports.push({ ...report });
       }
       if (state.phase === "unreachable") reports.push({
         notificationId: `${state.runId}-unreachable`, agentId: state.id, runId: state.runId, parentFile: this.parentFile,

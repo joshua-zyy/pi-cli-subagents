@@ -186,7 +186,7 @@ export class CodexAdapter implements CliAdapter {
     const file = record.method === "item/fileChange/requestApproval";
     const p = record.params;
     const item = object(p) ? this.approvalItems.get(p.itemId) : undefined;
-    const scope = this.thread && object(p) && p.threadId === this.thread.threadId && p.turnId === this.activeTurn && typeof p.itemId === "string";
+    const scope = this.activeTurn?.trim() && this.thread && object(p) && p.threadId === this.thread.threadId && p.turnId === this.activeTurn && typeof p.itemId === "string";
     const decisions = object(p) && Array.isArray(p.availableDecisions) ? p.availableDecisions : undefined;
     const unsupportedDecisions = object(p) && p.availableDecisions != null &&
       (!decisions || !decisions.includes("accept") || !(decisions.includes("decline") || decisions.includes("cancel")));
@@ -276,7 +276,7 @@ export class CodexAdapter implements CliAdapter {
   }
   async reply(answer: InteractionReply): Promise<void> {
     const approval = this.approvals.get(answer.id);
-    if (!approval || approval.attempted || approval.threadId !== this.thread?.threadId || approval.turnId !== this.activeTurn)
+    if (!this.activeTurn?.trim() || !approval || approval.attempted || approval.threadId !== this.thread?.threadId || approval.turnId !== this.activeTurn)
       throw new Error("Codex approval is no longer pending or was already answered; inspect before retrying");
     if (Number(answer.cancelled === true) + Number(typeof answer.confirmed === "boolean") + Number(typeof answer.value === "string") !== 1)
       throw new Error("Codex approvals require one explicit decision");

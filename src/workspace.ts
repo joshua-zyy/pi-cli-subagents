@@ -11,6 +11,8 @@ export interface Integration {
   tree: string;
   time: number;
   patchFile: string;
+  /** Binary patch from the workspace baseline; absent on legacy records. */
+  checkpointFile?: string;
   backupFile: string;
   changedFiles: string[];
 }
@@ -401,19 +403,32 @@ export class WorkspaceStore {
     if (ws.integration?.tree === tree) return { workspace: id, status: "already_integrated", patchFile: ws.integration.patchFile, changedFiles: ws.integration.changedFiles };
     if (ws.integration && !ws.continuation) throw new Error("An already integrated workspace has changed without explicit continuation; inspect before integrating.");
     const from = ws.integration?.tree ?? ws.baseCommit;
+    if (ws.integration?.checkpointFile) {
+      // JSON tree IDs do not keep Git objects alive. Rebuild from the protected baseline
+      // in a private index, then verify identity before computing the next increment.
+      const env = { GIT_INDEX_FILE: path.join(folder, "checkpoint.index") };
+      try {
+        const checkpoint = readFileSync(ws.integration.checkpointFile);
+        await git(ws.path, ["read-tree", ws.baseCommit], undefined, env);
+        if (checkpoint.length) await git(ws.path, ["apply", "--cached", "--whitespace=nowarn", "-"], checkpoint, env);
+        const restored = (await git(ws.path, ["write-tree"], undefined, env)).toString().trim();
+        if (restored !== from) throw new Error(`Restored tree ${restored} differs from ${from}`);
+      } catch (error) { throw new Error(`Cannot restore integration checkpoint; parent files were not changed. Inspect ${ws.integration.checkpointFile}. ${(error as Error).message}`); }
+    }
     const patch = await this.patch(ws.path, from, tree);
     if (!patch.length) return { workspace: id, status: "no_changes", changedFiles: [] };
     const changedFiles = split(await git(ws.path, ["diff", "--no-renames", "--name-only", "-z", from, tree, "--"]));
     await this.noFilters(ws.repo, changedFiles);
-    const patchFile = path.join(folder, "changes.patch"), backupFile = path.join(folder, "before.json");
+    const patchFile = path.join(folder, "changes.patch"), backupFile = path.join(folder, "before.json"), checkpointFile = path.join(folder, "checkpoint.patch");
     writeFileSync(patchFile, patch, { mode: 0o600 });
+    writeFileSync(checkpointFile, ws.integration ? await this.patch(ws.path, ws.baseCommit, tree) : patch, { mode: 0o600 });
     const before = this.backup(ws.repo, changedFiles);
     writeJson(backupFile, before);
     try { await git(ws.repo, ["apply", "--check", "--whitespace=nowarn", "-"], patch); }
     catch (error) { throw new Error(`Integration conflict; parent files were not changed. ${(error as Error).message}. Patch retained at ${patchFile}`); }
     if (JSON.stringify(this.backup(ws.repo, changedFiles)) !== JSON.stringify(before)) throw new Error("Parent files changed during preflight; nothing was applied. Coordinate external writers before retrying.");
     if (ws.integration) writeJson(path.join(path.dirname(ws.integration.patchFile), "integration.json"), ws.integration);
-    ws.integration = { status: "applying", revision: ws.revision + 1, tree, time: Date.now(), patchFile, backupFile, changedFiles };
+    ws.integration = { status: "applying", revision: ws.revision + 1, tree, time: Date.now(), patchFile, checkpointFile, backupFile, changedFiles };
     this.save(ws);
     try {
       await git(ws.repo, ["apply", "--whitespace=nowarn", "-"], patch);

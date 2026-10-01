@@ -1,5 +1,6 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { AgentManager } from "./manager.js";
+import type { AgentView } from "./types.js";
 
 export const customType = "cli-subagents-report";
 
@@ -20,10 +21,11 @@ export function deliverReports(
   ctx: Pick<ExtensionContext, "sessionManager">,
   pending: Set<string>,
   now = Date.now(),
+  states?: readonly AgentView[],
 ): void {
   const delivered = deliveredIds(ctx);
   for (const id of pending) if (delivered.has(id)) pending.delete(id);
-  const reports = manager.reports().filter((report) => !delivered.has(report.notificationId) && !pending.has(report.notificationId));
+  const reports = manager.reports(now, states).filter((report) => !delivered.has(report.notificationId) && !pending.has(report.notificationId));
   if (!reports.length) return;
   // Old reports (including those found on reconnect) are ready immediately. New
   // successful runs share a short window; attention events flush the window.

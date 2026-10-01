@@ -99,6 +99,31 @@ function harness(t) {
   };
 }
 
+test('one monitor tick shares one live snapshot across reports, status and fleet', t => {
+  const h = harness(t), original = AgentManager.prototype.list;
+  let calls = 0, phase = 'running';
+  AgentManager.prototype.list = function () {
+    calls++;
+    return [{ id: '00000000-0000-4000-8000-000000000001', runId: 'run', role: 'worker', phase,
+      workerPid: process.pid, updatedAt: Date.now(), startedAt: Date.now(), questions: [], history: [], runCount: 1 }];
+  };
+  t.mock.timers.enable({ apis: ['setTimeout', 'setInterval'] });
+  try {
+    h.start(); t.mock.timers.tick(100);
+    assert.equal(calls, 1, 'report delivery and both widgets must share one manager list');
+    const components = h.widgetCalls.filter(call => typeof call.content === 'function')
+      .map(call => call.content({ terminal: { columns: 120 }, requestRender() {} }, theme));
+    assert.equal(components.length, 2);
+    t.mock.timers.tick(500);
+    assert.equal(calls, 1, 'animation between monitor ticks must not read another snapshot');
+    phase = 'completed'; t.mock.timers.tick(200);
+    assert.equal(calls, 2);
+    assert.ok(components.every(component => /completed/i.test(component.render(120).join('\n'))));
+  } finally {
+    h.handlers.session_shutdown?.(); t.mock.timers.reset(); AgentManager.prototype.list = original;
+  }
+});
+
 test('status widget registers only in TUI, shows agents and unregisters at shutdown', { timeout: 20_000 }, async (t) => {
   const h = harness(t);
   h.start();

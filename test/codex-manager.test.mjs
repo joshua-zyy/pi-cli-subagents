@@ -152,6 +152,26 @@ test('Codex rejects invalid workspace and missing model before creating instance
   assert.deepEqual(manager.list(), []);
 });
 
+test('Codex CLI resolution failure leaves existing instances and reports usable', { skip: process.platform !== 'win32', timeout: 20_000 }, async t => {
+  const { cwd, parent, manager, launch, done } = setup(t);
+  const started = await manager.spawn('worker', { description: 'Pi fixture', instructions: 'test' }, cwd, 'REMEMBER retained');
+  const original = await done(started.id);
+  const before = fs.readdirSync(manager.root).sort();
+  const unresolved = new AgentManager(parent, launch);
+  const previousPath = process.env.PATH;
+  try {
+    process.env.PATH = path.join(cwd, 'no-cli');
+    await assert.rejects(unresolved.spawn('codex-worker', role, cwd, 'MUST NOT START'), /Codex CLI is not installed/);
+  } finally {
+    if (previousPath === undefined) delete process.env.PATH;
+    else process.env.PATH = previousPath;
+  }
+  assert.deepEqual(fs.readdirSync(manager.root).sort(), before, 'failed launch resolution must not register an incomplete instance');
+  assert.deepEqual(unresolved.list().map(state => state.id), [original.id]);
+  assert.equal(unresolved.get(original.id).sessionId, original.sessionId);
+  assert.equal(unresolved.reports().find(report => report.agentId === original.id)?.status, 'completed');
+});
+
 test('resume refuses a lost native Codex thread and does not create a replacement', { timeout: 20_000 }, async t => {
   const { cwd, manager, done, home } = setup(t);
   const started = await manager.spawn('codex-worker', role, cwd, 'REMEMBER alpha');

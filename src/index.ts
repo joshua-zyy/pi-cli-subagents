@@ -51,11 +51,14 @@ export default function extension(pi: ExtensionAPI): void {
     catch (error) { ctx.ui.notify(`The parent agent was not told about this action: ${(error as Error).message}`, "warning"); }
   }
 
-  let active: { file: string; ctx: ExtensionContext; manager: AgentManager; pending: Set<string>; timer: NodeJS.Timeout; widget?: StatusWidget; fleet?: FleetView } | undefined;
+  let active: { file: string; ctx: ExtensionContext; manager: AgentManager; pending: Set<string>; timer: NodeJS.Timeout; agents: AgentView[]; widget?: StatusWidget; fleet?: FleetView } | undefined;
 
   function pump(): void {
     if (!active || active.ctx.sessionManager.getSessionFile() !== active.file) return;
-    try { deliverReports(active.manager, pi, active.ctx, active.pending); }
+    try {
+      active.agents = active.manager.list();
+      deliverReports(active.manager, pi, active.ctx, active.pending, Date.now(), active.agents);
+    }
     catch (error) { console.error("[pi-cli-subagents] Report delivery failed; retrying:", error); }
     try { active.widget?.update(); active.fleet?.update(); }
     catch (error) { console.error("[pi-cli-subagents] Status refresh failed; retrying:", error); }
@@ -74,13 +77,15 @@ export default function extension(pi: ExtensionAPI): void {
     const pending = new Set<string>();
     const timer = setInterval(pump, 800);
     timer.unref();
-    // The widget needs terminal components and requestRender; RPC clients cannot render it.
-    const widget = ctx.mode === "tui" ? new StatusWidget(ctx.ui, () => manager.list()) : undefined;
-    let fleet: FleetView | undefined;
-    if (ctx.mode === "tui") fleet = new FleetView(ctx.ui, () => manager.list(), (id) => {
-      void openAgents(ctx, id).finally(() => fleet?.viewerClosed());
-    });
-    active = { file, ctx, manager, pending, timer, ...(widget ? { widget } : {}), ...(fleet ? { fleet } : {}) };
+    const monitor: NonNullable<typeof active> = { file, ctx, manager, pending, timer, agents: [] };
+    // Both widgets render the monitor's snapshot; actions still re-read live state.
+    if (ctx.mode === "tui") {
+      monitor.widget = new StatusWidget(ctx.ui, () => monitor.agents);
+      monitor.fleet = new FleetView(ctx.ui, () => monitor.agents, (id) => {
+        void openAgents(ctx, id).finally(() => monitor.fleet?.viewerClosed());
+      });
+    }
+    active = monitor;
     setTimeout(pump, 100).unref();
   });
   pi.on("session_shutdown", () => stopMonitor());
@@ -105,7 +110,7 @@ export default function extension(pi: ExtensionAPI): void {
   });
   pi.registerTool({
     name: "spawn_agent", label: "Spawn CLI subagent",
-    description: "Start an independent, reusable Pi or Codex CLI subagent asynchronously. Returns an ID; keep working while completion reports arrive automatically. Roles: explore/worker/reviewer or custom roles. Reuse an existing instance with send_input when the new work depends on what it already did.",
+    description: "Start an independent, reusable Pi, Codex or Claude Code CLI subagent asynchronously. Returns an ID; keep working while completion reports arrive automatically. Roles: explore/worker/reviewer or custom roles. Reuse an existing instance with send_input when the new work depends on what it already did.",
     parameters: Type.Object({
       role: Type.String({ description: "Role name; use list_agents to discover available roles" }),
       task: Type.String({ description: "Concrete goal, authorized files and verification criteria; do not widen CLI permissions" }),
@@ -118,12 +123,12 @@ export default function extension(pi: ExtensionAPI): void {
       if (!role) throw new Error(`Unknown role: ${args.role}; available: ${Object.keys(roles).join(", ")}`);
       if (args.workspace !== undefined && args.cwd !== undefined) throw new Error("Pass workspace or cwd, not both");
       const state = await parentManager(ctx, launch).spawn(args.role, role, args.cwd ?? ctx.cwd, args.task, args.workspace);
-      return content(`${state.cli === "codex" ? "Codex" : "Pi"} subagent dispatched: ${view(state)}\nThe parent may continue working. Completion and waiting reports return to this parent session.`);
+      return content(`${state.cli === "codex" ? "Codex" : state.cli === "claude" ? "Claude Code" : "Pi"} subagent dispatched: ${view(state)}\nThe parent may continue working. Completion and waiting reports return to this parent session.`);
     },
   });
   pi.registerTool({
     name: "send_input", label: "Message CLI subagent",
-    description: "Send instructions to a running child (steer after its current tool; Pi-only followUp after the current run), or resume a completed child in its original session. Codex running followUp is not supported. Never silently creates a replacement session. Managed workspaces reject messages while another instance occupies them. After integration or another instance's sync, explicitly choose keep (current workspace unchanged) or sync (update to parent state only if no unintegrated/staged work). Sync never runs while the instance is active.",
+    description: "Send instructions to a running child (steer after its current tool; Pi-only followUp after the current run), or resume a completed child in its original session. Codex running followUp and Claude running steer/followUp are not supported; wait for completion before continuing Claude. Never silently creates a replacement session. Managed workspaces reject messages while another instance occupies them. After integration or another instance's sync, explicitly choose keep (current workspace unchanged) or sync (update to parent state only if no unintegrated/staged work). Sync never runs while the instance is active.",
     parameters: Type.Object({
       id: Type.String({ description: "Subagent instance ID" }),
       message: Type.String({ description: "Instructions or a new task for the same child" }),
@@ -169,7 +174,7 @@ export default function extension(pi: ExtensionAPI): void {
   });
   pi.registerTool({
     name: "respond_to_permission", label: "Answer child interaction",
-    description: "Answer one current request from a child owned by this parent. Compare the requested operation with the user's task authorization; approve only within scope, otherwise deny/cancel or ask the user. This does not change global permissions or disable safety extensions. Every decision is recorded locally.",
+    description: "Answer one current request from a child owned by this parent. Compare the requested operation with the user's task authorization; approve only within scope, otherwise deny/cancel or ask the user. A humanOnly request cannot be approved by this tool: ask the human UI, or deny/cancel. This does not change global permissions or disable safety extensions. Every decision is recorded locally.",
     parameters: Type.Object({
       id: Type.String({ description: "Subagent instance ID returned by list_pending_permissions" }),
       questionId: Type.String({ description: "Exact current interaction ID" }),
@@ -278,7 +283,7 @@ export default function extension(pi: ExtensionAPI): void {
             if (action.kind === "view") {
               const id = action.id;
               const selected = manager.get(id);
-              const reader = new TranscriptReader(selected.cli ?? "pi", selected.session?.cli === "codex" ? selected.session.threadId : undefined);
+              const reader = new TranscriptReader(selected.cli ?? "pi", selected.session?.cli === "codex" ? selected.session.threadId : selected.session?.cli === "claude" ? selected.session.sessionId : undefined);
               let viewer: ConversationViewer | undefined;
               try {
                 action = await ctx.ui.custom<PanelAction | undefined>((tui, theme, keybindings, done) => {

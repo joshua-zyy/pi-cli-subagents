@@ -184,7 +184,6 @@ export class StatusWidget {
       if (this.disposed) return;
       try {
         this.frame = (this.frame + 1) % SPINNER.length;
-        this.refresh();
         if (!this.hasActive()) { this.stopTick(); if (!this.hasContent(Date.now())) { this.unregister(); return; } }
         this.tui?.requestRender();
       } catch (error) { console.error("[pi-cli-subagents] Status refresh failed:", error); }

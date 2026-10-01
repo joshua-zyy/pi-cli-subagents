@@ -148,6 +148,13 @@ function handle(cmd) {
     }
     return reply();
   }
+  if (cmd.method === 'fixture/approvalScope') {
+    if ('activeTurnId' in cmd.params) notify('turn/started', { threadId: thread.id, turn: { id: cmd.params.activeTurnId } });
+    emit({ id: 17, method: 'item/commandExecution/requestApproval', params: {
+      threadId: thread.id, turnId: cmd.params.turnId, itemId: 'cmd', command: 'fixture-only', cwd: process.cwd(),
+    } });
+    return;
+  }
   if (cmd.method === 'turn/start') {
     if (cmd.params.threadId !== thread.id) return error(cmd, 'Wrong thread');
     const message = cmd.params.input[0].text;

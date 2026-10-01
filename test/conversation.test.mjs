@@ -44,6 +44,57 @@ test('viewer renders tool inputs, multiline output, errors and resize without te
   }
 });
 
+test('long tool output wraps without repeatedly copying large prefixes', async t => {
+  const text = 'BEGIN' + 'x'.repeat(8000) + 'END';
+  const h = harness(async () => ({ agent: state, entries: [entry(1, { kind: 'tool', title: 'bash', text, status: 'done' })], loading: false }));
+  t.after(() => h.viewer.dispose());
+  await new Promise(setImmediate);
+  // Count substring work during this synchronous render, not load-dependent wall time.
+  const original = String.prototype.slice;
+  let copied = 0, rendered;
+  try {
+    String.prototype.slice = function (...args) {
+      const result = original.apply(this, args); copied += result.length; return result;
+    };
+    rendered = h.viewer.render(100);
+  } finally { String.prototype.slice = original; }
+  assert.ok(copied < text.length * 128, `Rendered ${text.length} characters with ${copied} characters of substring work`);
+  assert.match(rendered.join('\n'), /END/);
+  h.viewer.handleInput('\u001b[H');
+  assert.match(h.viewer.render(100).join('\n'), /BEGIN/, 'fast wrapping must not discard earlier output');
+});
+
+test('hard-wrapped tool output preserves whitespace and whole graphemes at narrow widths', async () => {
+  const segmenter = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
+  for (const text of ['   alpha  beta    gamma   ', '\t  indented\tvalue \tend   ', 'x👨‍👩‍👧‍👦e\u0301🇨🇳中z', '  first\n\nlast  ']) {
+    const expected = text.replace(/\n/g, '');
+    const boundaries = new Set([0]);
+    for (const { index, segment } of segmenter.segment(expected)) boundaries.add(index + segment.length);
+    for (const columns of [8, 9, 12, 20, 80]) {
+      const wrapped = [];
+      const capture = { ...theme, fg: (color, value) => { if (color === 'toolOutput') wrapped.push(value); return value; } };
+      const tui = { terminal: { rows: 40, columns }, requestRender() {} };
+      const viewer = new ConversationViewer(tui, capture, () => {}, async () => ({ agent: state,
+        entries: [entry(1, { kind: 'tool', title: 'bash', text, status: 'done' })], loading: false }));
+      try {
+        await new Promise(setImmediate);
+        const rendered = viewer.render(columns);
+        assert.equal(wrapped.join(''), expected, `whitespace/content at width ${columns}`);
+        if (text.includes('\n\n')) assert.ok(wrapped.includes(''), 'explicit empty lines are retained');
+        let offset = 0;
+        for (const line of wrapped) {
+          offset += line.length;
+          assert.ok(boundaries.has(offset), `split grapheme at offset ${offset}, width ${columns}`);
+          if (visibleWidth(line) > Math.max(1, columns - 8)) {
+            assert.equal([...segmenter.segment(line)].length, 1, 'an oversized grapheme stays whole on its own line');
+          }
+        }
+        assert.ok(rendered.every(line => visibleWidth(line) <= columns));
+      } finally { viewer.dispose(); }
+    }
+  }
+});
+
 test('viewer errors stay visible and an in-flight read cannot redraw after disposal', async () => {
   const h = harness(async () => { throw Error('log unavailable'); });
   await wait(20); assert.match(h.text(), /log unavailable/); h.viewer.dispose();

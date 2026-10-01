@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { WorkspaceStore } from '../dist/workspace.js';
 
 const output = path.resolve('.test-output');
@@ -163,6 +164,81 @@ test('two isolated changes integrate without touching staged or unrelated user c
   assert.equal(listed.length, 2);
   assert.ok(listed.every(ws => ws.integration?.status === 'applied'));
   assert.ok(listed.find(ws => ws.id === a.id).changedFiles.includes('new 雪.txt'));
+});
+
+test('retained integration checkpoints survive Git pruning across reopened keep continuations', async () => {
+  const { repo, parent, store } = setup();
+  put(repo, '.gitattributes', '*.txt text eol=crlf\n'); git(repo, 'add', '.'); git(repo, 'commit', '-qm', 'line endings');
+  put(repo, 'inherited.txt', 'authorized dirty baseline\r\n');
+  const controls = controlState(repo);
+  const ws = await store.create(repo, { includeUncommitted: { reason: 'Authorized fixture baseline.' } });
+  assert.notEqual(ws.baseCommit, controls.head.trim()); assert.deepEqual(controlState(repo), controls);
+  const workerIndex = git(ws.path, 'rev-parse', '--path-format=absolute', '--git-path', 'index').trim();
+  const originalIndex = fs.readFileSync(workerIndex);
+  put(repo, 'user-only.txt', 'staged user content\r\n'); git(repo, 'add', 'user-only.txt');
+  const before = controlState(repo);
+  put(ws.path, 'src/b.txt', 'first\r\n'); put(ws.path, '雪.bin', Buffer.from([0, 255, 1]));
+  fs.unlinkSync(path.join(ws.path, 'src/a.txt'));
+  await store.integrate(ws.id);
+  for (const n of [2, 3]) {
+    const previousTree = store.get(ws.id).integration.tree;
+    await new WorkspaceStore(parent).runAgent(ws.id, randomUUID(), async () => {
+      put(ws.path, 'src/b.txt', `increment ${n}\r\n`); put(ws.path, '雪.bin', Buffer.from([0, 255, n]));
+    }, { baseline: 'keep' });
+    // Never prune the plugin/user repository: this is setup()'s disposable Git repository.
+    git(repo, '-c', 'core.hooksPath=', '-c', 'core.fsmonitor=false', 'prune', '--expire', 'now');
+    assert.throws(() => git(repo, 'cat-file', '-e', previousTree), /Command failed/, 'the old tree really was collected');
+    const result = await new WorkspaceStore(parent).integrate(ws.id);
+    assert.deepEqual(result.changedFiles.sort(), ['src/b.txt', '雪.bin'].sort(), 'only the next increment is applied');
+    assert.equal(fs.readFileSync(path.join(repo, 'src/b.txt'), 'utf8'), `increment ${n}\r\n`);
+    assert.deepEqual(fs.readFileSync(path.join(repo, '雪.bin')), Buffer.from([0, 255, n]));
+    assert.equal(fs.existsSync(path.join(repo, 'src/a.txt')), false);
+    assert.deepEqual(controlState(repo), before);
+    assert.deepEqual(fs.readFileSync(workerIndex), originalIndex);
+    assert.equal(git(ws.path, 'rev-parse', 'HEAD').trim(), ws.baseCommit);
+  }
+  assert.equal((await store.integrate(ws.id)).status, 'already_integrated');
+});
+
+test('missing, malformed or mismatched retained checkpoints fail before parent writes', async () => {
+  for (const damage of ['missing', 'malformed', 'mismatched']) {
+    const { repo, store } = setup(); const ws = await store.create(repo);
+    put(ws.path, 'src/b.txt', 'first\n'); await store.integrate(ws.id);
+    const integration = store.get(ws.id).integration;
+    assert.ok(integration.checkpointFile, 'new integrations must retain a recoverable checkpoint');
+    if (damage === 'missing') fs.unlinkSync(integration.checkpointFile);
+    else fs.writeFileSync(integration.checkpointFile, damage === 'malformed' ? 'not a Git patch\n' : '');
+    await store.runAgent(ws.id, randomUUID(), async () => put(ws.path, 'src/b.txt', 'second\n'), { baseline: 'keep' });
+    const workerIndex = git(ws.path, 'rev-parse', '--path-format=absolute', '--git-path', 'index').trim();
+    const originalIndex = fs.readFileSync(workerIndex);
+    const before = { files: files(repo), git: controlState(repo), workerFiles: files(ws.path) };
+    await assert.rejects(store.integrate(ws.id), /checkpoint/i, damage);
+    assert.deepEqual({ files: files(repo), git: controlState(repo), workerFiles: files(ws.path) }, before);
+    assert.deepEqual(fs.readFileSync(workerIndex), originalIndex);
+    assert.equal(git(ws.path, 'rev-parse', 'HEAD').trim(), ws.baseCommit);
+    assert.deepEqual(store.get(ws.id).integration, integration);
+    assert.equal(fs.readFileSync(path.join(ws.path, 'src/b.txt'), 'utf8'), 'second\n');
+  }
+});
+
+test('legacy integration records remain usable and gain a checkpoint on the next integration', async () => {
+  const { repo, parent, store } = setup(); const ws = await store.create(repo);
+  put(ws.path, 'src/b.txt', 'first\n'); await store.integrate(ws.id);
+  const record = path.join(`${parent}.subagents`, 'workspaces', ws.id, 'workspace.json');
+  const legacy = JSON.parse(fs.readFileSync(record));
+  if (legacy.integration.checkpointFile) fs.unlinkSync(legacy.integration.checkpointFile);
+  delete legacy.integration.checkpointFile; fs.writeFileSync(record, JSON.stringify(legacy));
+  const reopened = new WorkspaceStore(parent);
+  await reopened.runAgent(ws.id, randomUUID(), async () => {
+    // Returning to the baseline creates an intentionally empty checkpoint patch.
+    put(ws.path, 'src/b.txt', 'original B\n');
+  }, { baseline: 'keep' });
+  await reopened.integrate(ws.id);
+  const checkpoint = reopened.get(ws.id).integration.checkpointFile;
+  assert.ok(checkpoint); assert.equal(fs.readFileSync(checkpoint).length, 0);
+  await reopened.runAgent(ws.id, randomUUID(), async () => put(ws.path, 'src/b.txt', 'third\n'), { baseline: 'keep' });
+  await reopened.integrate(ws.id);
+  assert.equal(fs.readFileSync(path.join(repo, 'src/b.txt'), 'utf8'), 'third\n');
 });
 
 test('overlapping changes reject the entire patch, including otherwise clean new files', async () => {

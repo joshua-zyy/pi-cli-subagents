@@ -4,6 +4,7 @@ import { randomBytes, randomUUID } from "node:crypto";
 import path from "node:path";
 import { PiAdapter } from "./pi-adapter.js";
 import { CodexAdapter } from "./codex-adapter.js";
+import { ClaudeAdapter } from "./claude-adapter.js";
 import { nativeSession, type CliAdapter, type AdapterEvent } from "./cli-adapter.js";
 import { readJson, writeJson } from "./storage.js";
 import type { AgentSpec, AgentState, Control, Question, Report, StartRequest } from "./types.js";
@@ -12,7 +13,7 @@ async function run(dir: string, runId: string): Promise<void> {
   const runDir = path.join(dir, "runs", runId);
   const spec = readJson<AgentSpec>(path.join(dir, "spec.json"))!;
   const start = readJson<StartRequest>(path.join(runDir, "request.json"))!;
-  if (!spec || (spec.version !== 1 && spec.version !== 2) || (spec.version === 2 && (spec.cli !== "codex" || !spec.codexHome)) || start?.runId !== runId) throw new Error("Invalid startup record");
+  if (!spec || ![1, 2, 3].includes(spec.version) || (spec.version === 1 && spec.cli !== undefined && spec.cli !== "pi") || (spec.version === 2 && (spec.cli !== "codex" || !spec.codexHome)) || (spec.version === 3 && (spec.cli !== "claude" || !spec.claudeHome)) || start?.runId !== runId) throw new Error("Invalid startup record");
   const lockFile = path.join(dir, "owner.lock");
   const lock = openSync(lockFile, "wx", 0o600);
   writeFileSync(lock, JSON.stringify({ pid: process.pid, runId }));
@@ -117,6 +118,7 @@ async function run(dir: string, runId: string): Promise<void> {
       }
       if (input.actor === "parent" && (typeof input.reason !== "string" || !input.reason.trim())) throw new Error("A parent decision requires a reason");
       if (input.actor !== undefined && input.actor !== "parent" && input.actor !== "human") throw new Error("Unknown decision actor");
+      if (q.humanOnly && input.value === "Approve once" && input.actor !== "human") throw new Error("This request requires human approval");
       // Record intent before sending: a failed log write must not silently approve an action.
       appendFileSync(path.join(runDir, "permissions.jsonl"), `${JSON.stringify({ time: Date.now(), runId, questionId: q.id,
         actor: input.actor ?? "human", decision: input.cancelled ? "cancelled" : q.method === "confirm" ? input.confirmed ? "approved" : "denied" : "answered",
@@ -156,6 +158,7 @@ async function run(dir: string, runId: string): Promise<void> {
     const session = nativeSession(start.session);
     rpc = (spec.cli ?? "pi") === "codex"
       ? new CodexAdapter({ spec, session, logFile: state.logFile, onEvent: event })
+      : spec.cli === "claude" ? new ClaudeAdapter({ spec, session, logFile: state.logFile, onEvent: event })
       : new PiAdapter({ spec, session, logFile: state.logFile, onEvent: event });
     state.cliPid = rpc.pid; save();
     rpc.closed.then((exit) => {

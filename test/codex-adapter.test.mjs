@@ -233,6 +233,38 @@ test('Codex auto-resolved approval cannot be answered, unsupported or broad appr
   assert.ok(!requests().some(r => r.result?.decision === 'accept'));
 });
 
+test('Codex rejects approvals without a valid active turn even when both IDs match', async t => {
+  const { client, requests } = setup(t);
+  for (const params of [{}, { activeTurnId: '', turnId: '' }, { activeTurnId: ' ', turnId: ' ' },
+    { activeTurnId: 'valid-turn' }, { activeTurnId: 'valid-turn', turnId: '' }, { activeTurnId: 'valid-turn', turnId: 'foreign' }]) {
+    const { c, events } = client(); await c.ready();
+    c.child.stdin.write(JSON.stringify({ method: 'fixture/approvalScope', params }) + '\n');
+    const event = await waitUntil('approval rejected or exposed', () => events.find(e => e.type === 'settled' || e.type === 'question'));
+    assert.equal(event.type, 'settled', JSON.stringify(params));
+    assert.equal(event.status, 'failed');
+    assert.equal(events.some(e => e.type === 'question'), false);
+    await c.end();
+  }
+  assert.ok(requests().filter(r => r.id === 17 && !r.method).every(r => r.error), 'unscoped requests receive no approval decision');
+});
+
+test('Codex rechecks malformed pending scope before writing an approval response', async t => {
+  const { client, requests } = setup(t); const { c, events } = client();
+  await c.ready(); await c.start('APPROVAL');
+  const q = await waitUntil('valid approval', () => events.find(e => e.type === 'question')?.question);
+  // Fault injection at the reply boundary: matching absent/empty IDs must never authorize a write.
+  const pending = c.approvals.get(q.id), originalTurn = pending.turnId;
+  try {
+    for (const turnId of [undefined, '', ' ']) {
+      pending.turnId = turnId; c.activeTurn = turnId;
+      await assert.rejects(c.reply({ type: 'reply', id: q.id, confirmed: true }), /pending|turn|scope/i);
+      assert.equal(requests().filter(r => !r.method && r.id === 17).length, 0);
+    }
+  } finally { pending.turnId = originalTurn; c.activeTurn = originalTurn; }
+  await c.reply({ type: 'reply', id: q.id, confirmed: false });
+  assert.equal((await settled(events)).text, 'DENY');
+});
+
 test('Codex does not send decisions excluded by the native server', async t => {
   const { client, requests } = setup(t); const { c, events } = client();
   await c.ready(); await c.start('APPROVAL_NO_CANCEL');

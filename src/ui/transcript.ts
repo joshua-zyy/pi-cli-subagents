@@ -215,7 +215,78 @@ export class TranscriptReader {
       if (command && record.method === "item/completed" && typeof item.aggregatedOutput === "string") entry.text = bounded(item.aggregatedOutput);
     }
   }
+  private claude(record: Record<string, any>): void {
+    if (record.parent_tool_use_id != null) return;
+    if (!this.threadId && record.type === "system" && typeof record.session_id === "string") this.threadId = record.session_id;
+    if (!this.threadId || record.session_id !== undefined && record.session_id !== this.threadId) return;
+    if (record.type === "system" && record.subtype === "init" && typeof record.model === "string") this.model = record.model;
+    if (record.type === "control_request" && record.request?.subtype === "can_use_tool") {
+      this.add({ id: `${this.fileIndex}:claude-permission:${record.request_id}`, kind: "notice", title: "Claude tool permission",
+        text: argumentsOf(record.request) });
+      return;
+    }
+    const message = object(record.message);
+    const event = object(record.event);
+    if (record.type === "stream_event" && event?.type === "message_start" && typeof event.message?.id === "string") {
+      const id = `${this.fileIndex}:claude:${event.message.id}`;
+      this.assistant = this.entries.get(id) ?? this.add({ id, kind: "assistant", title: "Assistant", text: "" });
+      this.blocks.clear(); this.calls.clear();
+    }
+    if (record.type === "stream_event" && event && this.assistant) {
+      const index = event.index;
+      if (event.type === "content_block_start" && event.content_block?.type === "tool_use") {
+        const block = event.content_block;
+        this.calls.set(index, { id: block.id, name: block.name, args: "" }); this.tool(block.id, block.name, block.input);
+      }
+      if (event.type === "content_block_delta" && event.delta?.type === "text_delta" && typeof event.delta.text === "string") {
+        this.blocks.set(index, bounded((this.blocks.get(index) ?? "") + event.delta.text));
+        this.assistant.text = bounded([...this.blocks].sort((a, b) => a[0] - b[0]).map(([, text]) => text).join("\n"));
+      }
+      if (event.type === "content_block_delta" && event.delta?.type === "input_json_delta") {
+        const call = this.calls.get(index);
+        if (call && typeof event.delta.partial_json === "string") { call.args = bounded(call.args + event.delta.partial_json); this.tool(call.id, call.name, call.args); }
+      }
+    }
+    if (record.type === "assistant" && message && typeof message.id === "string") {
+      if (typeof message.model === "string") this.model = message.model;
+      const id = `${this.fileIndex}:claude:${message.id}`;
+      this.assistant = this.entries.get(id) ?? this.add({ id, kind: "assistant", title: "Assistant", text: "" });
+      const text = textOf(message.content);
+      if (text) this.assistant.text = text;
+      for (const part of Array.isArray(message.content) ? message.content : []) if (part?.type === "tool_use" && typeof part.id === "string") this.tool(part.id, part.name ?? "tool", part.input);
+    }
+    if (record.type === "user" && message) {
+      const text = textOf(message.content);
+      if (text) this.add({ id: `${this.fileIndex}:claude-user:${record.uuid}`, kind: "user", title: "User", text });
+      for (const part of Array.isArray(message.content) ? message.content : []) if (part?.type === "tool_result" && typeof part.tool_use_id === "string") {
+        const tool = this.tool(part.tool_use_id, ""); tool.text = textOf(part.content); tool.status = part.is_error ? "error" : "done";
+      }
+    }
+    if (record.type === "result") {
+      const failed = record.is_error || record.subtype !== "success";
+      const text = typeof record.result === "string" ? record.result : Array.isArray(record.errors) ? record.errors.filter((value: unknown) => typeof value === "string").join("\n") : "";
+      if (text && (failed || text !== this.assistant?.text)) this.add({
+        id: `${this.fileIndex}:claude-result:${record.uuid}`, kind: failed ? "notice" : "assistant", title: failed ? "Claude error" : "Final response",
+        text: bounded(text), ...(failed ? { status: "error" } : {}),
+      });
+      const models = object(record.modelUsage);
+      if (!models) return;
+      const total = zeroUsage();
+      for (const usage of Object.values(models)) {
+        if (!object(usage)) return;
+        for (const [native, key] of [["inputTokens", "input"], ["outputTokens", "output"], ["cacheReadInputTokens", "cacheRead"], ["cacheCreationInputTokens", "cacheWrite"]] as const) {
+          const value = usage[native]; if (!Number.isSafeInteger(value) || value < 0) return;
+          total[key] += value;
+        }
+      }
+      if (typeof record.total_cost_usd !== "number" || !Number.isFinite(record.total_cost_usd) || record.total_cost_usd < 0) return;
+      total.cost = record.total_cost_usd;
+      // These totals include saved earlier turns on resume. Never add successive snapshots.
+      if (!record.is_error || Object.values(total).some(value => value > 0)) this.usage = total;
+    }
+  }
   private event(record: Record<string, any>): void {
+    if (this.cli === "claude") { this.claude(record); return; }
     if (this.cli === "codex") { this.codex(record); return; }
     if (["message_start", "message_end", "message_update"].includes(record.type) && object(record.message)) {
       this.message(record.message, record.type);
