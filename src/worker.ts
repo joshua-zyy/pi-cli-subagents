@@ -52,7 +52,13 @@ async function run(dir: string, runId: string): Promise<void> {
       if (rpc) {
         if (stop) {
           for (const question of state.questions) {
-            try { await rpc.reply({ type: "reply", id: question.id, cancelled: true }); } catch { /* stop() still reaps this CLI tree */ }
+            try {
+              appendFileSync(path.join(runDir, "permissions.jsonl"), `${JSON.stringify({ time: Date.now(), runId,
+                questionId: question.id, actor: "controller", decision: "cancelled", delivery: "attempted", reason: "Shutdown cleanup; no action was approved" })}\n`, { mode: 0o600 });
+              // Queue cancellation writes before interrupt, but never await native receipts
+              // here: stop owns the deadline and closes outstanding reply waiters.
+              void rpc.reply({ type: "reply", id: question.id, cancelled: true }).catch(() => {});
+            } catch { /* stop() still reaps this CLI tree even if the audit cannot be written */ }
           }
         }
         const result = await (stop ? rpc.stop() : rpc.end());

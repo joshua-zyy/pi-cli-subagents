@@ -178,6 +178,7 @@ function handle(cmd) {
     return;
   }
   if (cmd.method === 'turn/interrupt') {
+    if (process.argv.includes('--ignore-interrupt')) return;
     if (cmd.params.threadId !== thread.id || cmd.params.turnId !== turn.id) return error(cmd, 'Wrong interrupt target');
     response(cmd);
     // The response is not completion. A client must wait for the terminal event.

@@ -257,7 +257,13 @@ export class WorkspaceStore {
         const folder = path.join(this.directory(id), "continuations", randomUUID());
         const tree = await this.snapshot(ws.path, ws.baseCommit, folder);
         const from = spec?.workspaceBaseline?.commit ?? ws.baseCommit;
-        const changed = split(await git(ws.path, ["diff", "--no-renames", "--name-only", "-z", from, tree, "--"]));
+        if (!/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(from)) throw new Error("Invalid acknowledged workspace baseline; inspect before continuing");
+        // Older internal commits may lose reachability after sync moves detached HEAD.
+        // Batch lookup distinguishes a missing object from an actual Git/I/O failure.
+        const prior = (await git(ws.path, ["cat-file", "--batch-check"], Buffer.from(`${from}^{tree}\n`))).toString().trim();
+        const missingBaseline = prior === `${from}^{tree} missing`;
+        if (!missingBaseline && !/^[a-f0-9]+ tree [0-9]+$/.test(prior)) throw new Error("Cannot verify acknowledged workspace baseline; inspect before continuing");
+        const changed = missingBaseline ? [] : split(await git(ws.path, ["diff", "--no-renames", "--name-only", "-z", from, tree, "--"]));
         // A file created and then removed may be absent from both baseline commits, yet still
         // exist in this native session's memory. Include intervening journals, not just tree diff.
         const history: { revision?: number; status: string; changedFiles: string[] }[] = [
@@ -273,10 +279,13 @@ export class WorkspaceStore {
         const changedFiles = [...new Set(changed)].sort();
         notice = `Choice: ${options.baseline ?? "new review of continued work"}. Current workspace baseline: ${ws.baseCommit}; revision ${ws.revision}.\n`
           + (spec?.workspaceBaseline ? `Previous session baseline: ${spec.workspaceBaseline.commit}.\n` : "The previous session baseline is unknown; re-read all assigned files.\n")
-          + `Files to re-read: ${changedFiles.length ? changedFiles.join(", ") : "no Git content changes"}.\n`
+          + (missingBaseline ? "The previous Git baseline is unavailable; the exact change set is unknown. Re-read all assigned files.\n" : "")
+          + `Files to re-read: ${missingBaseline ? "all assigned files" : changedFiles.length ? changedFiles.join(", ") : "no Git content changes"}.\n`
+          + (missingBaseline && changedFiles.length ? `Known intervening paths (not a complete diff): ${changedFiles.join(", ")}.\n` : "")
           + (ws.integration ? `Previously integrated snapshot: ${ws.integration.tree}. Review only the subsequent increment; earlier changes must not be reapplied.\n` : "")
           + "Session memory is not the current code. Re-read the affected files before editing or reviewing. keep never restores old files.";
-        writeJson(path.join(folder, "decision.json"), { agentId, baseline: options.baseline, revision: ws.revision, baseCommit: ws.baseCommit, changedFiles, time: Date.now() });
+        writeJson(path.join(folder, "decision.json"), { agentId, baseline: options.baseline, revision: ws.revision, baseCommit: ws.baseCommit, changedFiles,
+          ...(missingBaseline ? { previousBaselineUnavailable: true } : {}), time: Date.now() });
       }
       return action(ws, notice);
     });

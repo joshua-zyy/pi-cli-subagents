@@ -70,6 +70,36 @@ test('missing files, malformed records and bounded history produce visible notic
   assert.ok(s.entries.some(e => e.text === 'Task 349'));
 });
 
+test('missing first and middle history logs are marked without hiding later messages', async t => {
+  const h = fixture(t), firstMissing = path.join(h.dir, 'first-missing.jsonl'), middleMissing = path.join(h.dir, 'middle-missing.jsonl');
+  const next = path.join(h.dir, 'next.jsonl');
+  h.append({ type: 'message_end', message: { role: 'assistant', content: 'EARLIER' } });
+  fs.writeFileSync(next, JSON.stringify({ type: 'message_end', message: { role: 'assistant', content: 'CURRENT' } }) + '\n');
+  const files = [firstMissing, h.file, middleMissing, next];
+  const s = await h.read(files);
+  assert(s.entries.some(e => e.text === 'EARLIER')); assert(s.entries.some(e => e.text === 'CURRENT'));
+  assert.equal(s.entries.filter(e => e.title === 'Unavailable historical run').length, 2);
+  assert.match(s.notice, /historical.*unavailable/i);
+  const again = await h.read(files); assert.equal(again.entries.length, s.entries.length, 'no repeated gap entries');
+  const reset = await h.read([next]); assert(!reset.notice?.includes('historical'));
+});
+
+test('an absent latest log is retried when created, including after a historical gap', async t => {
+  const h = fixture(t), old = path.join(h.dir, 'old-missing.jsonl'), latest = path.join(h.dir, 'active.jsonl');
+  const first = await h.read([old, latest]); assert.equal(first.loading, false); assert.match(first.notice, /unavailable/i);
+  fs.writeFileSync(latest, JSON.stringify({ type: 'message_end', message: { role: 'assistant', content: 'LATE OUTPUT' } }) + '\n');
+  const next = await h.read([old, latest]); assert(next.entries.some(e => e.text === 'LATE OUTPUT'));
+  assert.equal(next.entries.filter(e => e.title === 'Unavailable historical run').length, 1);
+});
+
+test('skipping an unreadable middle log never joins partial records across runs', async t => {
+  const h = fixture(t), absent = path.join(h.dir, 'absent.jsonl'), next = path.join(h.dir, 'next.jsonl');
+  fs.writeFileSync(h.file, '{"type":"message_end","message":');
+  fs.writeFileSync(next, JSON.stringify({ type: 'message_end', message: { role: 'assistant', content: 'INDEPENDENT' } }) + '\n');
+  const s = await h.read([h.file, absent, next]);
+  assert(s.entries.some(e => e.text === 'INDEPENDENT')); assert.match(s.notice, /incomplete/);
+});
+
 test('assistant usage is summed across runs and survives an unrelated revision change', async t => {
   const h = fixture(t);
   h.append({ type: 'message_end', message: { role: 'assistant', content: 'first', provider: 'p', model: 'm', usage: { input: 100, output: 20, cacheRead: 900, cacheWrite: 10, totalTokens: 1030, cost: { total: 0.5 } } } });

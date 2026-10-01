@@ -55,6 +55,7 @@ export class CodexAdapter implements CliAdapter {
       this.exitError ??= error;
       for (const entry of this.pending.values()) { clearTimeout(entry.timer); entry.reject(this.exitError); }
       this.pending.clear();
+      for (const approval of [...this.approvals.values()]) this.clearApproval(approval, this.exitError);
     };
     output.on("error", (error) => { fail(error); void this.kill(); });
     stderr.on("error", (error) => { fail(error); void this.kill(); });
@@ -304,17 +305,22 @@ export class CodexAdapter implements CliAdapter {
     finally { clearTimeout(timer); }
   }
   async stop(): Promise<{ exit: Exit; forced: boolean }> {
-    if (this.thread && this.activeTurn && !this.exitError) {
-      const completed = new Promise<void>(resolve => { this.turnEnded = resolve; });
-      try {
-        await this.request("turn/interrupt", { threadId: this.thread.threadId, turnId: this.activeTurn });
-        let timer: NodeJS.Timeout | undefined;
-        try { await Promise.race([completed, new Promise<void>(resolve => { timer = setTimeout(resolve, 500); })]); }
-        finally { if (timer) clearTimeout(timer); }
-      } catch { /* Forced cleanup below still reaps the CLI tree. */ }
-      this.turnEnded = undefined;
-    }
-    return this.end();
+    // Interrupt acknowledgement and graceful exit share one deadline, not a full
+    // request timeout followed by another exit timeout.
+    const deadline = setTimeout(() => { void this.kill(); }, 5000);
+    try {
+      if (this.thread && this.activeTurn && !this.exitError) {
+        const completed = new Promise<void>(resolve => { this.turnEnded = resolve; });
+        try {
+          await this.request("turn/interrupt", { threadId: this.thread.threadId, turnId: this.activeTurn });
+          let timer: NodeJS.Timeout | undefined;
+          try { await Promise.race([completed, new Promise<void>(resolve => { timer = setTimeout(resolve, 500); })]); }
+          finally { if (timer) clearTimeout(timer); }
+        } catch { /* The stop deadline still reaps this CLI tree. */ }
+        this.turnEnded = undefined;
+      }
+      return await this.end();
+    } finally { clearTimeout(deadline); }
   }
   private async kill(): Promise<void> {
     if (this.forced || this.child.exitCode !== null || this.child.signalCode !== null || !this.child.pid) return;

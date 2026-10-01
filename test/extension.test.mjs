@@ -11,7 +11,10 @@ import { AgentManager } from '../dist/manager.js';
 const fixture = fileURLToPath(new URL('./fixtures/pi.mjs', import.meta.url));
 const root = path.resolve('.test-output'); fs.mkdirSync(root, { recursive: true });
 
-test('extension tools implement → separate review → resume same implementer; report only to original parent', { timeout: 20_000 }, async (t) => {
+// Three two-second report windows plus multiple Git pipelines make 20 seconds
+// too small for this aggregate workflow under parallel Windows load. Transport
+// and shutdown deadlines are asserted separately; this is not a per-operation timeout.
+test('extension tools implement → separate review → resume same implementer; report only to original parent', { timeout: 45_000 }, async (t) => {
   const savedArgv = process.argv[1];
   process.argv[1] = fixture;
   const cwd = fs.mkdtempSync(path.join(root, 'extension-'));

@@ -48,6 +48,7 @@ export class TranscriptReader {
   private calls = new Map<number, { id: string; name: string; args: string }>();
   private clipped = false;
   private malformed = false;
+  private unavailableHistory = false;
   private error?: string;
   private usage?: TranscriptUsage;
   private provider?: string;
@@ -76,27 +77,40 @@ export class TranscriptReader {
       this.error = undefined;
       if (this.offset < size) return this.snapshot(true);
       if (this.fileIndex + 1 < files.length) {
-        if (this.buffer.trim()) this.malformed = true;
-        this.fileIndex++; this.offset = 0; this.buffer = ""; this.decoder = new StringDecoder("utf8");
-        this.droppingLine = false; this.assistant = undefined; this.user = undefined; this.blocks.clear(); this.calls.clear();
+        this.nextFile();
         return this.snapshot(true);
       }
     } catch (error) {
       this.error = `Event log unavailable: ${(error as Error).message}`;
+      if (this.fileIndex + 1 < files.length) {
+        this.add({ id: `${this.fileIndex}:unavailable`, kind: "notice", title: "Unavailable historical run", text: `${file}\n${this.error}`, status: "error" });
+        this.unavailableHistory = true;
+        this.nextFile();
+        return this.snapshot(true);
+      }
+      // The latest file may not exist yet; retain its cursor and retry on refresh.
     } finally { await handle?.close(); }
     return this.snapshot(false);
   }
 
+  /** Every run boundary resets decoder/message state, including skipped history. */
+  private nextFile(): void {
+    if (this.buffer.trim()) this.malformed = true;
+    this.fileIndex++; this.offset = 0; this.buffer = ""; this.decoder = new StringDecoder("utf8");
+    this.droppingLine = false; this.assistant = undefined; this.user = undefined; this.blocks.clear(); this.calls.clear();
+    this.error = undefined;
+  }
   private reset(): void {
     this.revision++;
     this.files = []; this.fileIndex = 0; this.offset = 0; this.buffer = "";
     this.decoder = new StringDecoder("utf8"); this.droppingLine = false;
     this.entries.clear(); this.assistant = undefined; this.user = undefined;
-    this.blocks.clear(); this.calls.clear(); this.clipped = false; this.malformed = false; this.error = undefined;
+    this.blocks.clear(); this.calls.clear(); this.clipped = false; this.malformed = false; this.unavailableHistory = false; this.error = undefined;
     this.usage = undefined; this.provider = undefined; this.model = undefined;
   }
   private snapshot(loading: boolean): TranscriptSnapshot {
-    const notice = [this.error, this.clipped ? "Showing recent content only; older or oversized content remains in the event logs." : undefined,
+    const notice = [this.error, this.unavailableHistory ? "Some historical event logs were unavailable; skipped runs are marked in the transcript." : undefined,
+      this.clipped ? "Showing recent content only; older or oversized content remains in the event logs." : undefined,
       this.malformed ? "Some malformed or incomplete log records were skipped." : undefined].filter(Boolean).join(" ");
     return { entries: [...this.entries.values()].map(entry => ({ ...entry })), loading, revision: this.revision, ...(notice ? { notice } : {}),
       ...(this.usage ? { usage: { ...this.usage } } : {}), ...(this.provider ? { provider: this.provider } : {}), ...(this.model ? { model: this.model } : {}) };

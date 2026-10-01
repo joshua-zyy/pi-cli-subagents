@@ -107,9 +107,9 @@ export interface AgentView extends AgentState {
   workspaceBaseline?: AgentSpec["workspaceBaseline"];
   /** Optional one-line summary of the current run's task. */
   task?: string;
-  /** Most recent assignments, oldest first; `runCount` reports how many exist in total. */
-  history: TaskRun[];
-  runCount: number;
+  /** Most recent assignments and total count; absent when an inventory record is unreadable. */
+  history?: TaskRun[];
+  runCount?: number;
   text?: string;
   truncated?: boolean;
 }

@@ -72,6 +72,10 @@ export class AgentManager {
     const spec = this.spec(id), dir = this.directory(id);
     let state = readJson<AgentState>(path.join(dir, "state.json"));
     if (!state) throw new Error(`Subagent ${id} has no runtime state yet; inspect ${dir}`);
+    if (state.id !== id || !idPattern.test(state.runId) || !["starting", "running", "waiting", "stopping", "completed", "failed", "stopped", "unreachable"].includes(state.phase)
+      || !Number.isInteger(state.workerPid) || state.workerPid < 0 || !Number.isFinite(state.updatedAt) || typeof state.accepted !== "boolean"
+      || typeof state.logFile !== "string" || !Array.isArray(state.questions) || state.questions.some(q => !q || typeof q.id !== "string" || typeof q.title !== "string" || !["select", "confirm", "input", "editor"].includes(q.method)))
+      throw new Error(`Invalid runtime state for subagent ${id}; inspect ${dir}`);
     if (["starting", "running", "waiting", "stopping"].includes(state.phase) && !processAlive(state.workerPid)) {
       state = { ...state, phase: "unreachable", error: "The worker exited and task status is uncertain. Do not start duplicate work; inspect the logs and owner.lock." };
     }
@@ -95,7 +99,19 @@ export class AgentManager {
     return { ...state, cli: spec.cli ?? "pi", role: spec.roleName, cwd: spec.cwd, ...(spec.workspace ? { workspace: spec.workspace, workspaceBaseline: spec.workspaceBaseline } : {}), history, runCount: runs.length,
       ...(latest?.runId === current && latest.task ? { task: latest.task } : {}), ...(report ? { text: report.text, truncated: report.truncated } : {}) };
   }
-  list(): AgentView[] { return directories(this.root).filter((id) => idPattern.test(id)).map((id) => this.get(id)); }
+  list(): AgentView[] {
+    return directories(this.root).filter((id) => idPattern.test(id)).map((id) => {
+      try { return this.get(id); }
+      catch (error) {
+        // Inventory is not a control authorization. Keep the record visible without
+        // inventing a run/session or preventing healthy siblings from reporting.
+        const dir = this.directory(id);
+        return { id, runId: "", role: "Record unavailable", cwd: "", phase: "unreachable", workerPid: 0,
+          updatedAt: 0, accepted: false, questions: [], logFile: dir,
+          error: `Record unavailable: ${(error as Error).message}. History and ownership are unknown; inspect ${dir} before any retry.` };
+      }
+    });
+  }
 
   /** Only this parent's validated runs, oldest first. Requests carry their own creation time. */
   private runs(id: string): { runId: string; folder: string; time: number; request: StartRequest }[] {
@@ -215,10 +231,8 @@ export class AgentManager {
         await this.request(id, { type: "send", message: prompt, mode });
         return this.get(id);
       }
-      if (processAlive(state.workerPid)) {
-        await waitUntil("Previous worker release", () => !processAlive(state.workerPid), 15_000);
-        state = this.get(id);
-      }
+      await this.waitForRelease(state, "Previous worker release", 15_000);
+      state = this.get(id);
       const session = nativeSession(state.session ?? (state.sessionFile && state.sessionId ? { sessionFile: state.sessionFile, sessionId: state.sessionId } : undefined));
       if (!session || session.cli !== (spec.cli ?? "pi")) throw new Error("No resumable original session; will not silently create a new session");
       if (session.cli === "codex" && session.codexHome !== spec.codexHome) throw new Error("Codex native home changed; refusing to resume a different session store");
@@ -235,13 +249,23 @@ export class AgentManager {
     }, options, beforeSync);
   }
 
+  /** Lock release follows CLI reaping; a terminal PID may already belong to another process. */
+  private async waitForRelease(state: AgentView, label: string, timeout: number): Promise<void> {
+    const file = path.join(this.directory(state.id), "owner.lock");
+    await waitUntil(label, () => {
+      const owner = readJson<{ pid: number; runId: string }>(file);
+      if (owner === undefined) return true;
+      if (!owner || owner.pid !== state.workerPid || owner.runId !== state.runId || !processAlive(owner.pid))
+        throw new Error(`A different owner or stale lock remains at ${file}; inspect it before retrying. No lock was reclaimed.`);
+      return undefined;
+    }, timeout);
+  }
+
   async close(id: string): Promise<AgentView> {
     const state = this.get(id);
     if (state.phase === "unreachable") throw new Error(state.error);
-    if (processAlive(state.workerPid)) {
-      if (!["completed", "failed", "stopped", "stopping"].includes(state.phase)) await this.request(id, { type: "close" });
-      await waitUntil("Subagent shutdown", () => !processAlive(state.workerPid), 30_000);
-    }
+    if (!["completed", "failed", "stopped", "stopping"].includes(state.phase)) await this.request(id, { type: "close" });
+    await this.waitForRelease(state, "Subagent shutdown", 30_000);
     return this.get(id);
   }
 
@@ -253,6 +277,8 @@ export class AgentManager {
   reports(now = Date.now(), states: readonly AgentView[] = this.list()): Report[] {
     const reports: Report[] = [];
     for (const state of states) {
+      // An inventory diagnostic has no verified execution to report or receipt to invent.
+      if (!state.runId) continue;
       const folder = path.join(this.directory(state.id), "reports");
       for (const file of jsonFiles(folder)) {
         const report = this.report(path.join(folder, file))!;
