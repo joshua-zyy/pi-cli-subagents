@@ -5,11 +5,89 @@ description: Delegate local coding, exploration, implementation, or independent 
 
 # Delegate CLI agents
 
-1. **Choose the task boundary.** Delegate independent, concrete work that can be verified. Use `list_agents` once to discover configured roles and existing instances when needed; never poll it for completion. Pi, Codex and Claude Code roles support shared-cwd or managed-workspace spawn, close/original-session resume, explicit interactions and bounded conversation display. Pi/Codex support active steering; Claude active messages are refused. Native approvals are single-action only. Avoid spawning more agents than needed.
-2. **Brief the agent.** Use `spawn_agent` with an appropriate role (`explore` to investigate without changing files, `worker` for implementation, `reviewer` for independent assessment, `oracle` for a second opinion or a judgment on material you hand it; other configured roles may be available). State the goal, authorized files, expected output and verification. Ask the child to put its conclusion, evidence, verification and unresolved issues in its final response so the completion notification is actionable. Choose either shared `cwd` or a managed `workspace` ID, never both. Codex roles require an explicit available model; command/file approval requests require a separate in-scope single-action decision, while broader or unsupported permission requests fail closed. A separate conversation alone is *not* a separate filesystem. For isolated parallel edits, call `create_workspace({})` once per independently integrable change and inspect its committed baseline and `parentChanges` before spawning. Default creation reports but does not inherit dirty parent files. If the next task needs them, inspect ALL current changes and obtain authorization before using `create_workspace({ includeUncommitted: { reason: "…" } })`. This uses an internal baseline commit without updating the parent's branch, HEAD or index; it does not authorize unrelated edits or a formal commit. The sibling worktree may need its own dependencies and project trust; do not force trust or widen permissions to make it start. Avoid concurrent writes in shared directories.
-3. **Wait for reports, not status polls.** Spawning is asynchronous: continue independent work or end this turn and let the report wake you. Completion reports arrive in the original parent session, including after reconnect. Failures, permission requests, unreachable workers and possible inactivity arrive without waiting for successful siblings. Use `list_agents` only for inspection, troubleshooting or recovering context. When a running child needs correction, use `send_input` (`steer` targets the active turn; Pi `followUp` waits for the current run; running Codex `followUp` is not supported). Claude running `steer` and `followUp` are both refused: wait for its completion before continuing the original instance. Steering does not interrupt an in-flight tool.
-4. **Close the loop.** Read errors rather than interpreting empty text as success. For implement → review → fix, wait for the implementer to finish, then start a distinct reviewer with the **same workspace ID** (or shared `cwd`). Evaluate the findings and `send_input` to the **same implementer's ID** for necessary in-scope fixes, only after the reviewer finishes. Managed workspaces allow one active instance at a time. After review and fixes, use `integrate_workspace({ workspace: ID })` and verify the main directory yourself. On conflicts, stop and inspect rather than force application; on unfinished/uncertain integration, inspect the retained patch and backups before any retry. Do not make branch commits, push, delete worktrees, or expand the task by default. Worktrees are not permission sandboxes: coordinate external writers, too.
-5. **Reuse the instance that already did the related work.** A role is a template; each instance is a separate colleague with its own session. `list_agents` reports every instance's `history` (earlier assignments, oldest first, with their outcome), so recover who did what from there instead of trusting recall after your context is compacted. Reuse an instance with `send_input` when the new task depends on what it already learned; start a new instance for unrelated work, and never reuse an implementer as its own reviewer. For shared-directory instances, say what has been integrated or changed and what to re-read; session memory is not a current view of the code. For managed workspaces, integration or another instance's sync requires an explicit `send_input` baseline choice. Choose `baseline: "keep"` to work with the current workspace as-is (not to restore old remembered files), or `baseline: "sync"` to update an idle, fully integrated workspace from the parent. Sync refuses unintegrated/staged work; do not reset or discard it to make sync pass. If the parent is dirty, inspect all changes and supply `includeUncommitted: { reason: "…" }` only after authorization. Read the baseline/file-change notice and tell the child what to re-read. If an older acknowledged Git baseline was pruned, the exact diff is unknown: re-read all assigned files, not just the known journal paths; keep still preserves the current files and original session. An old reviewer must also acknowledge a worker's sync; normally choose keep to review the worker's pending changes, never sync them away. After keep, review/integrate only the increment after the last integrated snapshot, including new files. For Codex/Claude sync, native metadata preflight checks the original session before changing files, but successful sync does not guarantee the later resume will succeed. Claude's check reads bounded original-session files and verifies ID/cwd; it does not prove external Claude processes are idle. If resume fails after sync, inspect the retained applied sync journal and native error, preserve the original instance, and explicitly choose keep/sync before trying again; never roll back files or start a replacement thread automatically. Do not bypass a refusal with raw cwd, replacement instances or manual record edits.
-6. **Handle interruptions deliberately.** `close_agent` stops active work but keeps its session for later continuation; never use it merely because a task finished. A stale, malformed or mismatched `owner.lock` makes close fail even when the recorded task is terminal. Inspect the record; do not delete the lock or start replacement work automatically. On a pending Pi interaction or Codex/Claude single-action approval, inspect the full request and the user's original authorization. Session-wide and permanent grants are not offered. Claude uses the exact choices `Deny once`, `Approve once`, or `Cancel turn`. If `humanOnly` is set, do not approve as the parent: ask the human to answer, or deny/cancel. Dedicated native dialogs and unscoped requests fail closed; do not bypass that refusal. Some command approvals offer only `Approve once` or `Cancel turn`: respond using the exact offered `value`, and do not assume `confirmed: false` means decline-and-continue. A native request that auto-resolves or whose reply outcome is uncertain cannot be blindly answered again. Use `respond_to_permission` for a single in-scope decision (including explicit denial); supply a concrete reason. If the request exceeds the task scope or is ambiguous, leave it waiting and ask the user to decide via `/agent-reply <agentId> <questionId>` or the TUI. Never treat an approval as blanket permission or bypass the safety extension. A role's `mode` can remove native approval requests entirely (`dontAsk`, `bypassPermissions`, `full-access`); that is a posture its role file already chose, not evidence that anything was reviewed, so do not read silence as consent. If an instance is unreachable or listed as `Record unavailable`, inspect its logs and state instead of spawning a duplicate on the same session. An unreadable record is not proof of a failed task or an empty history; healthy siblings can continue reporting. Humans have their own surface in a TUI: a status area above the editor, and `/agents` to inspect results and errors (`v` opens a live conversation with tool inputs and outputs), send instructions, resume an instance's original session, answer a pending request, or stop an instance after confirmation. Those direct actions are recorded in this session as `[Human → subagent …]` entries without interrupting you: when one appears, re-check your plan for that instance before integrating its work, and treat it as an instruction to that instance only, not as wider authorization.
+Delegate **independent, verifiable** work, not volume. One agent is the default; add a second only when
+two workstreams can be verified separately and do not write the same files. If the task fits your own
+context, do it yourself — a child's report is a summary, not a substitute for reading the code.
 
-The parent must have a persistent Pi session. When the parent exits, an already running subagent can continue and its report is saved. On returning to the **original parent session**, pending reports are delivered; an unrelated session cannot claim them.
+## 1. Brief before you spawn
+
+`spawn_agent({ role, task, cwd | workspace })` — never both. Use `list_agents` once to see configured
+roles and existing instances, and never poll it for completion. Codex roles need an explicit available
+model.
+
+State the goal, the authorized paths, what is out of scope, and the evidence you will accept as done.
+Ask for the child's final message to end with this block:
+
+    VERDICT: <one line>
+    EVIDENCE: <one line per item, each with a locator>
+    UNVERIFIED: <what you did not check>
+
+What the work is decides the evidence it owes — never the role's name. `list_agents` returns the roles
+this project actually offers, with their descriptions; route by that description. The built-in names
+below always resolve, but a project or user role file can override what any of them does, and custom
+roles can be added — so read the description before you rely on a name. If no configured role covers the
+work, ask the user which role to use, or add one with `/cli-agents-setting`; do not stretch an unrelated
+role to fit.
+
+| work | built-in role | VERDICT | EVIDENCE |
+|---|---|---|---|
+| investigate without changing files | `explore` | the finding | file/symbol or source per claim |
+| implement and verify a change | `worker` | what changed | the exact command and what it printed |
+| independently assess a change | `reviewer` | `PASS` or `BLOCK` | per defect: file:line and a trigger |
+| judge material you hand over | `oracle` | the answer | the material judged, plus confidence |
+
+A report without evidence is not a finished task: do not build on it and do not integrate it. Ask the
+same instance for the missing evidence, or carry the work forward as unverified. Say which revision the
+work is against; a finding without a revision cannot be acted on later.
+
+A managed worktree is optional — use a shared `cwd` unless the work needs isolation. Before creating or
+integrating one, read [references/workspaces.md](references/workspaces.md).
+
+## 2. Wait for reports
+
+Spawning is asynchronous: continue independent work or end the turn — the report wakes you. Completed,
+failed, waiting, unreachable and stalled children all arrive on their own; `list_agents` is for
+inspection and recovering context, not for progress. Long reports are clipped in the notification: read
+the full text with `list_agents({ id })`. Never read empty text as success — read the error. Keep
+`src/example.ts:42`-style locators, not paraphrases.
+
+## 3. Reuse the instance that did the related work
+
+A role is a template; each instance is a separate colleague with its own session. `list_agents` returns
+each instance's `history` (earlier assignments with their outcome, oldest first), so recover who did
+what from there instead of trusting recall after your context is compacted. Send follow-up work to the
+instance that already has the context; start a new one for unrelated work; never let an instance review
+its own work. A running child takes `send_input` steering on Pi and Codex (running Codex `followUp`
+is not supported); Claude refuses both while running — wait for it. Steering does not interrupt an
+in-flight tool. Session memory is not a current view of the files: say what has changed and what to
+re-read.
+
+## 4. Close the loop
+
+implement → review → fix → integrate, in that order. Give the reviewing instance the **same workspace
+or cwd** as the one that made the change, and start it only after that instance stops. Send fixes back
+to the **same instance's id**, and only after the review finishes. Then `integrate_workspace`, and verify
+the main directory yourself.
+`BLOCK` means stop and inspect, not force. Do not commit, push or delete worktrees unless asked, and
+never bypass a refusal with a raw `cwd`, a replacement instance or a hand-edited record. When something
+is stuck or inconsistent — a conflict, an unfinished integration, a stale lock, an unreachable or
+unreadable instance, a resume that failed after a sync — read
+[references/recovery.md](references/recovery.md) before touching anything.
+
+## 5. Answering a child's request
+
+A `waiting` child is blocked, not finished. Approve only what the user's own task authorization covers,
+never as a blanket permission; a `humanOnly` request cannot be approved by the parent; a fail-closed
+refusal is not bypassed. Read [references/approvals.md](references/approvals.md) before answering, or
+hand the decision to the human with `/agent-reply <agentId> <questionId>`.
+
+## 6. The human has their own surface
+
+A status area above the editor, and `/agents` to inspect results, open a live conversation, message,
+resume, answer a pending request, or stop an instance. Their direct actions appear in this session as
+`[Human → subagent …]` entries without interrupting you: re-check your plan for that instance before
+integrating its work, and treat it as authorization for that instance only.
+
+`close_agent` stops active work but keeps the session — never use it merely because a task finished. The
+parent session must be persistent: a running child survives the parent's exit, and its report is
+delivered on return to the **original** parent session.
