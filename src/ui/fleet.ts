@@ -31,6 +31,8 @@ export class FleetView {
     private readonly ui: Pick<ExtensionUIContext, "setWidget" | "onTerminalInput" | "getEditorText">,
     private readonly read: () => AgentView[],
     private readonly open: (id: string) => void,
+    /** True while another pane owns the keyboard even though Pi's editor still has focus. */
+    private readonly busy: () => boolean = () => false,
   ) {
     this.unsubscribe = ui.onTerminalInput((data) => this.handleKey(data));
   }
@@ -61,7 +63,7 @@ export class FleetView {
     if (this.disposed || this.viewing || !this.agents.length || isKeyRelease(data)) return undefined;
     // Input listeners run before modal dialogs; only the actual prompt editor may activate FleetView.
     const focused = tui ? (tui as TUI & { getFocusedComponent?(): unknown }).getFocusedComponent?.() : undefined;
-    if (!tui || !isPromptEditor(focused)) {
+    if (!tui || !isPromptEditor(focused) || this.busy()) {
       if (this.active) { this.active = false; this.selectedId = undefined; tui?.requestRender(); }
       return undefined;
     }

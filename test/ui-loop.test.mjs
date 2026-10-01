@@ -417,3 +417,47 @@ test('session shutdown dismisses a live viewer without stopping its child or reo
   assert.equal(h.manager.get(agent.id).phase, 'running');
   assert.equal(processAlive(h.manager.get(agent.id).workerPid), true);
 });
+
+test('the role editor is a framed pane above the editor that owns the keyboard while open', { timeout: 20_000 }, async (t) => {
+  const h = harness(t);
+  h.start();
+  const running = h.commands.get('cli-agents-setting').handler('', h.ctx);
+  const registered = await waitUntil('role panel widget', () => h.widgetCalls.find((call) => call.key === 'cli-subagents-role-settings' && typeof call.content === 'function'));
+  assert.equal(h.customCalls, 0, 'the input box stays on screen instead of being replaced by a modal overlay');
+  const component = registered.content({ terminal: { rows: 35, columns: 120 }, requestRender() {} }, theme);
+  const rendered = () => component.render(100).join('\n');
+  assert.match(rendered(), /^╭─+╮$/m, 'the pane is framed');
+  assert.match(rendered(), /Subagent roles — /);
+  const press = (key) => assert.deepEqual(h.state.listeners.at(-1)(key), { consume: true }, `${key} must not reach the editor`);
+  press(keys.down); press(keys.down);
+  assert.match(rendered(), /› reviewer/, 'the list cursor follows the arrow keys');
+  press(keys.enter);
+  assert.match(rendered(), /reviewer — /, 'the highlighted role opens, not the first one');
+  assert.equal(h.state.listeners.length, 2, 'the fleet listener stays registered behind the panel listener');
+  press(keys.escape); press(keys.escape);
+  await running;
+  assert.equal(h.state.listeners.length, 1, 'only the fleet listener is left when the panel closes');
+  assert.equal(h.widgetCalls.at(-1).content, undefined, 'the pane is removed from above the editor');
+  assert.deepEqual(h.notices, [], 'closing a clean panel changes nothing');
+});
+
+test('changing a value reopens that role and field instead of the top of the list', { timeout: 20_000 }, async (t) => {
+  const h = harness(t);
+  h.start();
+  const running = h.commands.get('cli-agents-setting').handler('', h.ctx);
+  const registered = await waitUntil('role panel widget', () => h.widgetCalls.filter((call) => call.key === 'cli-subagents-role-settings').at(-1));
+  const component = registered.content({ terminal: { rows: 35, columns: 120 }, requestRender() {} }, theme);
+  const rendered = () => component.render(100).join('\n');
+  const press = async (key) => { h.state.listeners.at(-1)(key); await new Promise((resolve) => setTimeout(resolve, 20)); };
+  assert.match(rendered(), /Subagent roles — /);
+  await press(keys.enter);                    // open the first role
+  assert.match(rendered(), /explore — /);
+  await press(keys.enter);                    // open its cli picker
+  assert.match(rendered(), /explore · cli/);
+  await press(keys.enter);                    // apply the value
+  assert.match(rendered(), /explore — /, 'the role must stay open after a change');
+  assert.match(rendered(), /› cli  pi/, 'the field cursor returns to the field that changed');
+  assert.doesNotMatch(rendered(), /Subagent roles —/, 'the user must not be thrown back to the top of the list');
+  await press(keys.escape); await press(keys.escape); await press(keys.escape);
+  await running;
+});

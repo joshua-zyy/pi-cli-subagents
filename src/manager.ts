@@ -10,6 +10,7 @@ import { CodexAdapter } from "./codex-adapter.js";
 import { claudeLaunch } from "./claude-launch.js";
 import { inspectClaudeSession } from "./claude-adapter.js";
 import { nativeSession } from "./cli-adapter.js";
+import { modeError } from "./roles.js";
 import { WorkspaceStore, type ResumeOptions } from "./workspace.js";
 import { directories, jsonFiles, processAlive, readJson, shorten, waitUntil, writeJson } from "./storage.js";
 import type { AgentSpec, AgentState, AgentView, Control, Delivery, Endpoint, Launch, NativeSession, Report, Role, SessionHandle, StartRequest, TaskRun } from "./types.js";
@@ -140,9 +141,11 @@ export class AgentManager {
   async spawn(roleName: string, role: Role, cwd: string, message: string, workspace?: string): Promise<AgentView> {
     if (!message.trim()) throw new Error("Task must not be empty");
     if (role.cli !== undefined && !["pi", "codex", "claude"].includes(role.cli)) throw new Error("Unsupported CLI");
-    if (role.cli === "claude" && (role.provider || role.thinking)) throw new Error("Claude does not accept Pi provider/thinking fields");
+    if (role.cli === "claude" && role.provider) throw new Error("Claude does not accept a Pi provider");
+    if (role.cli === "claude" && role.thinking !== undefined && !["low", "medium", "high", "xhigh", "max"].includes(role.thinking)) throw new Error("Claude thinking must be low, medium, high, xhigh or max");
     if (role.cli === "codex" && (!role.model || role.provider || role.thinking)) throw new Error("Codex requires an explicit model without Pi provider/thinking fields");
     if (role.cli !== "codex" && role.effort) throw new Error("Codex effort requires cli: codex");
+    if (role.mode !== undefined) { const invalid = modeError(role.cli, role.mode); if (invalid) throw new Error(invalid); }
     const id = randomUUID(), dir = this.directory(id);
     const start = async (directory: string, baseline?: AgentSpec["workspaceBaseline"], notice?: string): Promise<AgentView> => {
       directory = path.resolve(directory);

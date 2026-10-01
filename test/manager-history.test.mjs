@@ -37,6 +37,10 @@ function measure(action) {
   try { return { result: action(), count }; }
   finally { fs.readFileSync = read; fs.statSync = stat; syncBuiltinESMExports(); }
 }
+// The manager keys its cache on `ctimeNs`, so a same-size rewrite with a forced-back mtime is only
+// observable once the filesystem clock ticks. NTFS stamps ctime from a clock coarser than 1 ms, so
+// a rewrite inside the same tick reuses the previous value and no invalidation is possible.
+function awaitCtimeTick(ns) { const until = Number(ns / 1_000_000n) + 20; while (Date.now() < until) { /* spin */ } }
 
 test('unchanged history refresh reuses bounded summaries instead of rereading every JSON file', t => {
   const { manager, id } = fixture();
@@ -101,6 +105,7 @@ test('history memoization sees external publication, replacement, deletion and l
   const replaced = fs.statSync(replace, { bigint: true });
   assert.equal(replaced.size, stamp.size); assert.equal(replaced.mtimeNs, stamp.mtimeNs);
   assert.match(manager.get(id).history.find(r => r.runId === runs.at(-1)).task, /^Edit/);
+  awaitCtimeTick(replaced.ctimeNs);
   fs.writeFileSync(replace, fs.readFileSync(replace, 'utf8').replace('Edit', 'Redo'));
   fs.utimesSync(replace, fixedTime, fixedTime);
   const rewritten = fs.statSync(replace, { bigint: true });

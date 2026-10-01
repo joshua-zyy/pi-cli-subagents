@@ -4,14 +4,17 @@ import { getAgentDir, getMarkdownTheme, type ExtensionAPI, type ExtensionContext
 import { AgentManager } from "./manager.js";
 import { WorkspaceDecisionRequired, type ResumeOptions } from "./workspace.js";
 import { deliverReports } from "./notifier.js";
-import { loadRoles } from "./roles.js";
+import { CLI_CHOICES, loadRoles, mergeRoles } from "./roles.js";
+import { detectClis, probeCatalog, type ModelCatalog } from "./cli-discovery.js";
+import { addRole, deleteRole, FIELD_LABELS, fieldValue, readScope, roleRows, setField, writeScope, type Scope } from "./role-settings.js";
 import { AgentsPanel, type PanelAction } from "./ui/panel.js";
+import { RoleSettingsPanel, SETTINGS_MAX_ROWS, type RoleSettingsAction, type RoleSettingsCursor } from "./ui/role-settings.js";
 import { canSteer, isTerminal, oneLine } from "./ui/format.js";
 import { StatusWidget } from "./ui/status.js";
 import { FleetView } from "./ui/fleet.js";
 import { TranscriptReader } from "./ui/transcript.js";
 import { ConversationViewer } from "./ui/conversation.js";
-import type { AgentView, Delivery, Launch, Question } from "./types.js";
+import type { AgentView, Delivery, Launch, Question, Role, Thinking } from "./types.js";
 
 export function parentManager(ctx: Pick<ExtensionContext, "sessionManager">, launch: Launch): AgentManager {
   const parentFile = ctx.sessionManager.getSessionFile();
@@ -28,6 +31,21 @@ function visible(state: AgentView) {
 }
 const view = (state: AgentView): string => JSON.stringify(visible(state));
 const content = (text: string) => ({ content: [{ type: "text" as const, text }], details: undefined });
+/**
+ * A Pi role that leaves provider/model/thinking unset follows the parent session's current choice
+ * instead of Pi's configured default, so switching model mid-session also moves its subagents.
+ * Codex and Claude roles are explicit by construction and are never rewritten here.
+ */
+export function inheritParentModel(role: Role, ctx: Pick<ExtensionContext, "model" | "thinkingLevel">): Role {
+  if (role.cli !== undefined && role.cli !== "pi") return role;
+  const model = ctx.model;
+  return {
+    ...role,
+    ...(role.provider || !model ? {} : { provider: String(model.provider) }),
+    ...(role.model || !model ? {} : { model: model.id }),
+    ...(role.thinking || !ctx.thinkingLevel ? {} : { thinking: ctx.thinkingLevel as Thinking }),
+  };
+}
 /** Separate from report receipts: these entries record what the human did, not what a child reported. */
 export const humanActionType = "cli-subagents-human-action";
 
@@ -83,7 +101,11 @@ export default function extension(pi: ExtensionAPI): void {
       monitor.widget = new StatusWidget(ctx.ui, () => monitor.agents);
       monitor.fleet = new FleetView(ctx.ui, () => monitor.agents, (id) => {
         void openAgents(ctx, id).finally(() => monitor.fleet?.viewerClosed());
-      });
+        // The role editor keeps the editor on screen but owns the keyboard itself.
+      }, () => panelBusy);
+      // Start the CLI discovery now so `/cli-agents-setting` opens with its pickers already populated.
+      cliAvailability = undefined; catalog = undefined; catalogProbe = undefined;
+      discover(ctx.cwd);
     }
     active = monitor;
     setTimeout(pump, 100).unref();
@@ -110,7 +132,7 @@ export default function extension(pi: ExtensionAPI): void {
   });
   pi.registerTool({
     name: "spawn_agent", label: "Spawn CLI subagent",
-    description: "Start an independent, reusable Pi, Codex or Claude Code CLI subagent asynchronously. Returns an ID; keep working while completion reports arrive automatically. Roles: explore/worker/reviewer or custom roles. Reuse an existing instance with send_input when the new work depends on what it already did.",
+    description: "Start an independent, reusable Pi, Codex or Claude Code CLI subagent asynchronously. Returns an ID; keep working while completion reports arrive automatically. Roles: explore/worker/reviewer/oracle or custom roles. Reuse an existing instance with send_input when the new work depends on what it already did.",
     parameters: Type.Object({
       role: Type.String({ description: "Role name; use list_agents to discover available roles" }),
       task: Type.String({ description: "Concrete goal, authorized files and verification criteria; do not widen CLI permissions" }),
@@ -119,9 +141,10 @@ export default function extension(pi: ExtensionAPI): void {
     }),
     async execute(_id, args, _signal, _update, ctx) {
       const roles = loadRoles(getAgentDir(), ctx.cwd, ctx.isProjectTrusted());
-      const role = roles[args.role];
-      if (!role) throw new Error(`Unknown role: ${args.role}; available: ${Object.keys(roles).join(", ")}`);
+      const resolved = roles[args.role];
+      if (!resolved) throw new Error(`Unknown role: ${args.role}; available: ${Object.keys(roles).join(", ")}`);
       if (args.workspace !== undefined && args.cwd !== undefined) throw new Error("Pass workspace or cwd, not both");
+      const role = inheritParentModel(resolved, ctx);
       const state = await parentManager(ctx, launch).spawn(args.role, role, args.cwd ?? ctx.cwd, args.task, args.workspace);
       return content(`${state.cli === "codex" ? "Codex" : state.cli === "claude" ? "Claude Code" : "Pi"} subagent dispatched: ${view(state)}\nThe parent may continue working. Completion and waiting reports return to this parent session.`);
     },
@@ -253,6 +276,17 @@ export default function extension(pi: ExtensionAPI): void {
   }
 
   let panelBusy = false;
+  /** Widget slot for the role editor, rendered by Pi in the area just above the editor. */
+  const ROLE_SETTINGS_KEY = "cli-subagents-role-settings";
+  type RoleSettingsWidget = { terminal: { rows: number }; requestRender(): void };
+  /** Discovered once per session and shared by every panel, so the pickers are ready when it opens. */
+  let catalog: ModelCatalog | undefined;
+  let catalogProbe: Promise<void> | undefined;
+  let cliAvailability: ReturnType<typeof detectClis> | undefined;
+  const discover = (cwd: string): void => {
+    cliAvailability ??= detectClis();
+    catalogProbe ??= probeCatalog({ pi: launch, cwd, available: cliAvailability }).then((found) => { catalog = found; });
+  };
   async function openAgents(ctx: ExtensionContext, selectedId?: string): Promise<void> {
       // custom() returns undefined in RPC mode; terminal panels are TUI-only.
       if (ctx.mode !== "tui") { ctx.ui.notify("The panel requires a TUI; use list_agents / send_input / close_agent or /agent-reply instead.", "error"); return; }
@@ -337,6 +371,127 @@ export default function extension(pi: ExtensionAPI): void {
   pi.registerCommand("agents", {
     description: "Manage subagents: view live conversations, results and errors, message, resume, reply or stop",
     handler: (_args, ctx) => openAgents(ctx),
+  });
+
+  async function openRoleSettings(ctx: ExtensionContext): Promise<void> {
+    // The panel is a widget above the editor, so it needs Pi's TUI layout and raw input.
+    if (ctx.mode !== "tui") { ctx.ui.notify("Role settings need the TUI; edit ~/.pi/agent/cli-subagents.roles.json or .pi/cli-subagents.roles.json directly.", "error"); return; }
+    if (panelBusy) { ctx.ui.notify("Another panel is open; close it with Esc before editing roles.", "warning"); return; }
+    panelBusy = true;
+    const epoch = sessionEpoch;
+    const agentDir = getAgentDir(), cwd = ctx.cwd, trusted = ctx.isProjectTrusted();
+    let scope: Scope = trusted ? "project" : "user";
+    const disk = {} as Record<Scope, Record<string, Role>>, draft = {} as Record<Scope, Record<string, Role>>;
+    const dirty: Record<Scope, boolean> = { user: false, project: false };
+    let panel: RoleSettingsPanel | undefined;
+    let widget: RoleSettingsWidget | undefined;
+    // Unset while a host dialog owns the keyboard, so this listener never swallows a dialog's input.
+    let deliver: ((data: string) => void) | undefined;
+    const refresh = () => widget?.requestRender();
+    // Ctrl+C stays with Pi so the host can still interrupt while the panel is open.
+    const stopInput = ctx.ui.onTerminalInput((data) => {
+      if (!deliver || data === "\u0003") return undefined;
+      deliver(data); refresh(); return { consume: true };
+    });
+    ctx.ui.setWidget(ROLE_SETTINGS_KEY, (tui) => {
+      widget = tui;
+      return { render: (width: number) => panel?.render(width) ?? [], invalidate: () => {} };
+    });
+    const theme = ctx.ui.theme;
+    // Only CLIs this machine can launch are offered; one installed later appears after /reload.
+    discover(cwd);
+    const available = cliAvailability ?? detectClis(), clis = CLI_CHOICES.filter((choice) => available[choice]);
+    void catalogProbe?.then(() => refresh());
+    try {
+      try {
+        disk.user = readScope("user", agentDir, cwd);
+        disk.project = trusted ? readScope("project", agentDir, cwd) : {};
+      } catch (error) { ctx.ui.notify((error as Error).message, "error"); return; }
+      draft.user = structuredClone(disk.user); draft.project = structuredClone(disk.project);
+      // Reopening where the user left off: every action rebuilds the panel from current state.
+      let cursor: RoleSettingsCursor = {};
+      while (epoch === sessionEpoch) {
+        const preview = mergeRoles([scope === "user" ? draft.user : disk.user, scope === "project" ? draft.project : disk.project]);
+        const rows = roleRows(preview, draft.user, draft.project, scope);
+        const action = await new Promise<RoleSettingsAction | undefined>((resolve) => {
+          let settled = false;
+          const done = (result: RoleSettingsAction | undefined) => { if (!settled) { settled = true; deliver = undefined; resolve(result); } };
+          // A lower-screen pane: tall enough to be useful, never taller than a third of the terminal.
+          panel = new RoleSettingsPanel(rows, scope, trusted, dirty[scope], theme, done,
+            () => Math.max(6, Math.min(SETTINGS_MAX_ROWS + 4, Math.floor((widget?.terminal.rows ?? 24) / 3))),
+            (text) => ctx.ui.theme.getThinkingBorderColor(ctx.thinkingLevel ?? "off")(text),
+            () => ({ clis, ...(catalog ? { catalog } : {}), ...(catalog ? {} : { pending: true }) }), cursor);
+          deliver = (data) => panel?.handleInput(data);
+          refresh();
+        });
+        if (!action || epoch !== sessionEpoch) return;
+        const label = scope === "user" ? "personal" : "project";
+        try {
+          if (action.kind === "close") {
+            if (!dirty.user && !dirty.project) return;
+            const discard = await ctx.ui.confirm("Discard unsaved role changes?", `Unsaved edits in: ${["user", "project"].filter((item): item is Scope => dirty[item as Scope]).map((item) => item === "user" ? "personal" : "project").join(", ")}. The files on disk are unchanged.`);
+            if (epoch !== sessionEpoch) return;
+            if (discard) return;
+            continue;
+          }
+          // A different scope holds a different role set, so start it from the top.
+          if (action.kind === "scope") { scope = action.scope; cursor = {}; continue; }
+          if (action.kind === "save") {
+            const file = writeScope(scope, agentDir, cwd, draft[scope]);
+            disk[scope] = readScope(scope, agentDir, cwd); draft[scope] = structuredClone(disk[scope]); dirty[scope] = false;
+            ctx.ui.notify(`Saved ${file}`, "info");
+            continue;
+          }
+          if (action.kind === "set") {
+            cursor = { role: action.role, field: action.field };
+            const base = preview[action.role];
+            if (!base) throw new Error(`Unknown role: ${action.role}`);
+            draft[scope] = setField(draft[scope], action.role, base, action.field, action.value); dirty[scope] = true;
+            continue;
+          }
+          if (action.kind === "edit") {
+            // Kept even when the dialog is cancelled, so the same field stays under the cursor.
+            cursor = { role: action.role, field: action.field };
+            const base = preview[action.role];
+            if (!base) throw new Error(`Unknown role: ${action.role}`);
+            const field = action.field, role = draft[scope][action.role] ?? base;
+            const value = field === "instructions" || field === "description"
+              ? await ctx.ui.editor(`${field === "instructions" ? "Instructions" : "Description"} for ${action.role}`, fieldValue(role, field))
+              : await ctx.ui.input(`${FIELD_LABELS[field]} for ${action.role}`, field === "model" ? "Exact model name or alias" : "", undefined);
+            if (value === undefined || epoch !== sessionEpoch) continue;
+            draft[scope] = setField(draft[scope], action.role, base, field, value); dirty[scope] = true;
+            continue;
+          }
+          if (action.kind === "add") {
+            const name = await ctx.ui.input("New role name", "lowercase, e.g. tester");
+            if (name === undefined || epoch !== sessionEpoch) continue;
+            const clean = name.trim();
+            if (!/^[a-z][a-z0-9-]*$/.test(clean)) { ctx.ui.notify("Role names use lowercase letters, digits and dashes.", "error"); continue; }
+            if (preview[clean]) { ctx.ui.notify(`Role ${clean} already exists; select it and press enter to customize it here.`, "warning"); continue; }
+            draft[scope] = addRole(draft[scope], clean); dirty[scope] = true;
+            cursor = { role: clean };   // the new role needs its description and instructions written
+            continue;
+          }
+          if (action.kind === "remove") {
+            const confirmed = await ctx.ui.confirm(`Remove ${action.role} from ${label} roles?`, "Lower-scope definitions apply again. Other scopes are untouched.");
+            if (!confirmed || epoch !== sessionEpoch) continue;
+            draft[scope] = deleteRole(draft[scope], action.role); dirty[scope] = true; cursor = {};
+          }
+        } catch (error) { ctx.ui.notify((error as Error).message, "error"); }
+      }
+    } finally {
+      panel = undefined;
+      widget = undefined;
+      deliver = undefined;
+      stopInput();
+      ctx.ui.setWidget(ROLE_SETTINGS_KEY, undefined);
+      panelBusy = false;
+    }
+  }
+
+  pi.registerCommand("cli-agents-setting", {
+    description: "Configure subagent roles (CLI, model, thinking, effort, mode) in a pane above the editor",
+    handler: (_args, ctx) => openRoleSettings(ctx),
   });
   pi.registerShortcut(Key.ctrlAlt("a"), {
     description: "Open the subagent roster while the parent is working",

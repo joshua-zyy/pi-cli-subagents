@@ -7,6 +7,7 @@ import type { AdapterOptions, CliAdapter, InteractionReply } from "./cli-adapter
 import { childEnvironment, type Exit } from "./pi-process.js";
 import type { AgentSpec, NativeSession, Delivery } from "./types.js";
 
+// pi-lens-ignore: no-any-type
 type Json = Record<string, any>;
 const object = (value: unknown): value is Json => value !== null && typeof value === "object" && !Array.isArray(value);
 const uuid = /^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/;
@@ -88,7 +89,8 @@ export class ClaudeAdapter implements CliAdapter {
     delete (env as NodeJS.ProcessEnv).CLAUDE_CODE_RESUME_INTERRUPTED_TURN;
     this.child = spawn(spec.launch.command, [...spec.launch.args, "-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
       "--include-partial-messages", "--replay-user-messages", "--permission-prompt-tool", "stdio", "--await-initialize",
-      session ? "--resume" : "--session-id", this.session.sessionId, ...(spec.role.model ? ["--model", spec.role.model] : [])], {
+      session ? "--resume" : "--session-id", this.session.sessionId, ...(spec.role.model ? ["--model", spec.role.model] : []),
+      ...(spec.role.thinking ? ["--effort", spec.role.thinking] : []), ...(spec.role.mode ? ["--permission-mode", spec.role.mode] : [])], {
       cwd: spec.cwd, env, stdio: ["pipe", "pipe", "pipe"], shell: false, windowsHide: true, detached: process.platform !== "win32",
     });
     output.on("error", error => this.fail(error)); stderr.on("error", error => this.fail(error));

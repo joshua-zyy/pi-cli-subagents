@@ -46,6 +46,28 @@ test('Codex correlates fast events, keeps native IDs distinct, and resumes the e
   assert.ok(calls.every(c => !['thread/delete', 'thread/archive', 'thread/fork'].includes(c.method)));
 });
 
+test('Codex role mode is sent as one approval/sandbox preset and unset roles inherit theirs', async t => {
+  const role = { cli: 'codex', description: 'test', instructions: 'Do only the assigned work.', model: 'gpt-6-luna' };
+  const full = setup(t, { role: { ...role, mode: 'full-access' } });
+  const first = full.client(); const original = await first.c.ready(); await first.c.start('REMEMBER alpha');
+  await settled(first.events); await first.c.end();
+  const resumed = full.client(original); await resumed.c.ready(); await resumed.c.end();
+  const calls = full.requests();
+  const start = calls.find(c => c.method === 'thread/start').params, resume = calls.find(c => c.method === 'thread/resume').params;
+  assert.deepEqual([start.approvalPolicy, start.sandbox], ['never', 'danger-full-access']);
+  assert.deepEqual([resume.approvalPolicy, resume.sandbox], ['never', 'danger-full-access'], 'a continuation keeps the role posture');
+
+  const narrow = setup(t, { role: { ...role, mode: 'read-only' } });
+  const plain = narrow.client(); await plain.c.ready(); await plain.c.end();
+  const params = narrow.requests().find(c => c.method === 'thread/start').params;
+  assert.deepEqual([params.approvalPolicy, params.sandbox], ['on-request', 'read-only']);
+
+  const unset = setup(t, { role });
+  const inherited = unset.client(); await inherited.c.ready(); await inherited.c.end();
+  const defaults = unset.requests().find(c => c.method === 'thread/start').params;
+  assert.ok(!('approvalPolicy' in defaults) && !('sandbox' in defaults), 'no mode means the native configuration stays in charge');
+});
+
 test('Codex preflight reads only original metadata, submits no turn and reaps its process', async t => {
   const { client, requests, home } = setup(t);
   const first = client(); const original = await first.c.ready(); await first.c.end();

@@ -3,7 +3,17 @@ export type Delivery = "steer" | "followUp";
 export type Thinking = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 
 export type Cli = "pi" | "codex" | "claude";
-export type Effort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh";
+/**
+ * The Codex app-server defines effort as "a non-empty reasoning effort value advertised by the
+ * model", so this stays open: the model's own catalog decides, not a list this plugin maintains.
+ */
+export type Effort = string;
+
+/** Native Claude Code `--permission-mode` levels, as accepted by 2.1.283. */
+export type ClaudeMode = "acceptEdits" | "auto" | "manual" | "dontAsk" | "plan" | "bypassPermissions";
+/** Codex presets; each names one (approvalPolicy, sandbox) pair rather than two free axes. */
+export type CodexMode = "read-only" | "workspace-write" | "full-access";
+export type Mode = ClaudeMode | CodexMode;
 
 export interface Role {
   cli?: Cli;
@@ -13,6 +23,8 @@ export interface Role {
   provider?: string;
   model?: string;
   thinking?: Thinking;
+  /** Native permission posture for this role's launches; only Claude and Codex expose one. */
+  mode?: Mode;
 }
 
 // An argv launch, not a shell command. Injectable for protocol tests.

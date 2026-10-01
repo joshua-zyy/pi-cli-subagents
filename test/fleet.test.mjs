@@ -9,11 +9,11 @@ const agent=(id,over={})=>({id,role:'worker',task:`Task ${id}`,phase:'running',s
 const promptEditor={getText:()=>'',getExpandedText:()=>'',setText(){}};
 const dialog={select:()=>{},render:()=>[]};
 function harness() {
-  const state={agents:[],text:'',focused:null,actions:[],renders:0,calls:[],handler:null};
+  const state={agents:[],text:'',focused:null,actions:[],renders:0,calls:[],handler:null,busy:false};
   const tui={terminal:{columns:80},getFocusedComponent:()=>state.focused,requestRender(){state.renders++}};
   state.focused=promptEditor;
   const host={getEditorText:()=>state.text,onTerminalInput(fn){state.handler=fn;return()=>{state.handler=null}},setWidget(key,component,options){state.calls.push({key,component,options});if(component)state.widget=component(tui,theme)}};
-  const fleet=new FleetView(host,()=>state.agents,id=>state.actions.push(id));
+  const fleet=new FleetView(host,()=>state.agents,id=>state.actions.push(id),()=>state.busy);
   return {state,fleet,tui,input:s=>state.handler?.(s),render:(width=80)=>state.widget?.render(width).join('\n')};
 }
 
@@ -56,4 +56,17 @@ test('Kitty release keys do not move selection; finished children linger, widths
   assert.ok(h.state.widget.render(25).every(row=>visibleWidth(row)<=25));
   h.state.agents=[agent('a')];h.fleet.update();assert.match(h.render(),/main/);
   h.fleet.dispose();
+});
+
+test('a pane that owns the keyboard suspends the below-editor roster',()=>{
+  const h=harness();
+  h.state.agents=[agent('first')];h.fleet.update();
+  assert.deepEqual(h.input('\x1b[B'),{consume:true});
+  assert.match(h.render(),/● main/);
+  h.state.busy=true;
+  assert.equal(h.input('\x1b[B'),undefined,'a pane with the keyboard keeps the arrow keys');
+  assert.match(h.render(),/○ main/,'the roster steps back to its idle hint');
+  assert.deepEqual(h.input('\r'),undefined,'Enter must reach the pane, not open an agent');
+  h.state.busy=false;
+  assert.deepEqual(h.input('\x1b[B'),{consume:true},'the roster resumes once the pane closes');
 });

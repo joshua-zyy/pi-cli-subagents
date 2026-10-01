@@ -5,7 +5,8 @@ import { randomUUID } from "node:crypto";
 import path from "node:path";
 import type { AdapterOptions, CliAdapter, InteractionReply } from "./cli-adapter.js";
 import { childEnvironment, type Exit } from "./pi-process.js";
-import type { NativeSession, Delivery } from "./types.js";
+import { CODEX_MODE_PRESETS } from "./roles.js";
+import type { CodexMode, NativeSession, Delivery } from "./types.js";
 
 type RecordValue = Record<string, any>;
 const object = (value: unknown): value is RecordValue => value !== null && typeof value === "object" && !Array.isArray(value);
@@ -250,8 +251,10 @@ export class CodexAdapter implements CliAdapter {
     await this.request("initialize", { clientInfo: { name: "pi_cli_subagents", title: "Pi CLI Subagents", version: "0.1.0" } });
     await this.write({ method: "initialized", params: {} });
     const previous = this.options.session;
+    const preset = this.options.spec.role.mode ? CODEX_MODE_PRESETS[this.options.spec.role.mode as CodexMode] : undefined;
     const params = { model: this.options.spec.role.model, cwd: this.options.spec.cwd,
-      developerInstructions: `# Delegated role: ${this.options.spec.roleName}\n${this.options.spec.role.instructions}` };
+      developerInstructions: `# Delegated role: ${this.options.spec.roleName}\n${this.options.spec.role.instructions}`,
+      ...(preset ?? {}) };
     const result = previous ? await this.request("thread/resume", { ...params, threadId: (previous as Extract<NativeSession, { cli: "codex" }>).threadId }) :
       await this.request("thread/start", { ...params, allowProviderModelFallback: false });
     const session = this.checkedSession(result.thread);

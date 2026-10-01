@@ -48,6 +48,16 @@ const complete = (manager, id, phase = 'completed') => waitUntil('terminal state
   return state.phase === phase && !processAlive(state.workerPid) ? state : undefined;
 }, 15_000);
 
+test('a rejected role is refused before any instance or process is created', async t => {
+  const { cwd, manager } = setup(t);
+  for (const role of [{ description: 'test', instructions: 'test', mode: 'plan' },
+    { description: 'test', instructions: 'test', cli: 'codex', model: 'm', mode: 'bypassPermissions' },
+    { description: 'test', instructions: 'test', cli: 'claude', mode: 'workspace-write' }]) {
+    await assert.rejects(manager.spawn('worker', role, cwd, 'DO NOT START'), /mode/);
+  }
+  assert.equal(manager.list().length, 0, 'validation happens before the instance directory is created');
+});
+
 test('CLI cleanup checks distinguish the live original CLI from an unrelated reused PID', { timeout: 30_000 }, async t => {
   const { cwd, manager } = setup(t);
   const state = await manager.spawn('worker', defaultRoles.worker, cwd, 'HOLD identity');
@@ -222,7 +232,12 @@ test('running child inactive for 15 minutes produces one stable, non-terminal al
   const { cwd, manager } = setup(t);
   const start = await manager.spawn('worker', defaultRoles.worker, cwd, 'HOLD');
   const file = path.join(manager.root, start.id, 'state.json');
-  const state = readJson(file);
+  // spawn returns before the worker publishes its first state, so read it only once it exists:
+  // spreading an undefined state would drop the run ID the alert is keyed on.
+  const state = await waitUntil('running worker state', () => {
+    const published = readJson(file);
+    return published?.phase === 'running' ? published : undefined;
+  }, 10_000);
   fs.writeFileSync(file, JSON.stringify({ ...state, updatedAt: 1000 }));
   assert.equal(manager.reports(900999).length, 0);
   const alert = manager.reports(901000)[0];

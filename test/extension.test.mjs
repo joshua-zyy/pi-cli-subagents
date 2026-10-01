@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFileSync } from 'node:child_process';
-import extension from '../dist/index.js';
+import extension, { inheritParentModel } from '../dist/index.js';
 import { waitUntil, processAlive } from '../dist/storage.js';
 import { AgentManager } from '../dist/manager.js';
 
@@ -48,7 +48,7 @@ test('extension tools implement → separate review → resume same implementer;
   });
   extension(pi);
   assert.deepEqual([...tools.keys()], ['create_workspace', 'integrate_workspace', 'spawn_agent', 'send_input', 'list_agents', 'close_agent', 'list_pending_permissions', 'respond_to_permission']);
-  assert.ok(commands.has('agent-reply'));
+  assert.ok(commands.has('agent-reply')); assert.ok(commands.has('cli-agents-setting'));
   handlers.session_start({ type: 'session_start', reason: 'startup' }, ctx);
   const invoke = async (tool, params) => (await tools.get(tool).execute('id', params, undefined, undefined, ctx)).content[0].text;
   const spawn = JSON.parse((await invoke('spawn_agent', { role: 'worker', task: 'REMEMBER unique', cwd })).match(/\{.+\}/)[0]);
@@ -68,7 +68,7 @@ test('extension tools implement → separate review → resume same implementer;
   assert.equal(listed.agents[0].id, id);
   assert.equal(listed.agents[0].task, 'REMEMBER unique', 'the parent must see which task an instance is running');
   assert.equal(typeof listed.agents[0].startedAt, 'number', 'the parent needs a start time to reason about elapsed work');
-  assert.deepEqual(Object.keys(listed.roles), ['explore', 'worker', 'reviewer'], 'role discovery must include investigation');
+  assert.deepEqual(Object.keys(listed.roles), ['explore', 'worker', 'reviewer', 'oracle'], 'role discovery must include investigation and consultation');
   assert.deepEqual(listed.agents[0].history.map((run) => run.task), ['REMEMBER unique']);
   assert.equal(listed.agents[0].runCount, 1);
   const reviewer = JSON.parse((await invoke('spawn_agent', { role: 'reviewer', task: 'REVIEW: return issue for worker', cwd })).match(/\{.+\}/)[0]);
@@ -117,4 +117,24 @@ test('extension tools implement → separate review → resume same implementer;
   assert.equal(manager.get(managed.id).sessionId, managed.sessionId);
   const syncedView = JSON.parse(await invoke('list_agents', { id: managed.id })).agents[0];
   assert.equal(syncedView.workspaceBaseline.commit, manager.workspaces.get(ws.id).baseCommit);
+});
+
+test('the role editor is registered but stays out of non-TUI modes', async () => {
+  const commands = new Map(), notifications = [];
+  extension({ on() {}, registerTool() {}, registerCommand: (name, command) => commands.set(name, command), registerShortcut() {}, sendMessage() {} });
+  const ctx = { mode: 'rpc', cwd: process.cwd(), isProjectTrusted: () => true, ui: { notify: (message, level) => notifications.push([message, level]) } };
+  await commands.get('cli-agents-setting').handler('', ctx);
+  assert.deepEqual(notifications.map(([, level]) => level), ['error']);
+  assert.match(notifications[0][0], /TUI/);
+});
+
+test('a Pi role without an explicit model follows the parent session', () => {
+  const role = { description: 'do work', instructions: 'Only the assigned work' };
+  const model = { id: 'claude-opus-5[1M]', provider: 'anthropic' };
+  assert.deepEqual(inheritParentModel(role, { model, thinkingLevel: 'max' }), { ...role, provider: 'anthropic', model: 'claude-opus-5[1M]', thinking: 'max' });
+  assert.deepEqual(inheritParentModel({ ...role, model: 'chosen', thinking: 'off' }, { model, thinkingLevel: 'max' }),
+    { ...role, model: 'chosen', provider: 'anthropic', thinking: 'off' }, 'an explicit field is never overridden');
+  assert.deepEqual(inheritParentModel(role, { model: undefined, thinkingLevel: undefined }), role, 'no parent choice leaves the role untouched');
+  assert.deepEqual(inheritParentModel({ ...role, cli: 'codex', model: 'gpt-6-luna' }, { model, thinkingLevel: 'max' }),
+    { ...role, cli: 'codex', model: 'gpt-6-luna' }, 'Codex and Claude roles are never rewritten');
 });

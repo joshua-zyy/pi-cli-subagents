@@ -31,12 +31,23 @@ test('Claude native launch resolution fails before registering an incomplete ins
     assert.deepEqual(claudeLaunch(),{command:path.join(cwd,'claude.exe'),args:[]});
   } finally { if(original===undefined)delete process.env.PATH;else process.env.PATH=original; }
 });
-test('Claude roles inherit native model but reject Pi provider/thinking and Codex effort',t=>{
+test('Claude roles take a native --effort level and reject Pi provider and Codex effort',t=>{
   const {cwd}=setup(t),file=path.join(cwd,'cli-subagents.roles.json');fs.writeFileSync(file,JSON.stringify({claude:role}));
   assert.deepEqual(loadRoles(cwd,cwd,false).claude,role);
-  for(const extra of [{provider:'pi'},{thinking:'high'},{effort:'high'}]){
+  fs.writeFileSync(file,JSON.stringify({claude:{...role,thinking:'max'}}));
+  assert.deepEqual(loadRoles(cwd,cwd,false).claude,{...role,thinking:'max'});
+  fs.writeFileSync(file,JSON.stringify({claude:{...role,mode:'bypassPermissions'}}));
+  assert.deepEqual(loadRoles(cwd,cwd,false).claude,{...role,mode:'bypassPermissions'});
+  for(const extra of [{provider:'pi'},{thinking:'off'},{thinking:'minimal'},{effort:'high'},{mode:'full-access'},{mode:'bypass'}]){
     fs.writeFileSync(file,JSON.stringify({claude:{...role,...extra}}));assert.throws(()=>loadRoles(cwd,cwd,false),/Claude|cli: codex|effort/);
   }
+});
+test('Claude role thinking and mode are passed to the native CLI as --effort and --permission-mode', {timeout:25000}, async t=>{
+  const {m,cwd,home,done}=setup(t);
+  const child=await m.spawn('claude',{...role,model:'opus',thinking:'max',mode:'plan'},cwd,'DONE');await done(child.id);
+  const launched=JSON.parse(fs.readFileSync(path.join(home,'launches.jsonl'),'utf8').trim().split('\n')[0]).args;
+  assert.equal(launched[launched.indexOf('--model')+1],'opus');assert.equal(launched[launched.indexOf('--effort')+1],'max');
+  assert.equal(launched[launched.indexOf('--permission-mode')+1],'plan');
 });
 test('Claude manager reopens the same native session and retains prior home/model selection', {timeout:25000}, async t=>{
   const {m,cwd,home,parent,launch,options,done}=setup(t);
