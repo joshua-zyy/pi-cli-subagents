@@ -10,6 +10,26 @@ export interface UiTheme {
 
 export const SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
+/** Below this the frame would leave no room for content, so a pane renders unframed. */
+export const PANE_FRAME_MIN_WIDTH = 12;
+/** Rows (top and bottom rule) and columns (two borders plus their padding) the frame costs. */
+export const PANE_FRAME_ROWS = 2;
+export const PANE_FRAME_COLS = 4;
+
+/**
+ * Draw Pi's editor border around a pane above the editor. Every pane shares this one definition,
+ * so the roster cannot drift from the role editor it is meant to match.
+ */
+export function framePane(lines: string[], width: number, paint: (text: string) => string): string[] {
+  const inner = Math.max(1, width - PANE_FRAME_COLS);
+  const rule = (left: string, right: string) => paint(`${left}${"─".repeat(Math.max(0, width - 2))}${right}`);
+  const body = lines.map((line) => {
+    const clipped = truncateToWidth(line, inner);
+    return `${paint("│")} ${clipped}${" ".repeat(Math.max(0, inner - visibleWidth(clipped)))} ${paint("│")}`;
+  });
+  return [rule("╭", "╮"), ...body, rule("╰", "╯")];
+}
+
 export const PHASE_LABEL: Record<Phase, string> = {
   starting: "Starting", running: "Running", waiting: "Waiting", stopping: "Stopping",
   completed: "Completed", failed: "Failed", stopped: "Stopped", unreachable: "Unreachable",

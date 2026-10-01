@@ -1,6 +1,6 @@
 import { matchesKey, stripTerminalSequences, truncateToWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import type { AgentView } from "../types.js";
-import { canMessage, canSteer, formatElapsed, isActive, isTerminal, oneLine, phaseColor, phaseIcon, phaseLabel, rightAlign, shortId, viewElapsed, SPINNER, type UiColor, type UiTheme } from "./format.js";
+import { canMessage, canSteer, formatElapsed, framePane, isActive, isTerminal, oneLine, phaseColor, phaseIcon, phaseLabel, rightAlign, shortId, viewElapsed, PANE_FRAME_COLS, PANE_FRAME_MIN_WIDTH, PANE_FRAME_ROWS, SPINNER, type UiColor, type UiTheme } from "./format.js";
 
 export type PanelAction =
   | { kind: "view"; id: string }
@@ -11,38 +11,60 @@ export type PanelAction =
 export const PANEL_MAX_ROWS = 8;
 const RESULT_VIEW_LINES = 8;
 const TASK_VIEW_LINES = 4;
+/** A short pane keeps only the head of the task, so the result keeps its own room. */
+const COMPACT_TASK_LINES = 2;
 const QUESTION_VIEW_LINES = 4;
 /** Reserve space for scroll indicators, questions and keyboard hints below the result. */
 const PANEL_RESERVED_LINES = 8;
+/** Under this the detail view drops its metadata block, so the task and the result stay visible. */
+const DETAIL_FULL_ROWS = 30;
+const DETAIL_MIN_ROWS = 12;
+const DETAIL_SHARE = 0.7;
+
+/**
+ * How many rows the pane above the editor may take. The roster stays as compact as the role editor;
+ * the detail view carries a result to read, so it takes a share of the terminal instead of a block.
+ */
+export function paneRows(terminalRows: number, mode: "list" | "detail"): number {
+  const rows = Number.isFinite(terminalRows) && terminalRows > 0 ? Math.floor(terminalRows) : 24;
+  const wanted = mode === "detail"
+    ? Math.max(DETAIL_MIN_ROWS, Math.floor(rows * DETAIL_SHARE))
+    : Math.max(6, Math.min(PANEL_MAX_ROWS + 4, Math.floor(rows / 3)));
+  // Never take so much that the input box and its status line disappear.
+  return Math.min(rows - 4, wanted);
+}
 
 const isText = (value: string | undefined): value is string => typeof value === "string" && value.trim().length > 0;
 
 /**
- * Snapshot-based /agents selector.
- * It returns actions; the command handler performs send/close/reply after the panel closes.
+ * Snapshot-based /agents roster, rendered as a pane above the editor like the role editor.
+ * It returns actions; the command handler performs send/close/reply after the pane closes.
  */
 export class AgentsPanel {
   private readonly agents: AgentView[];
   private readonly now: number;
   private readonly maxRows: number;
   private readonly rowLimit: () => number;
+  private readonly frameColor?: (text: string) => string;
   private view: "list" | "detail" = "list";
   private index = 0;
   private scroll = 0;
   private bodyLines = 0;
   private pageLines = RESULT_VIEW_LINES;
+  private framed = false;
   private settled = false;
 
   constructor(
     agents: AgentView[],
     private readonly theme: UiTheme,
     private readonly done: (action: PanelAction | undefined) => void,
-    options: { now?: number; maxRows?: number; rows?: number | (() => number) } = {},
+    options: { now?: number; maxRows?: number; rows?: number | (() => number); frameColor?: (text: string) => string } = {},
   ) {
     this.agents = [...(Array.isArray(agents) ? agents : [])]
       .sort((a, b) => (a.startedAt ?? a.updatedAt) - (b.startedAt ?? b.updatedAt));
     this.now = options.now ?? Date.now();
     this.maxRows = options.maxRows ?? PANEL_MAX_ROWS;
+    this.frameColor = options.frameColor;
     const rows = options.rows;
     this.rowLimit = typeof rows === "function" ? rows : () => rows ?? 0;
   }
@@ -50,6 +72,13 @@ export class AgentsPanel {
   private get rows(): number {
     const rows = this.rowLimit();
     return Number.isFinite(rows) && rows > 0 ? Math.floor(rows) : 0;
+  }
+
+  /** Rows left for content once the frame is drawn; the pane height itself when unbounded. */
+  private get room(): number {
+    const rows = this.rows;
+    if (rows <= 0) return 0;
+    return this.framed ? Math.max(0, rows - PANE_FRAME_ROWS) : rows;
   }
 
   get mode(): "list" | "detail" { return this.view; }
@@ -82,12 +111,16 @@ export class AgentsPanel {
   }
 
   render(width: number): string[] {
-    let lines = this.view === "list" ? this.renderList(width) : this.renderDetail(width);
-    const rows = this.rows;
-    if (rows > 0 && lines.length > rows) {
-      lines = [...lines.slice(0, Math.max(0, rows - 2)), ...(rows > 1 ? [this.theme.fg("dim", "... (v opens the conversation)")] : []), lines[this.view === "list" ? 1 : lines.length - 1]];
+    // The frame takes its columns from the content, so the body is laid out inside it.
+    this.framed = width >= PANE_FRAME_MIN_WIDTH;
+    const inner = this.framed ? Math.max(1, width - PANE_FRAME_COLS) : width;
+    let lines = this.view === "list" ? this.renderList(inner) : this.renderDetail(inner);
+    const room = this.room;
+    if (room > 0 && lines.length > room) {
+      lines = [...lines.slice(0, Math.max(0, room - 2)), ...(room > 1 ? [this.theme.fg("dim", "…")] : []), lines[lines.length - 1]];
     }
-    return width > 0 ? lines.map((line) => truncateToWidth(line, width)) : lines;
+    if (!this.framed) return width > 0 ? lines.map((line) => truncateToWidth(line, width)) : lines;
+    return framePane(lines, width, this.frameColor ?? ((text: string) => this.theme.fg("dim", text)));
   }
 
   private finish(action: PanelAction | undefined): void {
@@ -125,51 +158,59 @@ export class AgentsPanel {
     }
     lines.push(this.hint([["↑↓", "select"], ["enter/v", "conversation"], ["i", "details"], ["esc", "close"]]));
     const selected = Math.min(this.index, this.agents.length - 1);
-    const visible = Math.min(this.maxRows, this.agents.length, this.rows > 0 ? Math.max(1, this.rows - 4) : this.maxRows);
+    const room = this.room;
+    // Title and hints are fixed; the two "more" indicators give way to agents when the pane is short.
+    const indicators = room === 0 || room - 2 >= 4;
+    const visible = Math.min(this.maxRows, this.agents.length,
+      room > 0 ? Math.max(1, room - 2 - (indicators ? 2 : 0)) : this.maxRows);
     const start = selected < visible ? 0 : selected - visible + 1;
     const hiddenAbove = start;
-    if (hiddenAbove > 0) lines.push(rightAlign("", this.theme.fg("dim", `↑ ${hiddenAbove} more`), width));
+    if (hiddenAbove > 0 && indicators) lines.push(rightAlign("", this.theme.fg("dim", `↑ ${hiddenAbove} more`), width));
     for (let index = start; index < start + visible; index++) lines.push(this.agentRow(index, selected, width));
     const hiddenBelow = this.agents.length - start - visible;
-    if (hiddenBelow > 0) lines.push(rightAlign("", this.theme.fg("dim", `↓ ${hiddenBelow} more`), width));
+    if (hiddenBelow > 0 && indicators) lines.push(rightAlign("", this.theme.fg("dim", `↓ ${hiddenBelow} more`), width));
     return lines;
   }
 
   private agentRow(index: number, selected: number, width: number): string {
     const agent = this.agents[index];
     const current = index === selected;
-    const bullet = current ? this.theme.fg("accent", "●") : this.theme.fg("dim", "○");
+    // The cursor matches the role editor's, so the two panes read the same way.
+    const cursor = current ? this.theme.fg("accent", "›") : " ";
     const icon = isActive(agent.phase) ? SPINNER[0] : phaseIcon(agent.phase);
     const role = current ? this.theme.bold(this.theme.fg("text", agent.role)) : this.theme.fg("muted", agent.role);
     const task = oneLine(agent.task, 80) || "(No task summary)";
     const stats = `${phaseLabel(agent.phase)} · ${formatElapsed(viewElapsed(agent, this.now))}`;
-    const left = `  ${bullet} ${this.theme.fg(phaseColor(agent.phase), icon)} ${role} ${this.theme.fg("dim", shortId(agent.id))}  ${current ? this.theme.fg("text", task) : this.theme.fg("dim", task)}`;
+    const left = `  ${cursor} ${this.theme.fg(phaseColor(agent.phase), icon)} ${role} ${this.theme.fg("dim", shortId(agent.id))}  ${current ? this.theme.fg("text", task) : this.theme.fg("dim", task)}`;
     return rightAlign(left, current ? this.theme.fg("text", stats) : this.theme.fg("dim", stats), width);
   }
 
   private renderDetail(width: number): string[] {
     const agent = this.agents[this.index];
     if (!agent) { this.view = "list"; return this.renderList(width); }
-    const lines = [
-      this.theme.bold(this.theme.fg("accent", `Subagent ${agent.role} · ${phaseLabel(agent.phase)}`)),
-      this.field("ID", agent.id),
-      this.field("Directory", agent.cwd),
-      this.field("Elapsed", formatElapsed(viewElapsed(agent, this.now))),
-      this.field("Session", agent.sessionId ?? "None"),
-      this.field("Log", agent.logFile),
-      "",
-      this.section("Task"),
-      ...this.wrapBody(isText(agent.task) ? agent.task : "(No task summary)", width, TASK_VIEW_LINES),
-      "",
-      this.section("Latest activity"),
-      ...this.wrapBody(isText(agent.lastActivity) ? oneLine(agent.lastActivity, 200) : "None", width, 1),
-      "",
-    ];
+    const room = this.room;
+    // A short pane drops the metadata block first: the task, the question and the result matter
+    // more, and `v` still shows the full record next to the transcript.
+    const compact = room > 0 && room < DETAIL_FULL_ROWS;
+    const title = this.theme.bold(this.theme.fg("accent", `Subagent ${agent.role} · ${phaseLabel(agent.phase)}`));
+    const lines = compact
+      ? [title, this.field("ID", agent.id), ""]
+      : [title,
+        this.field("ID", agent.id),
+        this.field("Directory", agent.cwd),
+        this.field("Elapsed", formatElapsed(viewElapsed(agent, this.now))),
+        this.field("Session", agent.sessionId ?? "None"),
+        this.field("Log", agent.logFile),
+        ""];
+    lines.push(this.section("Task"));
+    lines.push(...this.wrapBody(isText(agent.task) ? agent.task : "(No task summary)", width, compact ? COMPACT_TASK_LINES : TASK_VIEW_LINES));
+    lines.push("", this.section("Latest activity"));
+    lines.push(...this.wrapBody(isText(agent.lastActivity) ? oneLine(agent.lastActivity, 200) : "None", width, 1), "");
 
     const question = agent.phase === "waiting" ? agent.questions?.[0] : undefined;
-    if (question && this.rows > 0 && this.rows < 26) {
+    if (question && room > 0 && room < DETAIL_FULL_ROWS) {
       return [lines[0], this.field("ID", agent.id), this.section("Waiting for a response"),
-        ...this.wrapBody(question.title, width, Math.max(1, this.rows - 6)),
+        ...this.wrapBody(question.title, width, Math.max(1, room - 6)),
         this.theme.fg("dim", `  /agent-reply ${agent.id} ${question.id}`),
         this.hint([["r", "reply"], ["v", "conversation"], ["esc", "back"], ["q", "close"]])];
     }
@@ -183,7 +224,7 @@ export class AgentsPanel {
     const source = [error, isText(agent.text) ? agent.text : undefined].filter(Boolean).join("\n\n") || undefined;
     const color: UiColor = error === undefined ? "text" : "error";
     const body = source === undefined ? [] : this.wrapBody(source, width, 10_000);
-    const page = this.rows > 0 ? Math.max(2, Math.min(RESULT_VIEW_LINES, this.rows - lines.length - PANEL_RESERVED_LINES)) : RESULT_VIEW_LINES;
+    const page = room > 0 ? Math.max(2, Math.min(RESULT_VIEW_LINES, room - lines.length - PANEL_RESERVED_LINES)) : RESULT_VIEW_LINES;
     this.bodyLines = body.length;
     this.pageLines = page;
     lines.push(this.section(error === undefined ? "Result" : "Error"));

@@ -1,6 +1,6 @@
-import { matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
 import { CUSTOM_CHOICE, FIELD_LABELS, cliDetail, fieldChoices, fieldIsChoice, fieldValue, modeDetail, roleSummary, suppressesApprovals, visibleFields, type ChoiceOptions, type EditableField, type RoleRow, type Scope } from "../role-settings.js";
-import { oneLine, type UiColor, type UiTheme } from "./format.js";
+import { framePane, PANE_FRAME_MIN_WIDTH, PANE_FRAME_ROWS, oneLine, type UiColor, type UiTheme } from "./format.js";
 
 export type RoleSettingsAction =
   | { kind: "close" }
@@ -12,8 +12,6 @@ export type RoleSettingsAction =
   | { kind: "save" };
 
 export const SETTINGS_MAX_ROWS = 10;
-/** Below this the frame would leave no room for content, so the panel renders unframed. */
-const FRAME_MIN_WIDTH = 12;
 const SCOPE_LABEL: Record<Scope, string> = { user: "personal", project: "project" };
 
 /**
@@ -136,24 +134,12 @@ export class RoleSettingsPanel {
   render(width: number): string[] {
     const lines = this.view === "list" ? this.renderList() : this.view === "fields" ? this.renderFields() : this.renderChoices();
     const available = this.availableRows;
-    const framed = width >= FRAME_MIN_WIDTH;
+    const framed = width >= PANE_FRAME_MIN_WIDTH;
     // The frame costs two rows, so those are reserved before the content is bounded.
-    const room = framed && available > 0 ? available - 2 : available;
+    const room = framed && available > 0 ? available - PANE_FRAME_ROWS : available;
     const bounded = room > 0 && lines.length > room ? [...lines.slice(0, Math.max(0, room - 2)), this.theme.fg("dim", "…"), lines[lines.length - 1]] : lines;
     if (!framed) return width > 0 ? bounded.map((line) => truncateToWidth(line, width)) : bounded;
-    return this.frame(bounded, width);
-  }
-
-  /** Pi's own editor border, so the panel reads as part of the input area rather than a modal. */
-  private frame(lines: string[], width: number): string[] {
-    const paint = this.frameColor ?? ((text: string) => this.theme.fg("dim", text));
-    const inner = Math.max(1, width - 4);
-    const rule = (left: string, right: string) => paint(`${left}${"─".repeat(Math.max(0, width - 2))}${right}`);
-    const body = lines.map((line) => {
-      const clipped = truncateToWidth(line, inner);
-      return `${paint("│")} ${clipped}${" ".repeat(Math.max(0, inner - visibleWidth(clipped)))} ${paint("│")}`;
-    });
-    return [rule("╭", "╮"), ...body, rule("╰", "╯")];
+    return framePane(bounded, width, this.frameColor ?? ((text: string) => this.theme.fg("dim", text)));
   }
 
   private get availableRows(): number {

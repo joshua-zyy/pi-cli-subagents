@@ -7,7 +7,7 @@ import { deliverReports } from "./notifier.js";
 import { CLI_CHOICES, loadRoles, mergeRoles } from "./roles.js";
 import { detectClis, probeCatalog, type ModelCatalog } from "./cli-discovery.js";
 import { addRole, deleteRole, FIELD_LABELS, fieldValue, readScope, roleRows, setField, writeScope, type Scope } from "./role-settings.js";
-import { AgentsPanel, type PanelAction } from "./ui/panel.js";
+import { AgentsPanel, paneRows, type PanelAction } from "./ui/panel.js";
 import { RoleSettingsPanel, SETTINGS_MAX_ROWS, type RoleSettingsAction, type RoleSettingsCursor } from "./ui/role-settings.js";
 import { canSteer, isTerminal, oneLine } from "./ui/format.js";
 import { StatusWidget } from "./ui/status.js";
@@ -278,7 +278,9 @@ export default function extension(pi: ExtensionAPI): void {
   let panelBusy = false;
   /** Widget slot for the role editor, rendered by Pi in the area just above the editor. */
   const ROLE_SETTINGS_KEY = "cli-subagents-role-settings";
-  type RoleSettingsWidget = { terminal: { rows: number }; requestRender(): void };
+  /** The roster uses the same slot, so both panes sit above the editor instead of over it. */
+  const AGENTS_PANEL_KEY = "cli-subagents-agents";
+  type PaneWidget = { terminal: { rows: number }; requestRender(): void };
   /** Discovered once per session and shared by every panel, so the pickers are ready when it opens. */
   let catalog: ModelCatalog | undefined;
   let catalogProbe: Promise<void> | undefined;
@@ -288,13 +290,30 @@ export default function extension(pi: ExtensionAPI): void {
     catalogProbe ??= probeCatalog({ pi: launch, cwd, available: cliAvailability }).then((found) => { catalog = found; });
   };
   async function openAgents(ctx: ExtensionContext, selectedId?: string): Promise<void> {
-      // custom() returns undefined in RPC mode; terminal panels are TUI-only.
+      // The roster is a widget above the editor, so it needs Pi's TUI layout and raw input.
       if (ctx.mode !== "tui") { ctx.ui.notify("The panel requires a TUI; use list_agents / send_input / close_agent or /agent-reply instead.", "error"); return; }
       // Keep one panel/action loop per extension instance so concurrent commands cannot compete for input.
       if (panelBusy) { ctx.ui.notify("The agent panel is already open or processing an action; wait or close it with Esc.", "warning"); return; }
       panelBusy = true;
       const epoch = sessionEpoch;
       const fromFleet = selectedId !== undefined;
+      let panel: AgentsPanel | undefined;
+      let widget: PaneWidget | undefined;
+      // Unset while a host dialog or the conversation overlay owns the keyboard, so this listener
+      // never swallows a dialog's input.
+      let deliver: ((data: string) => void) | undefined;
+      const refresh = () => widget?.requestRender();
+      // Ctrl+C stays with Pi so the host can still interrupt while the roster is open.
+      const stopInput = ctx.ui.onTerminalInput((data) => {
+        if (!deliver || data === "\u0003") return undefined;
+        deliver(data); refresh(); return { consume: true };
+      });
+      ctx.ui.setWidget(AGENTS_PANEL_KEY, (tui) => {
+        widget = tui;
+        return { render: (width: number) => panel?.render(width) ?? [], invalidate: () => {} };
+      });
+      const theme = ctx.ui.theme;
+      const frameColor = (text: string) => ctx.ui.theme.getThinkingBorderColor(ctx.thinkingLevel ?? "off")(text);
       try {
         const manager = parentManager(ctx, launch);
         while (epoch === sessionEpoch) {
@@ -305,11 +324,15 @@ export default function extension(pi: ExtensionAPI): void {
             try { agents = manager.list(); }
             catch (error) { ctx.ui.notify((error as Error).message, "error"); return; }
             if (!agents.length) { ctx.ui.notify("No subagents in this session.", "info"); return; }
-            // Close the overlay before opening action dialogs; the next loop restores the list.
-            action = await ctx.ui.custom<PanelAction | undefined>((tui, theme, _kb, done) => {
+            action = await new Promise<PanelAction | undefined>((resolve) => {
+              let settled = false;
+              const done = (result: PanelAction | undefined) => { if (!settled) { settled = true; deliver = undefined; resolve(result); } };
+              // Esc during shutdown must still release this loop.
               dismissPanel = () => done(undefined);
-              return new AgentsPanel(agents, theme, done, { rows: () => Math.max(1, tui.terminal.rows - 2) });
-            }, { overlay: true, overlayOptions: { width: "96%", maxHeight: "100%", margin: 1 } });
+              panel = new AgentsPanel(agents, theme, done, { rows: () => paneRows(widget?.terminal.rows ?? 24, panel?.mode ?? "list"), frameColor });
+              deliver = (data) => panel?.handleInput(data);
+              refresh();
+            });
             dismissPanel = undefined;
           }
           if (!action || epoch !== sessionEpoch) return;
@@ -366,7 +389,12 @@ export default function extension(pi: ExtensionAPI): void {
           } catch (error) { ctx.ui.notify((error as Error).message, "error"); if (fromFleet) return; }
         }
       } catch (error) { ctx.ui.notify((error as Error).message, "error"); }
-      finally { dismissPanel = undefined; panelBusy = false; }
+      finally {
+        panel = undefined; widget = undefined; deliver = undefined;
+        stopInput();
+        ctx.ui.setWidget(AGENTS_PANEL_KEY, undefined);
+        dismissPanel = undefined; panelBusy = false;
+      }
   }
   pi.registerCommand("agents", {
     description: "Manage subagents: view live conversations, results and errors, message, resume, reply or stop",
@@ -384,7 +412,7 @@ export default function extension(pi: ExtensionAPI): void {
     const disk = {} as Record<Scope, Record<string, Role>>, draft = {} as Record<Scope, Record<string, Role>>;
     const dirty: Record<Scope, boolean> = { user: false, project: false };
     let panel: RoleSettingsPanel | undefined;
-    let widget: RoleSettingsWidget | undefined;
+    let widget: PaneWidget | undefined;
     // Unset while a host dialog owns the keyboard, so this listener never swallows a dialog's input.
     let deliver: ((data: string) => void) | undefined;
     const refresh = () => widget?.requestRender();

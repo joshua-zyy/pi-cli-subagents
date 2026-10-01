@@ -1,38 +1,59 @@
-// Snapshot panel rendering, navigation and action routing without a manager.
+// Snapshot pane rendering, navigation and action routing without a manager.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { visibleWidth } from '@earendil-works/pi-tui';
-import { AgentsPanel, PANEL_MAX_ROWS } from '../dist/ui/panel.js';
+import { AgentsPanel, PANEL_MAX_ROWS, paneRows } from '../dist/ui/panel.js';
 const theme = { fg: (_, text) => text, bold: text => text };
 const keys = { up: '\u001b[A', down: '\u001b[B', left: '\u001b[D', enter: '\r', escape: '\u001b' };
 const view = (over = {}) => ({
   id: 'a1', runId: 'r1', phase: 'running', workerPid: 1, accepted: true, questions: [],
   startedAt: 1000, updatedAt: 1000, role: 'worker', cwd: 'D:/work', task: 'Implement widget', logFile: 'events.jsonl', ...over,
 });
+/** The roster is a framed pane; these tests read its body without the border and its padding. */
+const body = (rows) => rows.slice(1, -1).map((row) => row.slice(2).replace(/ +│$/, ''));
 function panel(agents, options = {}) {
   const actions = [];
   const instance = new AgentsPanel(agents, theme, action => actions.push(action), { now: 11000, ...options });
-  return { instance, actions, render: (width = 100) => instance.render(width) };
+  return { instance, actions, framed: (width = 100) => instance.render(width), render: (width = 100) => body(instance.render(width)) };
 }
 const text = rows => rows.join('\n');
+
+test('the pane is framed like the role editor, in every view', () => {
+  const p = panel([view()]);
+  for (const rows of [p.framed(100), p.framed(40)]) {
+    assert.match(rows[0], /^╭─+╮$/); assert.match(rows.at(-1), /^╰─+╯$/);
+    for (const row of rows) assert.ok(visibleWidth(row) === visibleWidth(rows[0]), 'every line is padded to the frame');
+  }
+  // Painted with the host's editor border, so it reads as part of the input area.
+  const painted = new AgentsPanel([view()], theme, () => {}, { frameColor: text => `<${text}>` }).render(40);
+  assert.match(painted[0], /^<╭─+╮>$/); assert.match(painted[1], /^<│> /);
+});
+
+test('pane height stays compact for the roster and grows for the result it has to show', () => {
+  assert.equal(paneRows(120, 'list'), PANEL_MAX_ROWS + 4, 'the roster is capped like the role editor');
+  assert.equal(paneRows(35, 'list'), 11, 'a third of a 35-row terminal');
+  assert.ok(paneRows(35, 'detail') > paneRows(35, 'list'), 'the detail view needs room for a result');
+  assert.ok(paneRows(8, 'list') > 0 && paneRows(8, 'detail') > 0, 'a short terminal still gets a pane');
+  assert.equal(paneRows(Number.NaN, 'list'), paneRows(24, 'list'));
+});
 
 test('list shows counts, hints, selection and right-aligned statistics', () => {
   const { render } = panel([view(), view({ id: 'a2', phase: 'completed', task: 'Review changes', updatedAt: 5000 })]);
   const rows = render(100);
   assert.match(rows[0], /^Subagents \(2\)$/); assert.match(rows[1], /↑↓ select · enter\/v conversation · i details · esc close/);
-  assert.match(rows[2], /^ {2}● ⠋ worker a1 {2}Implement widget {2,}Running · 10\.0s$/);
-  assert.match(rows[3], /^ {2}○ ✓ worker a2 {2}Review changes {2,}Completed · 4\.0s$/);
-  for (const row of rows) assert.ok(visibleWidth(row) <= 100);
+  assert.match(rows[2], /^ {2}› ⠋ worker a1 {2}Implement widget {2,}Running · 10\.0s$/);
+  assert.match(rows[3], /^ {4}✓ worker a2 {2}Review changes {2,}Completed · 4\.0s$/);
+  for (const row of panel([view()]).framed(100)) assert.ok(visibleWidth(row) <= 100);
   assert.match(text(panel([view({ task: undefined })]).render()), /No task summary/);
 });
 test('same-role instances stay distinguishable when the task summary no longer fits', () => {
   const rows = panel([
     view({ id: '3f2a9c1b-1111-4111-8111-111111111111', task: 'Add multiplication to the calculator module' }),
     view({ id: 'b7e4d2a0-2222-4222-8222-222222222222', task: 'Add addition to the calculator module' }),
-  ]).render(40);
+  ]).render(44);
   assert.match(rows[2], /worker 3f2a9c1b/); assert.match(rows[3], /worker b7e4d2a0/);
   assert.notEqual(rows[2], rows[3], 'identical roles must not render identical rows');
-  for (const row of rows) assert.ok(visibleWidth(row) <= 40);
+  for (const row of rows) assert.ok(visibleWidth(row) <= 44);
   // The full identifier stays available where there is room to act on it.
   const detail = panel([view({ id: '3f2a9c1b-1111-4111-8111-111111111111' })]);
   detail.instance.handleInput('i');
@@ -47,7 +68,7 @@ test('arrow navigation clamps selection and keeps it in the visible window', () 
   instance.handleInput(keys.up); assert.equal(instance.selection, 0);
   for (let i = 0; i < 3; i++) instance.handleInput(keys.down);
   assert.equal(instance.selection, 2); const rows = render(); assert.match(text(rows), /↑ 1 more/);
-  assert.ok(!text(rows).includes('↓ 1 more')); assert.ok(rows.slice(2).some(row => row.includes('●'))); assert.equal(PANEL_MAX_ROWS, 8);
+  assert.ok(!text(rows).includes('↓ 1 more')); assert.ok(rows.slice(2).some(row => row.includes('›'))); assert.equal(PANEL_MAX_ROWS, 8);
 });
 test('i opens details including task, result, log and session; Esc navigates back', () => {
   const { instance, actions, render } = panel([view({ sessionId: 'sid-1', text: 'OK complete', lastActivity: 'tool_execution_end: bash' })]);
@@ -119,11 +140,13 @@ test('summary resizes without hiding action hints and preserves errors alongside
   const p = panel([view({ phase: 'waiting', text: 'partial result', error: 'runtime failure', task: 'long task '.repeat(80), questions: [{ id: 'q', method: 'confirm', title: 'long question '.repeat(80) }] })], { rows: () => height });
   p.instance.handleInput('i');
   assert.match(text(p.render()), /runtime failure/);
-  for (height of [20, 12, 6]) {
+  // The pane takes rows of its own for the frame, so the body is bounded by the height minus two.
+  for (const [size, roomy] of [[24, true], [16, true], [8, false]]) {
+    height = size;
     const rows = p.render(70);
-    assert.ok(rows.length <= height); assert.match(text(rows), /v conversation/);
+    assert.ok(rows.length + 2 <= size, `Used ${rows.length + 2} of ${size} rows`);
+    assert.match(text(rows), /v conversation/);
     assert.match(text(rows), /q close/);
-    assert.match(text(rows), /long question/);
-    assert.match(text(rows), /\/agent-reply/);
+    if (roomy) { assert.match(text(rows), /long question/); assert.match(text(rows), /\/agent-reply/); }
   }
 });

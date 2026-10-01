@@ -92,9 +92,20 @@ function harness(t) {
     async spawn(task, role = 'worker') {
       return json(await this.invoke('spawn_agent', { role, task, cwd }));
     },
-    async panel(script) {
-      state.scripts.push(...script);
-      await commands.get('agents').handler('', ctx);
+    /**
+     * The roster is a pane above the editor like the role editor, so it has no custom() overlay:
+     * keys go through its terminal-input listener, and only the conversation viewer is modal.
+     * A key is only accepted while the pane owns the keyboard, so presses retry around actions
+     * that open a host dialog or the viewer.
+     */
+    async openAgents({ shortcut = false } = {}) {
+      const before = state.widgetCalls.length;
+      const running = shortcut ? shortcuts.get('ctrl+alt+a').handler(ctx) : commands.get('agents').handler('', ctx);
+      const registered = await waitUntil('agents pane widget', () => state.widgetCalls.slice(before)
+        .find(call => call.key === 'cli-subagents-agents' && typeof call.content === 'function'));
+      const component = registered.content({ terminal: { rows: 35, columns: 120 }, requestRender() {} }, theme);
+      const press = (key) => waitUntil(`the agents pane to accept ${JSON.stringify(key)}`, () => state.listeners.at(-1)(key));
+      return { running, render: (width = 100) => component.render(width).join('\n'), press };
     },
   };
 }
@@ -147,7 +158,7 @@ test('status widget registers only in TUI, shows agents and unregisters at shutd
   assert.equal(h.state.listeners.length,0,'shutdown must unsubscribe FleetView input');
 });
 
-test('panel resumes the original session, confirms stops, and rejects non-TUI use', { timeout: 30_000 }, async (t) => {
+test('roster pane resumes the original session, confirms stops, and rejects non-TUI use', { timeout: 30_000 }, async (t) => {
   const h = harness(t);
   h.start();
   const agent = await h.spawn('REMEMBER panel-token');
@@ -155,11 +166,16 @@ test('panel resumes the original session, confirms stops, and rejects non-TUI us
   const sessionId = h.manager.get(agent.id).sessionId;
   const firstRun = h.manager.get(agent.id).runId;
 
-  // Open details, send through the editor, then close the restored list.
+  // Open details, send through the editor, then close the restored roster.
   h.editorAnswer = 'RECALL';
-  await h.panel([['i', 's'], [keys.escape]]);
-  assert.equal(h.customCalls, 2, 'each action reopens the list until Esc closes it');
+  const pane = await h.openAgents();
+  assert.match(pane.render(), /^╭─+╮$/m, 'the roster is framed like the role editor');
+  assert.match(pane.render(), /Subagents \(1\)/);
+  await pane.press('i'); await pane.press('s');
+  await pane.press(keys.escape); await pane.running;
+  assert.equal(h.customCalls, 0, 'the roster replaces neither the input box nor the transcript');
   assert.match(h.editors[0], /Resume worker/);
+  assert.equal(h.widgetCalls.filter(call => call.key === 'cli-subagents-agents').at(-1).content, undefined, 'the pane is removed from above the editor');
   await waitUntil('resumed report', () => h.messages.some((entry) => entry.message.content.includes('panel-token')));
   assert.equal(h.manager.get(agent.id).sessionId, sessionId, 'resume must retain the original session');
   assert.notEqual(h.manager.get(agent.id).runId, firstRun);
@@ -167,7 +183,9 @@ test('panel resumes the original session, confirms stops, and rejects non-TUI us
   // HOLD is second by start time; stopping an active child needs confirmation.
   const holding = await h.spawn('HOLD');
   await waitUntil('running', () => h.manager.get(holding.id).phase === 'running');
-  await h.panel([[keys.down, 'i', 'x'], [keys.escape]]);
+  const stop = await h.openAgents();
+  await stop.press(keys.down); await stop.press('i'); await stop.press('x');
+  await stop.press(keys.escape); await stop.running;
   assert.equal(h.confirms.length, 1);
   assert.match(h.confirms[0].title, /Stop/);
   assert.equal(h.manager.get(holding.id).phase, 'stopped');
@@ -176,9 +194,10 @@ test('panel resumes the original session, confirms stops, and rejects non-TUI us
 
   // Non-TUI clients do not open a panel.
   h.mode = 'rpc';
-  const before = h.customCalls;
+  const before = h.customCalls, widgets = h.widgetCalls.length;
   await commands0(h);
   assert.equal(h.customCalls, before);
+  assert.equal(h.widgetCalls.length, widgets, 'no pane is registered without a TUI');
   assert.equal(h.notices.at(-1).type, 'error');
   assert.match(h.notices.at(-1).message, /TUI/);
 });
@@ -194,7 +213,9 @@ test('direct human actions are recorded for the parent without interrupting it',
 
   // A routine instruction: the parent must see it, but sibling work must not be interrupted.
   h.editorAnswer = 'HOLD and also check the docs';
-  await h.panel([['i', 's'], [keys.escape]]);
+  const instruct = await h.openAgents();
+  await instruct.press('i'); await instruct.press('s');
+  await instruct.press(keys.escape); await instruct.running;
   await waitUntil('instruction recorded', () => human().length === 1);
   assert.equal(human()[0].options.triggerTurn, false);
   assert.match(human()[0].message.content, new RegExp(holding.id));
@@ -207,12 +228,16 @@ test('direct human actions are recorded for the parent without interrupting it',
   // A human permission decision is the most consequential direct action.
   const asking = await h.spawn('WAIT');
   await waitUntil('waiting', () => h.manager.get(asking.id).phase === 'waiting');
-  await h.panel([[keys.down, 'i', 'r'], [keys.escape]]);
+  const reply = await h.openAgents();
+  await reply.press(keys.down); await reply.press('i'); await reply.press('r');
+  await reply.press(keys.escape); await reply.running;
   await waitUntil('decision recorded', () => human().length === 2);
   assert.match(human()[1].message.content, new RegExp(`${asking.id}.*worker\\] Answered pending request permission-1: approved once`, 's'));
 
   // Stopping a child changes the plan the parent is coordinating.
-  await h.panel([['i', 'x'], [keys.escape]]);
+  const stop = await h.openAgents();
+  await stop.press('i'); await stop.press('x');
+  await stop.press(keys.escape); await stop.running;
   await waitUntil('stop recorded', () => human().length === 3);
   assert.match(human()[2].message.content, new RegExp(`${holding.id}.*Stopped active work`, 's'));
   assert.equal(h.manager.get(holding.id).phase, 'stopped');
@@ -249,13 +274,15 @@ test('shortcut selects a running child and opens its live conversation directly'
   const first = await h.spawn('HOLD one');
   const second = await h.spawn('HOLD two');
   await waitUntil('both active', () => h.manager.get(first.id).phase === 'running' && h.manager.get(second.id).phase === 'running');
-  h.state.scripts.push([keys.down, keys.enter], async viewer => {
+  h.state.scripts.push(async viewer => {
     await waitUntil('selected agent loaded', () => viewer.render(100).join('\n').includes(second.id.slice(0,8)));
     assert.match(viewer.render(100).join('\n'), /HOLD two/);
     viewer.handleInput('q');
-  }, [keys.escape]);
-  await h.shortcuts.get('ctrl+alt+a').handler(h.ctx);
-  assert.equal(h.customCalls,3);
+  });
+  const pane = await h.openAgents({ shortcut: true });
+  await pane.press(keys.down); await pane.press(keys.enter);
+  await pane.press(keys.escape); await pane.running;
+  assert.equal(h.customCalls, 1, 'the shortcut opens the roster pane, and only the viewer is an overlay');
   assert.equal(h.manager.get(first.id).phase,'running');
   assert.equal(h.manager.get(second.id).phase,'running');
 });
@@ -290,7 +317,7 @@ test('inline message from the viewer reaches the running child in the same sessi
   const agent=await h.spawn('HOLD inline');
   await waitUntil('running',()=>h.manager.get(agent.id).phase==='running');
   const sessionId=h.manager.get(agent.id).sessionId;
-  await h.panel([[keys.enter],async viewer=>{
+  h.state.scripts.push(async viewer=>{
     await waitUntil('viewer ready',()=>viewer.render(120).join('\n').includes('HOLD inline')||viewer.render(120).join('\n').includes('worker'));
     viewer.handleInput('\r'); // open the inline composer
     for(const key of 'PING') viewer.handleInput(key);
@@ -299,14 +326,17 @@ test('inline message from the viewer reaches the running child in the same sessi
     assert.equal(h.manager.get(agent.id).sessionId,sessionId,'steering must stay in the original session');
     assert.equal(h.manager.get(agent.id).text,'PING');
     viewer.handleInput('q');
-  }]);
+  });
+  const pane=await h.openAgents();
+  await pane.press(keys.enter);
+  await pane.press(keys.escape);await pane.running;
   assert.equal(h.editors.length,0,'inline send must not open the external editor dialog');
 });
 
 test('conversation is wired to live worker logs and remains open after completion', { timeout: 15000 }, async t => {
   const h = harness(t); h.start();
   const agent = await h.spawn('STREAM');
-  await h.panel([[keys.enter], async viewer => {
+  h.state.scripts.push(async viewer => {
     const text = () => viewer.render(120).join('\n');
     await waitUntil('streaming tool details', () => text().includes('partial fixture output'));
     assert.match(text(), /src\/example.ts/);
@@ -314,14 +344,17 @@ test('conversation is wired to live worker logs and remains open after completio
     await waitUntil('child completed', () => h.manager.get(agent.id).phase === 'completed');
     assert.match(text(), /Implementation complete/);
     viewer.handleInput('q');
-  }, [keys.escape]]);
-  assert.equal(h.customCalls, 3);
+  });
+  const pane = await h.openAgents();
+  await pane.press(keys.enter);
+  await pane.press(keys.escape); await pane.running;
+  assert.equal(h.customCalls, 1, 'closing the viewer returns to the pane instead of a second overlay');
   assert.equal(h.manager.get(agent.id).phase, 'completed');
   assert.equal(h.manager.eventLogs(agent.id).length, 1);
   assert.throws(() => h.manager.eventLogs('foreign'), /id/);
 });
 
-test('panel and inline messages cannot bypass managed workspace review or integration guards', { timeout: 30_000 }, async t => {
+test('roster pane and inline messages cannot bypass managed workspace review or integration guards', { timeout: 30_000 }, async t => {
   const h = harness(t); h.start();
   const repo = path.join(h.state.cwd, 'repo'); fs.mkdirSync(repo);
   const git = (...args) => execFileSync('git', ['-C', repo, ...args], { windowsHide: true });
@@ -334,22 +367,29 @@ test('panel and inline messages cannot bypass managed workspace review or integr
   await waitUntil('worker released', () => h.manager.get(worker.id).phase === 'completed' && !processAlive(h.manager.get(worker.id).workerPid));
   const reviewer = json(await h.invoke('spawn_agent', { role: 'reviewer', task: 'HOLD review', workspace: ws.id }));
   h.editorAnswer = 'CWD';
-  await h.panel([['i', 's'], [keys.escape]]);
+  const occupied = await h.openAgents();
+  await occupied.press('i'); await occupied.press('s');
+  await occupied.press(keys.escape); await occupied.running;
   assert.ok(h.notices.some(notice => /occupied/.test(notice.message)));
   assert.equal(h.manager.get(worker.id).runCount, 1);
   await h.manager.send(reviewer.id, 'review complete');
   await waitUntil('reviewer released', () => h.manager.get(reviewer.id).phase === 'completed' && !processAlive(h.manager.get(reviewer.id).workerPid));
   fs.writeFileSync(path.join(ws.path, 'base.txt'), 'new\n');
   await h.invoke('integrate_workspace', { workspace: ws.id });
-  await h.panel([['i', 's'], [keys.escape]]);
+  const integrated = await h.openAgents();
+  await integrated.press('i'); await integrated.press('s');
+  await integrated.press(keys.escape); await integrated.running;
   assert.ok(h.notices.some(notice => /integrated/.test(notice.message)));
-  await h.panel([[keys.enter], async viewer => {
+  h.state.scripts.push(async viewer => {
     await waitUntil('viewer ready', () => viewer.render(120).join('\n').includes(worker.id.slice(0, 8)));
     viewer.handleInput(keys.enter);
     for (const key of 'CWD') viewer.handleInput(key);
     viewer.handleInput(keys.enter);
     await waitUntil('inline baseline dialog after closing viewer', () => h.state.selections.length >= 2);
-  }, [keys.escape]]);
+  });
+  const inline = await h.openAgents();
+  await inline.press(keys.enter);
+  await inline.press(keys.escape); await inline.running;
   assert.equal(h.manager.get(worker.id).runCount, 1);
   assert.equal(h.manager.get(worker.id).sessionId, worker.sessionId);
 });
@@ -367,17 +407,22 @@ test('TUI sync requires dirty-state confirmation and inline continuation preserv
   fs.writeFileSync(path.join(ws.path, 'base.txt'), 'integrated\n'); await h.invoke('integrate_workspace', { workspace: ws.id });
   fs.writeFileSync(path.join(repo, 'parent-new.txt'), 'new parent content');
   h.state.selectAnswer = (_title, choices) => choices[1]; h.state.confirmAnswer = false; h.editorAnswer = 'CWD';
-  await h.panel([['i', 's'], [keys.escape]]);
+  const declined = await h.openAgents();
+  await declined.press('i'); await declined.press('s');
+  await declined.press(keys.escape); await declined.running;
   assert.match(h.confirms.at(-1).message, /parent-new.txt/);
   assert.equal(h.manager.get(worker.id).runCount, 1);
   assert.equal(fs.existsSync(path.join(ws.path, 'parent-new.txt')), false, 'declining inheritance must not change the worktree');
   h.state.confirmAnswer = true;
-  await h.panel([[keys.enter], async viewer => {
+  h.state.scripts.push(async viewer => {
     await waitUntil('viewer ready', () => viewer.render(120).join('\n').includes(worker.id.slice(0, 8)));
     viewer.handleInput(keys.enter);
     for (const key of 'CWD') viewer.handleInput(key);
     viewer.handleInput(keys.enter);
-  }, [keys.escape]]);
+  });
+  const inline = await h.openAgents();
+  await inline.press(keys.enter);
+  await inline.press(keys.escape); await inline.running;
   await waitUntil('resumed instance completed', () => h.manager.get(worker.id).runCount === 2 && h.manager.get(worker.id).phase === 'completed' && !processAlive(h.manager.get(worker.id).workerPid));
   assert.equal(h.manager.get(worker.id).sessionId, worker.sessionId);
   assert.equal(fs.readFileSync(path.join(ws.path, 'parent-new.txt'), 'utf8'), 'new parent content');
@@ -399,21 +444,27 @@ test('TUI refuses parent changes made after the inheritance dialog was displayed
   fs.writeFileSync(path.join(ws.path, 'base.txt'), 'integrated\n'); await h.invoke('integrate_workspace', { workspace: ws.id });
   h.state.selectAnswer = (_title, choices) => choices[1]; h.editorAnswer = 'CWD';
   h.ctx.ui.confirm = async () => { fs.writeFileSync(path.join(repo, 'unconfirmed.txt'), 'arrived during dialog'); return true; };
-  await h.panel([['i', 's'], [keys.escape]]);
+  const rejected = await h.openAgents();
+  await rejected.press('i'); await rejected.press('s');
+  await rejected.press(keys.escape); await rejected.running;
   assert.ok(h.notices.some(notice => /confirmed snapshot/.test(notice.message)));
   assert.equal(h.manager.get(worker.id).runCount, 1);
   assert.equal(fs.existsSync(path.join(ws.path, 'unconfirmed.txt')), false);
   assert.equal(h.manager.workspaces.get(ws.id).baseCommit, ws.baseCommit);
 });
 
-test('session shutdown dismisses a live viewer without stopping its child or reopening the list', { timeout: 15000 }, async t => {
+test('session shutdown dismisses a live viewer without stopping its child or reopening the roster', { timeout: 15000 }, async t => {
   const h = harness(t); h.start();
   const agent = await h.spawn('HOLD ui-lifecycle');
-  await h.panel([[keys.enter], async viewer => {
+  h.state.scripts.push(async viewer => {
     await waitUntil('viewer initialized', () => viewer.render(120).join('\n').includes('worker'));
     h.handlers.session_shutdown();
-  }]);
-  assert.equal(h.customCalls, 2);
+  });
+  const pane = await h.openAgents();
+  await pane.press(keys.enter);
+  await pane.running;
+  assert.equal(h.customCalls, 1, 'shutdown must not reopen the roster');
+  assert.equal(h.widgetCalls.filter(call => call.key === 'cli-subagents-agents').at(-1).content, undefined, 'the pane is removed at shutdown');
   assert.equal(h.manager.get(agent.id).phase, 'running');
   assert.equal(processAlive(h.manager.get(agent.id).workerPid), true);
 });
