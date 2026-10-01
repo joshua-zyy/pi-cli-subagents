@@ -85,7 +85,17 @@ test('failed instances show errors; waiting instances show sanitized questions',
   const waiting = panel([view({ phase: 'waiting', questions: [{ id: 'q1', method: 'select', title: '\u001b[33mAllow execution?\u001b[39m' }] })]);
   waiting.instance.handleInput('i'); const question = text(waiting.render());
   assert.ok(question.includes('Waiting for a response')); assert.ok(question.includes('Allow execution?'));
-  assert.ok(!question.includes('\u001b')); assert.ok(question.includes('/agent-reply a1 q1')); assert.ok(question.includes('r reply'));
+  assert.ok(!question.includes('\u001b')); assert.ok(question.includes('r reply'));
+  // One request is answered with r; quoting IDs here only suggests they must be typed by hand.
+  assert.ok(!question.includes('/agent-reply'), 'a single request must not ask for its ID');
+  assert.ok(!question.includes('requests pending'));
+});
+test('a queue of requests is announced without asking the human for IDs', () => {
+  const p = panel([view({ phase: 'waiting', questions: [{ id: 'q1', method: 'confirm', title: 'Allow?' }, { id: 'q2', method: 'confirm', title: 'Allow again?' }] })]);
+  p.instance.handleInput('i'); const body = text(p.render());
+  assert.match(body, /2 requests pending; r answers them one at a time/);
+  assert.ok(!body.includes('/agent-reply'), 'the panel answers the request on screen; IDs stay an escape hatch');
+  assert.match(body, /Allow\?/);
 });
 test('the list opens any child conversation directly without first opening details', () => {
   const p=panel([view({id:'a1'}),view({id:'a2'})]);
@@ -147,6 +157,6 @@ test('summary resizes without hiding action hints and preserves errors alongside
     assert.ok(rows.length + 2 <= size, `Used ${rows.length + 2} of ${size} rows`);
     assert.match(text(rows), /v conversation/);
     assert.match(text(rows), /q close/);
-    if (roomy) { assert.match(text(rows), /long question/); assert.match(text(rows), /\/agent-reply/); }
+    if (roomy) { assert.match(text(rows), /long question/); assert.match(text(rows), /r reply/); }
   }
 });

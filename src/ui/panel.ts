@@ -207,17 +207,22 @@ export class AgentsPanel {
     lines.push("", this.section("Latest activity"));
     lines.push(...this.wrapBody(isText(agent.lastActivity) ? oneLine(agent.lastActivity, 200) : "None", width, 1), "");
 
-    const question = agent.phase === "waiting" ? agent.questions?.[0] : undefined;
+    const questions = agent.phase === "waiting" ? agent.questions ?? [] : [];
+    const question = questions[0];
+    // Answering needs no IDs: `r` takes the request on screen, and the next one after that.
+    // Only the queue depth is worth stating, because the panel shows one request at a time.
+    const queue = questions.length > 1
+      ? [this.theme.fg("dim", `  ${questions.length} requests pending; r answers them one at a time`)] : [];
     if (question && room > 0 && room < DETAIL_FULL_ROWS) {
       return [lines[0], this.field("ID", agent.id), this.section("Waiting for a response"),
         ...this.wrapBody(question.title, width, Math.max(1, room - 6)),
-        this.theme.fg("dim", `  /agent-reply ${agent.id} ${question.id}`),
+        ...queue,
         this.hint([["r", "reply"], ["v", "conversation"], ["esc", "back"], ["q", "close"]])];
     }
     if (question) {
       lines.push(this.section("Waiting for a response"));
       lines.push(...this.wrapBody(question.title, width, QUESTION_VIEW_LINES));
-      lines.push(this.theme.fg("dim", `  /agent-reply ${agent.id} ${question.id}`), "");
+      lines.push(...queue, "");
     }
 
     const error = isText(agent.error) ? agent.error : undefined;
