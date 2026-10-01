@@ -193,8 +193,8 @@ export class ConversationViewer {
       return `${border} ${clipped}${" ".repeat(Math.max(0, inner - visibleWidth(clipped)))} ${border}`;
     };
     const bar = (left: string, right: string): string => {
-      const room = Math.max(0, width - visibleWidth(right) - 1);
-      if (visibleWidth(left) > room) return truncateToWidth(left, width);
+      const room = Math.max(0, inner - visibleWidth(right) - 1);
+      if (visibleWidth(left) > room) return truncateToWidth(left, inner);
       const clipped = truncateToWidth(left, room);
       return `${clipped}${" ".repeat(Math.max(0, room - visibleWidth(clipped)))} ${right}`;
     };
@@ -231,14 +231,15 @@ export class ConversationViewer {
     let chosen = new Set<string>();
     for (const hint of priority) {
       const candidate = hints.filter((item) => chosen.has(item) || item === hint);
-      if (visibleWidth(status) + 1 + visibleWidth(styled(candidate)) <= width) chosen.add(hint);
+      if (visibleWidth(status) + 1 + visibleWidth(styled(candidate)) <= inner) chosen.add(hint);
     }
     const shown = hints.filter((hint) => chosen.has(hint));
-    const footer = shown.length ? bar(status, styled(shown)) : truncateToWidth(status, width);
+    const footer = shown.length ? bar(status, styled(shown)) : status;
+    // Every chrome row is framed, so the footer cannot spill past the border it belongs to.
     const bottomRows = this.composer
-      ? [row(this.composer.render(inner)[0] ?? ""), bar(this.theme.fg("accent", "✎ message"), this.theme.fg("dim", "Enter send · Esc cancel"))]
-      : [footer];
-    if (this.notice) bottomRows.push(this.theme.fg(this.notice.color, oneLine(this.notice.text, width)));
+      ? [row(this.composer.render(inner)[0] ?? ""), row(bar(this.theme.fg("accent", "✎ message"), this.theme.fg("dim", "Enter send · Esc cancel")))]
+      : [row(footer)];
+    if (this.notice) bottomRows.push(row(this.theme.fg(this.notice.color, oneLine(this.notice.text, inner))));
     const rule = frame(`├${"─".repeat(Math.max(0, width - 2))}┤`);
     if (!framed) return [row(header), ...visible.map((line) => row(line)), ...bottomRows].map((line) => truncateToWidth(line, width));
     return [

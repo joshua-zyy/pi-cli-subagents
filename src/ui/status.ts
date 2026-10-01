@@ -5,6 +5,11 @@ import { SPINNER, formatElapsed, isActive, isTerminal, oneLine, phaseColor, phas
 export const STATUS_KEY = "cli-subagents";
 export const MAX_STATUS_LINES = 10;
 export const FINISHED_LINGER_MS = 30_000;
+/**
+ * pi-tui animates its own loader at this interval with these exact frames. Matching it keeps the
+ * roster's spinner turning at the same rate as the working row the user compares it against.
+ */
+export const FRAME_INTERVAL_MS = 80;
 
 export interface StatusLinesOptions {
   now: number;
@@ -101,7 +106,8 @@ export function statusLines(agents: AgentView[], options: StatusLinesOptions): s
 
 /**
  * Register only while there is visible content; remove the widget after the linger period.
- * Pi renders the component. The timer advances activity frames and refreshes active snapshots.
+ * Pi renders the component. The frame timer animates the spinner without rereading state;
+ * `update()`, driven by the monitor, refreshes the snapshot.
  */
 export class StatusWidget {
   private snapshot: AgentView[] = [];
@@ -122,7 +128,7 @@ export class StatusWidget {
   ) {
     this.key = options.key ?? STATUS_KEY;
     this.lingerMs = options.lingerMs ?? FINISHED_LINGER_MS;
-    this.intervalMs = options.intervalMs ?? 500;
+    this.intervalMs = options.intervalMs ?? FRAME_INTERVAL_MS;
   }
 
   update(): void {

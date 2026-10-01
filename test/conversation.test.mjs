@@ -127,6 +127,15 @@ test('page, half-line and configured scroll bindings all move the transcript and
   viewer.handleInput('\u001b[5~'); assert.ok(percent()<afterLine,'PageUp must return toward the start');
   viewer.handleInput('\u001b[F'); assert.match(text(),/Following · 120 lines · 100%/); assert.match(text(),/Message 59/);
   assert.ok(viewer.render(80).every(line=>visibleWidth(line)<=80));
+  // Header, body and footer all live inside the same border, so no row spills past it.
+  const rows = viewer.render(80);
+  for (const [index, line] of rows.entries()) {
+    assert.equal(visibleWidth(line), 80, `row ${index} must fill the frame`);
+    if (index === 0) assert.match(line, /^╭─+╮$/);
+    else if (index === rows.length - 1) assert.match(line, /^╰─+╯$/);
+    else if (!/^├─+┤$/.test(line)) assert.match(line, /^│.*│$/, `row ${index} must be framed`);
+  }
+  assert.match(rows.join('\n'), /│ Following · 120 lines · 100%/);
 });
 
 

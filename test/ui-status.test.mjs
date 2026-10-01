@@ -3,7 +3,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { stripTerminalSequences, visibleWidth } from '@earendil-works/pi-tui';
 import { formatElapsed, formatTokens, oneLine, rightAlign, viewElapsed, canMessage } from '../dist/ui/format.js';
-import { FINISHED_LINGER_MS, MAX_STATUS_LINES, STATUS_KEY, StatusWidget, statusLines } from '../dist/ui/status.js';
+import { FINISHED_LINGER_MS, FRAME_INTERVAL_MS, MAX_STATUS_LINES, STATUS_KEY, StatusWidget, statusLines } from '../dist/ui/status.js';
 
 const theme = { fg: (_color, text) => text, bold: text => text };
 const tagged = { fg: (color, text) => `[${color}]${text}`, bold: text => text };
@@ -111,6 +111,16 @@ test('animation redraws without rereading state and disposal stops all side effe
   const calls = active.calls.length, ticks = state.ticks;
   await sleep(30); assert.equal(active.calls.length, calls); assert.equal(state.ticks, ticks);
   widget.update(); assert.equal(active.calls.length, calls);
+});
+test('the spinner turns at pi-tui’s own cadence by default', async t => {
+  const active = host(); const widget = new StatusWidget(active, () => [view()]);
+  t.after(() => widget.dispose());
+  widget.update(); const { state, tui } = ticker(); const component = active.calls[0].content(tui, theme);
+  const first = component.render(100).join('\n');
+  // pi-tui animates its loader every 80 ms; a slower timer would leave the frame unchanged here.
+  await sleep(400);
+  assert.ok(state.ticks >= 3, `the spinner must advance about every ${FRAME_INTERVAL_MS} ms, got ${state.ticks} redraws in 400 ms`);
+  assert.notEqual(component.render(100).join('\n'), first, 'the rendered frame must move');
 });
 test('read failure preserves the last snapshot; old finished entries do not register', async () => {
   const active = host(); let fail = false;
