@@ -73,11 +73,13 @@ pi --extension /absolute/path/to/pi-cli-subagents/dist/index.js \
 | --- | --- |
 | `spawn_agent` | 按角色启动任务，指定 `cwd` 或 `workspace`，不能同时指定 |
 | `send_input` | 在同一实例的原会话中继续工作 |
-| `list_agents` | 查找实例、任务历史、可用角色和未决请求，不用于轮询完成状态 |
+| `list_agents` | 查看实例、历史、角色和未决请求；按需读取指定轮次的结果，不用于轮询完成状态 |
 | `close_agent` | 停止当前工作，保留会话 |
 | `create_workspace` | 创建托管 Git 工作树 |
 | `integrate_workspace` | 将已审查的工作区改动应用到父目录 |
 | `respond_to_permission` | 附具体理由，回答一个当前请求 |
+
+`list_agents()` 只返回元信息，不携带结果正文；传 `{id}` 可查看当前详情与有界预览。终态报告通知提供 `list_agents({id, runId})` 入口，读取该轮的原始结果。长结果保持两个 ID 不变，将返回的 `nextOffset` 作为 `offset` 继续读取，直到其为 `null`（`limit` 默认及上限为 6000 个 UTF-16 代码单元）。读取结果不会唤醒或恢复代理。
 
 Pi 和 Codex 支持运行中的 `steer` 消息；运行中的 `followUp` 仅 Pi 支持。Claude 必须等当前任务结束后再续聊。面板仅限 TUI，工具也可用于 RPC/非交互模式。
 

@@ -6,7 +6,7 @@ function harness(reports) {
   const sent = [], entries = [];
   const pi = { sendMessage(message, options) { sent.push({ message, options }); } };
   const ctx = { sessionManager: { getEntries: () => entries } };
-  const manager = { reports: () => reports };
+  const manager = { reports: () => reports, getResult: (id, runId) => reports.find(r => r.agentId === id && r.runId === runId) };
   return { sent, entries, pi, ctx, manager };
 }
 const report = (id) => ({ notificationId: id, agentId: 'agent', runId: id, status: 'completed', time: 1, text: 'DONE', logFile: 'trace' });
@@ -82,11 +82,15 @@ test('failure, waiting and inactivity alerts flush held successes without waitin
   }
 });
 
-test('long output is explicitly clipped with a way to inspect the full result', () => {
-  const h = harness([{ ...report('long'), text: 'A'.repeat(10000) }]);
+test('long output previews the original tail and points to the exact result', () => {
+  const block = 'VERDICT: BLOCK\nEVIDENCE: src/a.ts:12 — reproduces on the second call\nEVIDENCE: test/x.test.mjs:40 — failing case\nUNVERIFIED: real CLI behaviour';
+  const h = harness([{ ...report('long'), notificationId: 'long-result', text: `${'A'.repeat(9000)}\n${block}` }]);
   deliverReports(h.manager, h.pi, h.ctx, new Set());
-  assert.ok(h.sent[0].message.content.length < 4000);
-  assert.match(h.sent[0].message.content, /truncated.*list_agents.*agent/is);
+  const content = h.sent[0].message.content;
+  // This short evidence block fits in the preview; arbitrary longer evidence needs the result reader.
+  for (const line of block.split('\n')) assert.ok(content.includes(line), `the clip dropped ${line}`);
+  assert.match(content, /… \d+ characters omitted …/);
+  assert.match(content, /truncated.*list_agents.*agent/is);
 });
 
 test('no-session parent must fail closed rather than create unowned agents', async () => {

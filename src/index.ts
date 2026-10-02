@@ -22,11 +22,11 @@ export function parentManager(ctx: Pick<ExtensionContext, "sessionManager">, lau
   return new AgentManager(parentFile, launch);
 }
 
-function visible(state: AgentView) {
+function visible(state: AgentView, includeText = true) {
   // `task`, `history` and `startedAt` let the parent match an instance to its assignments
   // after its own context is compacted, without reading the child's transcript.
   const { id, cli, role, phase, task, history, runCount, runId, sessionId, session, cwd, startedAt, updatedAt, lastActivity, questions, text, truncated, error, logFile } = state;
-  return { id, cli, role, phase, runId, sessionId, ...(session?.cli === "codex" ? { threadId: session.threadId } : {}), cwd, updatedAt, lastActivity, questions, text, truncated, error, logFile, history, runCount,
+  return { id, cli, role, phase, runId, sessionId, ...(session?.cli === "codex" ? { threadId: session.threadId } : {}), cwd, updatedAt, lastActivity, questions, ...(includeText ? { text, truncated } : {}), error, logFile, history, runCount,
     ...(state.workspace ? { workspace: state.workspace, workspaceBaseline: state.workspaceBaseline } : {}), ...(task ? { task } : {}), ...(startedAt ? { startedAt } : {}) };
 }
 const view = (state: AgentView): string => JSON.stringify(visible(state));
@@ -167,13 +167,31 @@ export default function extension(pi: ExtensionAPI): void {
   });
   pi.registerTool({
     name: "list_agents", label: "List CLI subagents",
-    description: "List this parent's subagent instances with the assignments each one has already handled (history, oldest first), the available roles, and any unresolved request a `waiting` instance is blocked on. Use it to recover which instance did what before reusing one, and to inspect a request before answering it with respond_to_permission; do not poll it for completion. Does not access other parent sessions.",
-    parameters: Type.Object({ id: Type.Optional(Type.String({ description: "If provided, return only this instance" })) }),
+    description: "Inspect this parent's instances, task history, roles and pending requests; do not poll for completion. Without id, lists metadata only. With id, includes the current result preview (not full text). With id + runId, reads a page of that run's original final result instead; keep both IDs fixed and follow nextOffset until null to read it all. Never accesses another parent session or resumes an agent.",
+    parameters: Type.Object({
+      id: Type.Optional(Type.String({ description: "Subagent instance ID; required with runId" })),
+      runId: Type.Optional(Type.String({ description: "Read this exact run's final result, not the current instance preview" })),
+      offset: Type.Optional(Type.Integer({ minimum: 0, description: "Result offset in UTF-16 code units (default 0); requires id + runId. Use the returned nextOffset." })),
+      limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 6000, description: "Result page size in UTF-16 code units (default/max 6000); requires id + runId" })),
+    }),
     async execute(_id, args, _signal, _update, ctx) {
-      const roles = loadRoles(getAgentDir(), ctx.cwd, ctx.isProjectTrusted());
       const manager = parentManager(ctx, launch);
+      if (args.runId !== undefined) {
+        if (!args.id) throw new Error("Reading a run result requires id + runId");
+        const offset = args.offset ?? 0, limit = args.limit ?? 6000;
+        if (!Number.isSafeInteger(offset) || offset < 0) throw new Error("Result offset must be a non-negative integer");
+        if (!Number.isSafeInteger(limit) || limit < 1 || limit > 6000) throw new Error("Result limit must be an integer from 1 to 6000");
+        const report = manager.getResult(args.id, args.runId);
+        if (offset > report.text.length) throw new Error("Result offset exceeds totalLength");
+        const end = Math.min(report.text.length, offset + limit);
+        return content(JSON.stringify({ agentId: report.agentId, runId: report.runId, status: report.status, time: report.time,
+          error: report.error, offset, totalLength: report.text.length, nextOffset: end < report.text.length ? end : null,
+          text: report.text.slice(offset, end) }));
+      }
+      if (args.offset !== undefined || args.limit !== undefined) throw new Error("Result paging requires id + runId");
+      const roles = loadRoles(getAgentDir(), ctx.cwd, ctx.isProjectTrusted());
       return content(JSON.stringify({ roles: Object.fromEntries(Object.entries(roles).map(([name, role]) => [name, role.description])),
-        agents: (args.id ? [manager.get(args.id)] : manager.list()).map(visible), workspaces: await manager.workspaces.list() }));
+        agents: (args.id !== undefined ? [manager.get(args.id)] : manager.list()).map(state => visible(state, args.id !== undefined)), workspaces: await manager.workspaces.list() }));
     },
   });
   pi.registerTool({

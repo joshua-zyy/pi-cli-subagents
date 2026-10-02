@@ -46,16 +46,23 @@ integrating one, read [references/workspaces.md](references/workspaces.md).
 ## 2. Wait for reports
 
 Spawning is asynchronous: continue independent work or end the turn — the report wakes you. Completed,
-failed, waiting, unreachable and stalled children all arrive on their own; `list_agents` is for
-inspection and recovering context, not for progress. Long reports are clipped in the notification: read
-the full text with `list_agents({ id })`. Never read empty text as success — read the error. Keep
-`src/example.ts:42`-style locators, not paraphrases.
+failed, waiting, unreachable and stalled children all arrive on their own; never poll `list_agents`
+for progress. Use `list_agents()` for metadata and history, or `list_agents({ id })` for current details
+and a bounded result preview. Neither the preview nor the notification guarantees complete evidence.
+
+When a decision needs omitted material, follow the notification’s `list_agents({ id, runId })` link.
+It returns a page of that run’s original final result, with `status`, `error`, `text`, `totalLength` and
+`nextOffset`. Keep both IDs fixed; pass `offset: nextOffset` until it is `null` to read the entire result
+(default/max `limit: 6000` UTF-16 code units). A later run never replaces this result. A missing result
+is an error, not permission to substitute the latest run. Never read empty text or a completed CLI
+turn as proof the task succeeded. Keep `src/example.ts:42`-style locators, not paraphrases.
 
 ## 3. Reuse the instance that did the related work
 
 A role is a template; each instance is a separate colleague with its own session. `list_agents` returns
-each instance's `history` (earlier assignments with their outcome, oldest first), so recover who did
-what from there instead of trusting recall after your context is compacted. Send follow-up work to the
+each instance's `history` (latest five assignments with their outcome, oldest first), so recover who did
+what from there instead of trusting recall after your context is compacted. Preserve older result links
+you still need in your task notes. Send follow-up work to the
 instance that already has the context; start a new one for unrelated work; never let an instance review
 its own work. A running child takes `send_input` steering on Pi and Codex (running Codex `followUp`
 is not supported); Claude refuses both while running — wait for it. Steering does not interrupt an

@@ -4,6 +4,14 @@ import type { AgentView } from "./types.js";
 
 export const customType = "cli-subagents-report";
 
+/**
+ * Notifications are bounded previews, not complete evidence. Keep more of the original tail than
+ * the head, count omitted characters, and link to the exact run so every omitted part is retrievable.
+ */
+const REPORT_HEAD = 2000;
+const REPORT_TAIL = 3600;
+const REPORT_LIMIT = REPORT_HEAD + REPORT_TAIL;
+
 export function deliveredIds(ctx: Pick<ExtensionContext, "sessionManager">): Set<string> {
   const ids = new Set<string>();
   for (const entry of ctx.sessionManager.getEntries()) {
@@ -16,7 +24,7 @@ export function deliveredIds(ctx: Pick<ExtensionContext, "sessionManager">): Set
 
 /** Completion events are stored by the worker. The session's own custom messages are the receipt. */
 export function deliverReports(
-  manager: Pick<AgentManager, "reports">,
+  manager: Pick<AgentManager, "reports" | "getResult">,
   pi: Pick<ExtensionAPI, "sendMessage">,
   ctx: Pick<ExtensionContext, "sessionManager">,
   pending: Set<string>,
@@ -34,15 +42,20 @@ export function deliverReports(
   if (!urgent && firstSuccess && now < firstSuccess.time + 2000) return;
   const ids = reports.map((report) => report.notificationId);
   const content = reports.map((report) => {
-    let raw = report.text;
-    if (report.error) raw = `Error: ${report.error}\n${raw}`.trim();
+    // Only final reports have this stable ID; waiting/inactivity/unreachable are attention events.
+    const final = report.notificationId === `${report.runId}-result`;
+    // Load full text only after receipt filtering and coalescing; never grow the history cache.
+    const source = final ? manager.getResult(report.agentId, report.runId) : report;
+    let raw = source.text;
+    if (source.error) raw = `Error: ${source.error}\n${raw}`.trim();
     if (!raw) raw = report.status === "waiting"
       ? "Waiting for a response; inspect it with list_agents or /agent-reply."
       : "No text response; inspect with list_agents or /agents.";
-    const clipped = raw.length > 2400;
-    const summary = clipped ? `${raw.slice(0, 1000)}\n…\n${raw.slice(-1300)}\n(truncated; inspect list_agents({id: \"${report.agentId}\"}) or /agents; raw log holds the full transcript)` : raw;
+    const clipped = raw.length > REPORT_LIMIT;
+    const summary = clipped ? `${raw.slice(0, REPORT_HEAD)}\n… ${raw.length - REPORT_LIMIT} characters omitted …\n${raw.slice(-REPORT_TAIL)}\n(truncated preview)` : raw;
+    const resultHint = final ? `\nRead result: list_agents(${JSON.stringify({ id: report.agentId, runId: report.runId })})` : "";
     const replyHint = report.status === "waiting" ? `\nQuestion ID: ${report.questionId ?? "inspect the instance with list_agents"}; answer it with respond_to_permission, or /agent-reply.` : "";
-    return `[Subagent ${report.agentId} · ${report.status}]\n${summary}${replyHint}`;
+    return `[Subagent ${report.agentId} · ${report.status}]\n${summary}${resultHint}${replyHint}`;
   }).join("\n\n");
   for (const id of ids) pending.add(id);
   try {

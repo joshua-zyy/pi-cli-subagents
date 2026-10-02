@@ -69,6 +69,20 @@ export class AgentManager {
       return report ? { ...report, ...shorten(report.text) } : undefined;
     });
   }
+  /** Read one persisted final report by identity, never via the current state's result pointer or cache. */
+  getResult(id: string, runId: string): Report {
+    this.spec(id);
+    if (!idPattern.test(runId)) throw new Error("Invalid run id");
+    let report: Report | undefined;
+    try { report = readJson<Report>(path.join(this.directory(id), "reports", `${runId}-result.json`)); }
+    catch (error) { throw new Error(`Cannot read result for subagent ${id}, run ${runId}: ${(error as Error).message}`); }
+    if (report === undefined) throw new Error(`No final result for subagent ${id}, run ${runId}; do not substitute another run or assume success.`);
+    if (!report || report.parentFile !== this.parentFile || report.agentId !== id || report.runId !== runId ||
+      report.notificationId !== `${runId}-result` || !["completed", "failed", "stopped"].includes(report.status) || typeof report.text !== "string")
+      throw new Error(`Invalid or foreign result for subagent ${id}, run ${runId}`);
+    return report;
+  }
+
   get(id: string): AgentView {
     const spec = this.spec(id), dir = this.directory(id);
     let state = readJson<AgentState>(path.join(dir, "state.json"));
