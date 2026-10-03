@@ -5,6 +5,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFileSync } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import extension from '../dist/index.js';
 import { waitUntil, processAlive } from '../dist/storage.js';
 import { AgentManager } from '../dist/manager.js';
@@ -339,6 +340,9 @@ test('conversation is wired to live worker logs and remains open after completio
   const agent = await h.spawn('STREAM');
   h.state.scripts.push(async viewer => {
     const text = () => viewer.render(120).join('\n');
+    await waitUntil('compact tool summary', () => text().includes('src/example.ts'));
+    assert.doesNotMatch(text(), /partial fixture output/);
+    viewer.handleInput('\x0f');
     await waitUntil('streaming tool details', () => text().includes('partial fixture output'));
     assert.match(text(), /src\/example.ts/);
     await waitUntil('final tool output', () => text().includes('final fixture output'));
@@ -353,6 +357,51 @@ test('conversation is wired to live worker logs and remains open after completio
   assert.equal(h.manager.get(agent.id).phase, 'completed');
   assert.equal(h.manager.eventLogs(agent.id).length, 1);
   assert.throws(() => h.manager.eventLogs('foreign'), /id/);
+});
+
+test('the viewer reads a bounded tail, pages older history on demand and reuses the window when reopened', { timeout: 40_000 }, async t => {
+  const h = harness(t); h.start();
+  const agent = await h.spawn('STREAM');
+  await waitUntil('first run completed', () => h.manager.get(agent.id).phase === 'completed');
+  const logFile = h.manager.eventLogs(agent.id)[0];
+  const before = fs.readFileSync(logFile);
+  // An older run with more than one page of history, so the bounded tail cannot reach its first record.
+  const runId = randomUUID(), runDir = path.join(path.dirname(path.dirname(logFile)), runId);
+  fs.mkdirSync(runDir, { recursive: true });
+  fs.writeFileSync(path.join(runDir, 'request.json'), JSON.stringify({ runId, message: 'OLDER run fixture', createdAt: Date.now() - 60_000 }));
+  const records = Array.from({ length: 420 }, (_, i) => JSON.stringify({ type: 'message_end',
+    message: { role: 'assistant', content: [{ type: 'text', text: `OLDER_MARKER_${String(i).padStart(3, '0')} ` + 'o'.repeat(2000) }], usage: { input: 1, output: 1, totalTokens: 2 } } }));
+  fs.writeFileSync(path.join(runDir, 'events.jsonl'), records.join('\n') + '\n');
+  assert.equal(h.manager.eventLogs(agent.id).length, 2);
+  h.state.scripts.push(async viewer => {
+    const text = () => viewer.render(120).join('\n');
+    await waitUntil('live tail frame', () => text().includes('Implementation complete'));
+    assert.doesNotMatch(text(), /OLDER_MARKER_/, 'the first frame must be a bounded tail, not whole history');
+    for (let i = 0; i < 12 && !/OLDER_MARKER_000 /.test(text()); i++) {
+      viewer.handleInput('\u001b[H');
+      await waitUntil('older page', () => text().includes('OLDER_MARKER_'));
+      await new Promise(resolve => setTimeout(resolve, 20));
+    }
+    assert.match(text(), /OLDER_MARKER_000 /, 'paging up reaches the first record of the older run');
+    assert.match(text(), /Paused/);
+    viewer.handleInput('q');
+  });
+  h.state.scripts.push(async viewer => {
+    const text = () => viewer.render(120).join('\n');
+    await waitUntil('reopened viewer', () => text().includes('OLDER_MARKER_') || text().includes('Implementation complete'));
+    assert.match(text(), /OLDER_MARKER_/, 'reopening reuses the paged window instead of jumping to the latest output');
+    assert.doesNotMatch(text(), /Implementation complete/);
+    viewer.handleInput('\u001b[F');
+    await waitUntil('End returns to the live tail', () => text().includes('Implementation complete'));
+    assert.match(text(), /Following/);
+    viewer.handleInput('q');
+  });
+  const pane = await h.openAgents();
+  await pane.press(keys.enter);
+  await pane.press(keys.enter);
+  await pane.press(keys.escape); await pane.running;
+  assert.equal(h.customCalls, 2, 'each open uses one viewer overlay');
+  assert.deepEqual(fs.readFileSync(logFile), before, 'reading history must never rewrite the event log');
 });
 
 test('roster pane and inline messages cannot bypass managed workspace review or integration guards', { timeout: 30_000 }, async t => {

@@ -13,7 +13,8 @@ import { RoleSettingsPanel, SETTINGS_MAX_ROWS, type RoleSettingsAction, type Rol
 import { canSteer, isTerminal, oneLine } from "./ui/format.js";
 import { StatusWidget } from "./ui/status.js";
 import { FleetView } from "./ui/fleet.js";
-import { TranscriptReader } from "./ui/transcript.js";
+import { TranscriptWindow } from "./ui/transcript-window.js";
+import { TranscriptCache, type TranscriptIdentity } from "./ui/transcript-cache.js";
 import { ConversationViewer } from "./ui/conversation.js";
 import type { AgentView, Delivery, Launch, Question, Role, Thinking } from "./types.js";
 
@@ -72,6 +73,8 @@ export default function extension(pi: ExtensionAPI): void {
   }
 
   let active: { file: string; ctx: ExtensionContext; manager: AgentManager; pending: Set<string>; timer: NodeJS.Timeout; agents: AgentView[]; widget?: StatusWidget; fleet?: FleetView } | undefined;
+  /** Paged transcript windows for this extension instance; cleared when monitoring stops. */
+  const transcriptCache = new TranscriptCache();
 
   function pump(): void {
     if (!active || active.ctx.sessionManager.getSessionFile() !== active.file) return;
@@ -88,6 +91,7 @@ export default function extension(pi: ExtensionAPI): void {
     dismissPanel?.(); dismissPanel = undefined;
     if (active) { clearInterval(active.timer); active.widget?.dispose(); active.fleet?.dispose(); }
     active = undefined;
+    transcriptCache.clear();
   }
   pi.on("session_start", (_event, ctx) => {
     stopMonitor();
@@ -350,15 +354,22 @@ export default function extension(pi: ExtensionAPI): void {
             if (action.kind === "view") {
               const id = action.id;
               const selected = manager.get(id);
-              const reader = new TranscriptReader(selected.cli ?? "pi", selected.session?.cli === "codex" ? selected.session.threadId : selected.session?.cli === "claude" ? selected.session.sessionId : undefined);
+              // One paged window per instance: reuse it while this process has it, never scan history unprompted.
+              const identity: TranscriptIdentity = { parentFile: manager.parentFile, agentId: id, cli: selected.cli ?? "pi",
+                ...(selected.session?.cli === "codex" ? { nativeId: selected.session.threadId } : selected.session?.cli === "claude" ? { nativeId: selected.session.sessionId } : {}) };
+              const lease = await transcriptCache.acquire(identity, manager.eventLogs(id),
+                () => new TranscriptWindow(identity.cli, identity.nativeId));
               let viewer: ConversationViewer | undefined;
               try {
                 action = await ctx.ui.custom<PanelAction | undefined>((tui, theme, keybindings, done) => {
                   dismissPanel = () => { viewer?.dispose(); done(undefined); };
-                  viewer = new ConversationViewer(tui, theme, done, async () => {
-                    const agent = manager.get(id);
-                    return { agent, ...await reader.readRecent(manager.eventLogs(id)) };
-                  }, { keybindings, markdownTheme: getMarkdownTheme(),
+                  const files = () => manager.eventLogs(id);
+                  viewer = new ConversationViewer(tui, theme, done, async () => ({
+                    agent: manager.get(id), ...await lease.window.open(files()),
+                  }), { keybindings, markdownTheme: getMarkdownTheme(),
+                    paging: { older: async (boundary) => ({ agent: manager.get(id), ...await lease.window.pageUp(files(), boundary) }),
+                      newer: async (boundary) => ({ agent: manager.get(id), ...await lease.window.pageDown(files(), boundary) }),
+                      latest: async () => ({ agent: manager.get(id), ...await lease.window.toTail(files()) }) },
                     onSend: async (message) => {
                       try { recordHumanAction(ctx, await manager.send(id, message), `Sent an instruction: "${oneLine(message, 400)}"`); }
                       catch (error) {
@@ -370,7 +381,7 @@ export default function extension(pi: ExtensionAPI): void {
                     frameColor: (text) => ctx.ui.theme.getThinkingBorderColor(ctx.thinkingLevel ?? "off")(text) });
                   return viewer;
                 }, { overlay: true, overlayOptions: { width: "96%", maxHeight: "100%", margin: 1 } });
-              } finally { viewer?.dispose(); dismissPanel = undefined; }
+              } finally { viewer?.dispose(); lease.release(); dismissPanel = undefined; }
               if (epoch !== sessionEpoch) return;
               if (!action || action.kind === "view") { if (fromFleet) return; continue; }
             }

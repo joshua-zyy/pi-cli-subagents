@@ -37,6 +37,8 @@ test('viewer renders tool inputs, multiline output, errors and resize without te
   const entries = [entry(1, { kind: 'tool', title: 'bash', input: '{"command":"npm test"}', text: '\u001b[31mfailed\u001b[0m\nsecond line', status: 'error' })];
   const h = harness(async () => ({ agent: state, entries, loading: false })); t.after(() => h.viewer.dispose());
   await wait(20);
+  h.tui.terminal.rows = 20; // Keep the tool header and expanded details visible together.
+  h.viewer.handleInput('\x0f'); // Inspect expanded tool details.
   assert.match(h.text(), /npm test/); assert.match(h.text(), /failed/); assert.match(h.text(), /error/); assert.doesNotMatch(h.text(), /\u001b\[31m|\u0007|\u001b\]/); // Theme/layout reset codes are safe; source escape sequences are not.
   for (const rows of [6, 10, 24]) for (const columns of [10, 35, 80]) {
     h.tui.terminal.rows = rows; const rendered = h.viewer.render(columns);
@@ -49,6 +51,7 @@ test('long tool output wraps without repeatedly copying large prefixes', async t
   const h = harness(async () => ({ agent: state, entries: [entry(1, { kind: 'tool', title: 'bash', text, status: 'done' })], loading: false }));
   t.after(() => h.viewer.dispose());
   await new Promise(setImmediate);
+  h.viewer.handleInput('\x0f');
   // Count substring work during this synchronous render, not load-dependent wall time.
   const original = String.prototype.slice;
   let copied = 0, rendered;
@@ -78,6 +81,7 @@ test('hard-wrapped tool output preserves whitespace and whole graphemes at narro
         entries: [entry(1, { kind: 'tool', title: 'bash', text, status: 'done' })], loading: false }));
       try {
         await new Promise(setImmediate);
+        viewer.handleInput('\x0f');
         const rendered = viewer.render(columns);
         assert.equal(wrapped.join(''), expected, `whitespace/content at width ${columns}`);
         if (text.includes('\n\n')) assert.ok(wrapped.includes(''), 'explicit empty lines are retained');
