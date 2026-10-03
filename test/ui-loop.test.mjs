@@ -62,6 +62,7 @@ function harness(t) {
     registerTool(tool) { tools.set(tool.name, tool); },
     registerCommand(name, command) { commands.set(name, command); },
     registerShortcut(key, shortcut) { shortcuts.set(key, shortcut); },
+    registerMessageRenderer() {},
     sendMessage(message, options) { state.messages.push({ message, options }); state.entries.push({ type: 'custom_message', ...message }); },
   };
   const manager = new AgentManager(parent, { command: process.execPath, args: [fixture] });

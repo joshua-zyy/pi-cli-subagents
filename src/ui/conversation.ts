@@ -54,10 +54,13 @@ const clean = (value: string): string => stripTerminalSequences(value).replace(/
  */
 export class ConversationViewer {
   private snapshot?: ConversationSnapshot;
+  private agent?: ConversationSnapshot["agent"];
   private error?: string;
   private closed = false;
   private timer?: NodeJS.Timeout;
   private scroll = 0;
+  private pendingScrollAdjustment?: number;
+  private contentWidth?: number;
   private follow = true;
   private totalLines = 0;
   private viewport = 1;
@@ -98,21 +101,46 @@ export class ConversationViewer {
     this.dispose(); this.done(action);
   }
   private async refresh(): Promise<void> {
+    let loading = false;
     try {
       const next = await this.load();
       if (this.closed) return;
-      if (next.revision === undefined || next.revision !== this.snapshot?.revision) this.invalidate();
-      // A delivery note only stays until the child itself produces new output.
-      if (this.notice && next.revision !== undefined && next.revision !== this.notice.revision && !this.sending) this.notice = undefined;
-      this.snapshot = next; this.error = undefined;
+      loading = next.loading;
+      this.agent = next.agent; // Keep status and controls live while the transcript catches up.
+      // The first content frame must land at the actual end, not at the end of an old replay batch.
+      if (this.snapshot || !loading) {
+        let beforePrepend: number | undefined;
+        if (this.snapshot?.historyLoading && !next.historyLoading && !this.follow && this.contentWidth !== undefined) {
+          // A host may coalesce the last append frame. Compare the two handoff snapshots,
+          // not an older rendered frame or a later snapshot containing additional live output.
+          beforePrepend = this.content(this.contentWidth).length;
+        }
+        if (next.revision === undefined || next.revision !== this.snapshot?.revision) this.invalidate();
+        // Historical reconstruction changes the display, but is not new output from the child.
+        const outputRevision = next.outputRevision ?? next.revision;
+        if (this.notice && outputRevision !== undefined) {
+          if (this.notice.revision === undefined) this.notice.revision = outputRevision;
+          else if (outputRevision !== this.notice.revision && !this.sending) this.notice = undefined;
+        }
+        this.snapshot = next;
+        if (beforePrepend !== undefined) {
+          this.pendingScrollAdjustment = this.content(this.contentWidth!).length - beforePrepend;
+        }
+      }
+      this.error = undefined;
     } catch (error) {
       if (this.closed) return;
       this.error = `Unable to update transcript: ${(error as Error).message}`;
     }
     if (this.closed) return;
     try { this.tui.requestRender(); } catch { this.finish(); return; }
-    // Catch up in bounded batches without blocking rendering or overlapping reads.
-    this.timer = setTimeout(() => { void this.refresh(); }, this.error || !this.snapshot?.loading ? this.intervalMs : 0);
+    // Tail catch-up stays fast; background history yields between bounded batches instead of spinning.
+    let delay = this.intervalMs;
+    if (!this.error) {
+      if (loading) delay = 0;
+      else if (this.snapshot?.historyLoading) delay = Math.min(this.intervalMs, 50);
+    }
+    this.timer = setTimeout(() => { void this.refresh(); }, delay);
     this.timer.unref?.();
   }
 
@@ -139,16 +167,16 @@ export class ConversationViewer {
   }
 
   private async send(message: string): Promise<void> {
-    const agent = this.snapshot?.agent;
+    const agent = this.agent;
     if (!agent || !this.onSend) return;
     const resuming = !canSteer(agent.phase);
     this.sending = true;
-    this.notice = { text: resuming ? "Starting a new turn in the original session..." : "Delivering to the running child...", color: "dim", revision: this.snapshot?.revision };
+    this.notice = { text: resuming ? "Starting a new turn in the original session..." : "Delivering to the running child...", color: "dim", revision: this.snapshot?.outputRevision ?? this.snapshot?.revision };
     this.tui.requestRender();
     try {
       const action = await this.onSend(message);
       if (action) { this.finish(action); return; }
-      this.notice = { text: resuming ? "Turn accepted in the original session; a report will follow." : "Message accepted; the child continues in the same session.", color: "success", revision: this.snapshot?.revision };
+      this.notice = { text: resuming ? "Turn accepted in the original session; a report will follow." : "Message accepted; the child continues in the same session.", color: "success", revision: this.snapshot?.outputRevision ?? this.snapshot?.revision };
     } catch (error) {
       this.notice = { text: `Send failed: ${(error as Error).message}`, color: "error" };
     } finally {
@@ -161,17 +189,18 @@ export class ConversationViewer {
     if (this.closed) return;
     // While composing, the input owns all keys (Enter sends, Esc cancels).
     if (this.composer) { this.composer.handleInput(data); this.tui.requestRender(); return; }
-    const agent = this.snapshot?.agent;
+    const agent = this.agent;
     const max = Math.max(0, this.totalLines - this.viewport);
     const page = Math.max(1, this.viewport);
     if (matchesKey(data, "escape") || matchesKey(data, "q") || matchesKey(data, "ctrl+c")) { this.finish(); return; }
     if (agent && this.onSend && canMessage(agent.phase) && matchesKey(data, "return")) { this.openComposer(); return; }
-    if (this.matches(data, "tui.altScreen.top", "home")) { this.scroll = 0; this.follow = false; }
-    else if (this.matches(data, "tui.altScreen.bottom", "end")) { this.scroll = max; this.follow = true; }
-    else if (this.matches(data, "tui.altScreen.pageUp", "pageUp")) { this.scroll = Math.max(0, this.scroll - page); this.follow = false; }
-    else if (this.matches(data, "tui.altScreen.pageDown", "pageDown")) { this.scroll = Math.min(max, this.scroll + page); this.follow = this.scroll >= max; }
-    else if (matchesKey(data, "up") || matchesKey(data, "shift+up") || data === "k") { this.scroll = Math.max(0, this.scroll - 1); this.follow = false; }
-    else if (matchesKey(data, "down") || matchesKey(data, "shift+down") || data === "j") { this.scroll = Math.min(max, this.scroll + 1); this.follow = this.scroll >= max; }
+    // Scrolling the loading placeholder must not disable the initial follow-to-end position.
+    if (this.snapshot && this.matches(data, "tui.altScreen.top", "home")) { this.scroll = 0; this.follow = false; this.pendingScrollAdjustment = undefined; }
+    else if (this.snapshot && this.matches(data, "tui.altScreen.bottom", "end")) { this.scroll = max; this.follow = true; this.pendingScrollAdjustment = undefined; }
+    else if (this.snapshot && this.matches(data, "tui.altScreen.pageUp", "pageUp")) { this.scroll = Math.max(0, this.scroll - page); this.follow = false; }
+    else if (this.snapshot && this.matches(data, "tui.altScreen.pageDown", "pageDown")) { this.scroll = Math.min(max, this.scroll + page); this.follow = this.scroll >= max; }
+    else if (this.snapshot && (matchesKey(data, "up") || matchesKey(data, "shift+up") || data === "k")) { this.scroll = Math.max(0, this.scroll - 1); this.follow = false; }
+    else if (this.snapshot && (matchesKey(data, "down") || matchesKey(data, "shift+down") || data === "j")) { this.scroll = Math.min(max, this.scroll + 1); this.follow = this.scroll >= max; }
     else if (agent && matchesKey(data, "s") && (canSteer(agent.phase) || isTerminal(agent.phase))) {
       this.finish({ kind: "message", id: agent.id, resume: !canSteer(agent.phase) }); return;
     } else if (agent && matchesKey(data, "x") && !isTerminal(agent.phase)) { this.finish({ kind: "stop", id: agent.id }); return; }
@@ -199,7 +228,7 @@ export class ConversationViewer {
       return `${clipped}${" ".repeat(Math.max(0, room - visibleWidth(clipped)))} ${right}`;
     };
 
-    const agent = this.snapshot?.agent;
+    const agent = this.agent;
     const stats = [this.snapshot?.usage ? `${formatTokens(this.snapshot.usage.input + this.snapshot.usage.output + this.snapshot.usage.cacheRead + this.snapshot.usage.cacheWrite)} tokens` : undefined,
       this.snapshot?.model ? oneLine(this.snapshot.model, 40) : undefined].filter(Boolean).join(" · ");
     const header = agent
@@ -207,7 +236,12 @@ export class ConversationViewer {
         this.theme.fg("dim", stats), inner)
       : this.theme.fg("muted", "Loading child session...");
 
+    this.contentWidth = inner;
     const body = this.content(inner);
+    if (this.pendingScrollAdjustment !== undefined) {
+      this.scroll = Math.max(0, this.scroll + this.pendingScrollAdjustment);
+      this.pendingScrollAdjustment = undefined;
+    }
     this.totalLines = body.length;
     const max = Math.max(0, body.length - this.viewport);
     this.scroll = this.follow ? max : Math.min(max, this.scroll);
@@ -217,10 +251,11 @@ export class ConversationViewer {
     const percent = body.length <= this.viewport ? 100 : Math.round(((this.scroll + this.viewport) / Math.max(1, body.length)) * 100);
     const status = this.error
       ? this.theme.fg("error", oneLine(this.error, 120))
+      : this.snapshot?.historyLoading ? this.theme.fg(this.snapshot.notice ? "warning" : "dim", `Recent preview · loading history/totals${this.snapshot.notice ? ` · ${oneLine(this.snapshot.notice, 120)}` : ""}`)
       : this.snapshot?.notice ? this.theme.fg("warning", oneLine(this.snapshot.notice, 120))
-        : this.snapshot?.loading ? this.theme.fg("dim", "Loading history...")
+        : !this.snapshot || this.snapshot.loading ? this.theme.fg("dim", "Loading history...")
           : this.theme.fg("dim", `${this.follow ? "Following" : "Paused"} · ${body.length} lines · ${Math.min(100, percent)}%`);
-    const hints: string[] = ["↑↓ scroll", "PgUp/PgDn", "Home/End"];
+    const hints: string[] = this.snapshot ? ["↑↓ scroll", "PgUp/PgDn", "Home/End"] : [];
     if (agent && this.onSend && canSteer(agent.phase)) hints.push("Enter message");
     else if (agent && this.onSend && canMessage(agent.phase)) hints.push("Enter resume");
     if (agent && !isTerminal(agent.phase)) hints.push("x stop");
@@ -261,7 +296,8 @@ export class ConversationViewer {
       const rendered = this.renderEntry(entry, width);
       if (rendered.length) lines.push(...rendered, "");
     }
-    if (!lines.length) lines.push(this.theme.fg("dim", "No messages yet. Waiting for the child to emit events."));
+    if (!lines.length) lines.push(this.theme.fg("dim", this.snapshot
+      ? "No messages yet. Waiting for the child to emit events." : "Loading recent messages..."));
     this.cache = { width, lines };
     return lines;
   }

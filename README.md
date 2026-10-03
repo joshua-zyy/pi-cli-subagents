@@ -35,7 +35,7 @@ Use a persistent parent session, **not `--no-session`**. Reports arrive automati
 
 All four built-in roles use Pi: `explore` investigates, `worker` implements and verifies, `reviewer` independently reviews, and `oracle` gives a second opinion. Read-only role instructions are **not a permission sandbox**.
 
-Open **`/cli-agents-setting`** to choose each role's CLI and model. **Tab** switches user/project scope, **Enter** edits, **s** saves, and **Esc** goes back. Changes apply to the next spawn.
+Open **`/cli-agents-setting`** to choose each role's CLI and model. **Tab** switches user/project scope, **Enter** edits, **s** saves, and **Esc** goes back one level or closes the role list (asking before discarding an unsaved draft). Selected roles, fields, and choices stay visible in short panels. Changes apply to the next spawn.
 
 You can also edit role files directly:
 
@@ -67,7 +67,7 @@ These are per-launch settings, not changes to the CLIs' global configuration. Co
 
 ## Monitor and continue
 
-Open **`/agents`** or press **Ctrl+Alt+A**. Select an instance with **↑/↓**; use **Enter/v** for its live conversation, **s** to message or resume, **r** to answer a request, and **x** to stop. Closing the viewer does not stop the agent.
+Open **`/agents`** or press **Ctrl+Alt+A**. Select an instance with **↑/↓**; use **Enter/v** for its live conversation, **s** to message or resume, **r** to answer a request, and **x** to stop. Closing the viewer does not stop the agent. On first open, a bounded tail preview shows recent content before older history and totals finish loading in the background. Partial lifetime totals are hidden until reconstruction completes; earlier streaming context may also fill in then. Status, scrolling, and message/stop controls remain available throughout. Scrolling up pauses follow; **End** resumes it. The viewer retains at most 300 display entries; older content remains in the event logs.
 
 | Tool available to the parent | Purpose |
 | --- | --- |
@@ -80,6 +80,8 @@ Open **`/agents`** or press **Ctrl+Alt+A**. Select an instance with **↑/↓**;
 | `respond_to_permission` | Answer one current request with an explicit reason |
 
 `list_agents()` returns metadata without result bodies; `{id}` adds the current bounded preview. Final notifications include a `list_agents({id, runId})` link to the original result for that exact run. For longer results, keep both IDs fixed and pass the returned `nextOffset` as `offset` until it is `null` (default/max `limit: 6000` UTF-16 code units). Reading results never resumes an agent.
+
+In the TUI, reports follow Pi’s expand/collapse state (**Ctrl+O** by default, respecting custom keybindings). Collapsed cards show a one-line instance/status summary, with failures and pending requests highlighted; expand to see the notification body and exact-run result link. Old notifications without display metadata show `status unavailable` rather than an inferred success. Only presentation changes: parent-facing content and delivery receipts remain intact. Expanded text strips ANSI/terminal controls; original records are unchanged.
 
 Pi and Codex accept running `steer` messages; running `followUp` is Pi-only. Wait for Claude to finish before sending more instructions. Panels are TUI-only; the tools also work in RPC/non-interactive modes.
 

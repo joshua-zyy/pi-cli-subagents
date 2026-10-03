@@ -59,7 +59,9 @@ export function deliverReports(
   }).join("\n\n");
   for (const id of ids) pending.add(id);
   try {
-    pi.sendMessage({ customType, content, display: true, details: { ids } }, { triggerTurn: true, deliverAs: "steer" });
+    // Display metadata is separate from model-facing content and the receipt IDs.
+    const displayReports = reports.map(({ agentId, status }) => ({ agentId, status }));
+    pi.sendMessage({ customType, content, display: true, details: { ids, reports: displayReports } }, { triggerTurn: true, deliverAs: "steer" });
   } catch (error) {
     for (const id of ids) pending.delete(id);
     throw error;

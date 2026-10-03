@@ -128,7 +128,7 @@ test('scope switching is offered only for a trusted project', () => {
   assert.match(untrusted.render(100), /project \(untrusted, not loaded\)/);
 });
 
-test('dirty drafts advertise save and discard', () => {
+test('dirty drafts advertise save without making Esc an immediate discard action', () => {
   const clean = panel([row()]);
   clean.instance.handleInput('s');
   assert.deepEqual(clean.actions, [], 'save is unavailable without changes');
@@ -270,4 +270,62 @@ test('the panel reopens where the user left off instead of at the top of the lis
   const dropped = panel([row({ name: 'oracle', effective: role({ cli: 'codex', model: 'gpt-6-luna' }) })], { cursor: { role: 'oracle', field: 'thinking' } });
   assert.equal(dropped.instance.mode, 'fields');
   assert.match(dropped.render(100), /› cli/);
+});
+
+test('small row budgets keep every selected role visible without exceeding the frame', () => {
+  for (const budget of [1, 2, 4, 6, 8, 14]) {
+    const p = panel(Array.from({ length: 12 }, (_, i) => row({ name: `role-${i}` })), { rows: budget });
+    for (let i = 0; i < 12; i++) {
+      for (const width of [40, 100]) {
+        const lines = p.instance.render(width);
+        assert.ok(lines.length <= budget, `height ${lines.length} exceeds ${budget}`);
+        assert.ok(lines.every(line => visibleWidth(line) <= width));
+        assert.match(lines.join('\n'), new RegExp(`› role-${i}\\b`), `role ${i} hidden at budget ${budget}`);
+      }
+      p.instance.handleInput(keys.down);
+    }
+  }
+});
+
+test('field selection survives notes and approval warnings in a short terminal', () => {
+  for (const effective of [role({ cli: 'pi' }), role({ cli: 'codex', model: 'gpt-6-luna', mode: 'full-access' }),
+    role({ cli: 'claude', model: 'opus', mode: 'bypassPermissions' })]) {
+    const fields = effective.cli === 'pi' ? ['cli', 'provider', 'model', 'thinking', 'description', 'instructions']
+      : ['cli', 'model', effective.cli === 'codex' ? 'effort' : 'thinking', 'mode', 'description', 'instructions'];
+    for (const budget of [4, 6, 8, 14]) {
+      const p = panel([row({ effective })], { rows: budget, choices: { pending: true } });
+      p.instance.handleInput(keys.enter);
+      for (const field of fields) {
+        const lines = p.instance.render(100);
+        assert.ok(lines.length <= budget);
+        assert.match(lines.join('\n'), new RegExp(`› ${field}\\b`), `${field} hidden at ${budget} rows`);
+        if (effective.mode && budget >= 6) assert.match(lines.join('\n'), /stops asking for approval/);
+        p.instance.handleInput(keys.down);
+      }
+    }
+  }
+});
+
+test('short model pickers keep every choice visible even with a current-value footer', () => {
+  const models = Array.from({ length: 30 }, (_, i) => ({ provider: 'p', model: `model-${i}` }));
+  const p = panel([row({ effective: role({ cli: 'pi', provider: 'p', model: 'custom-model' }) })],
+    { rows: 8, choices: { catalog: { pi: models, codex: [] } }, cursor: { role: 'worker', field: 'model' } });
+  p.instance.handleInput(keys.enter);
+  for (let i = 0; i <= 30; i++) {
+    const lines = p.instance.render(100);
+    assert.ok(lines.length <= 8);
+    assert.match(lines.join('\n'), i < 30 ? new RegExp(`› model-${i}\\b`) : /› ✎ type a value/);
+    assert.match(lines.join('\n'), /Current value: custom-model/);
+    p.instance.handleInput(keys.down);
+  }
+});
+
+test('dirty Esc hints match back and close behavior without discarding the draft', () => {
+  const p = panel([row()], { dirty: true });
+  assert.match(p.render(), /esc close/); assert.doesNotMatch(p.render(), /esc discard/);
+  p.instance.handleInput(keys.enter);
+  assert.match(p.render(), /esc back/); assert.doesNotMatch(p.render(), /esc discard/);
+  p.instance.handleInput(keys.escape);
+  assert.deepEqual(p.actions, []); assert.match(p.render(), /unsaved/);
+  p.instance.handleInput(keys.escape); assert.deepEqual(p.actions, [{ kind: 'close' }]);
 });

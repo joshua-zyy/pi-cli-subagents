@@ -132,26 +132,19 @@ export class RoleSettingsPanel {
   }
 
   render(width: number): string[] {
-    const lines = this.view === "list" ? this.renderList() : this.view === "fields" ? this.renderFields() : this.renderChoices();
     const available = this.availableRows;
-    const framed = width >= PANE_FRAME_MIN_WIDTH;
-    // The frame costs two rows, so those are reserved before the content is bounded.
+    const framed = width >= PANE_FRAME_MIN_WIDTH && (available === 0 || available > PANE_FRAME_ROWS);
     const room = framed && available > 0 ? available - PANE_FRAME_ROWS : available;
-    const bounded = room > 0 && lines.length > room ? [...lines.slice(0, Math.max(0, room - 2)), this.theme.fg("dim", "…"), lines[lines.length - 1]] : lines;
-    if (!framed) return width > 0 ? bounded.map((line) => truncateToWidth(line, width)) : bounded;
-    return framePane(bounded, width, this.frameColor ?? ((text: string) => this.theme.fg("dim", text)));
+    // Each view budgets its chrome and selected row together; never crop the result afterward.
+    const lines = this.view === "list" ? this.renderList(room) : this.view === "fields" ? this.renderFields(room) : this.renderChoices(room);
+    if (!framed) return width > 0 ? lines.map((line) => truncateToWidth(line, width)) : lines;
+    return framePane(lines, width, this.frameColor ?? ((text: string) => this.theme.fg("dim", text)));
   }
 
   private get availableRows(): number {
     const rows = this.rowLimit();
     if (!Number.isFinite(rows) || rows <= 0) return 0;
     return Math.floor(rows);
-  }
-
-  private visibleRows(total: number): number {
-    const available = this.availableRows;
-    if (available <= 0) return Math.max(1, total);
-    return Math.max(1, Math.min(total, available - 4));
   }
 
   private finish(action: RoleSettingsAction): void {
@@ -172,14 +165,25 @@ export class RoleSettingsPanel {
     return `${marker}${this.theme.fg(color, label)}${suffix}`;
   }
 
-  private window<T>(items: T[], selected: number, render: (item: T, isSelected: boolean) => string): string[] {
-    const visible = this.visibleRows(items.length);
-    const start = selected < visible ? 0 : selected - visible + 1;
-    const lines: string[] = [];
-    if (start > 0) lines.push(this.theme.fg("dim", `↑ ${start} more`));
+  private window<T>(header: string[], items: T[], selected: number, render: (item: T, isSelected: boolean) => string, room: number, after: string[] = []): string[] {
+    if (!items.length) return room > 0 ? [...header, ...after].slice(0, room) : [...header, ...after];
+    const limit = room || header.length + items.length + after.length;
+    // Reserve one selectable row before retaining hints/notes. The title and key hints outrank a footer.
+    const footer = after.slice(0, Math.max(0, limit - Math.min(2, header.length) - 1));
+    const lines = header.slice(0, Math.max(0, limit - footer.length - 1));
+    const budget = limit - lines.length - footer.length;
+    let visible = Math.min(items.length, budget);
+    let start = Math.max(0, selected - visible + 1);
+    // Fit scroll markers into the same budget, not on top of the selectable rows.
+    while (visible > 1 && visible + Number(start > 0) + Number(start + visible < items.length) > budget) {
+      visible--;
+      start = Math.max(0, selected - visible + 1);
+    }
+    let spare = budget - visible;
+    if (start > 0 && spare > 0) { lines.push(this.theme.fg("dim", `↑ ${start} more`)); spare--; }
     for (let index = start; index < Math.min(items.length, start + visible); index++) lines.push(render(items[index], index === selected));
-    if (items.length > start + visible) lines.push(this.theme.fg("dim", `↓ ${items.length - start - visible} more`));
-    return lines;
+    if (items.length > start + visible && spare > 0) lines.push(this.theme.fg("dim", `↓ ${items.length - start - visible} more`));
+    return [...lines, ...footer];
   }
 
   private originLabel(row: RoleRow): string {
@@ -204,39 +208,38 @@ export class RoleSettingsPanel {
     return this.scope === "user" ? "project" : "personal";
   }
 
-  private renderList(): string[] {
+  private renderList(room: number): string[] {
     const lines = [this.theme.bold(this.theme.fg("accent", `Subagent roles — ${this.scopeHeading()}${this.dirty ? " • unsaved" : ""}`))];
     if (!this.rows.length) {
       lines.push(this.theme.fg("dim", "No roles available"));
       lines.push(this.hint([["a", "add"], ["esc", "close"]]));
-      return lines;
+      return room > 0 ? lines.slice(0, room) : lines;
     }
     const actions: [string, string][] = [["↑↓", "select"], ["enter", "edit"], ["tab", this.scopeHint()], ["a", "add"], ["d", "remove"]];
     if (this.dirty) actions.push(["s", "save"]);
-    actions.push(["esc", this.dirty ? "discard" : "close"]);
+    actions.push(["esc", "close"]);
     lines.push(this.hint(actions));
-    lines.push(...this.window(this.rows, this.rowIndex, (row, selected) => this.row(selected, row.name, `${roleSummary(row.effective)} · ${this.originLabel(row)}`)));
-    return lines;
+    return this.window(lines, this.rows, this.rowIndex, (row, selected) => this.row(selected, row.name, `${roleSummary(row.effective)} · ${this.originLabel(row)}`), room);
   }
 
-  private renderFields(): string[] {
+  private renderFields(room: number): string[] {
     const selected = this.selected;
     if (!selected) return [this.theme.fg("dim", "No role selected")];
     const lines = [this.theme.bold(this.theme.fg("accent", `${selected.name} — ${this.scopeHeading()}${this.dirty ? " • unsaved" : ""}`))];
     const actions: [string, string][] = [["↑↓", "select"], ["enter", "change"], ["d", "remove override"]];
     if (this.dirty) actions.push(["s", "save"]);
-    actions.push(["esc", this.dirty ? "discard" : "back"]);
+    actions.push(["esc", "back"]);
     lines.push(this.hint(actions));
+    // Preserve permission warnings ahead of lower-priority help when space is tight.
+    if (selected.effective.mode && suppressesApprovals(selected.effective.mode))
+      lines.push(this.theme.fg("warning", `mode ${selected.effective.mode}: this role stops asking for approval`));
     // Only prompt for a CLI when nothing CLI-specific is on screen yet.
     const cliSpecific = this.fields.some((field) => field !== "cli" && field !== "description" && field !== "instructions");
     if (!selected.effective.cli && !cliSpecific) lines.push(this.theme.fg("muted", "Choose a CLI first; its specific options appear after that."));
     if (this.choiceOptions().pending && (selected.effective.cli === "pi" || selected.effective.cli === "codex"))
       lines.push(this.theme.fg("muted", "Reading each CLI's own model list; that field becomes a picker when it arrives."));
     if (!selected.override) lines.push(this.theme.fg("muted", `No ${SCOPE_LABEL[this.scope]} entry yet; changing a field creates one.`));
-    if (selected.effective.mode && suppressesApprovals(selected.effective.mode))
-      lines.push(this.theme.fg("warning", `mode ${selected.effective.mode}: this role stops asking for approval`));
-    lines.push(...this.window(this.fields, this.fieldIndex, (field, isSelected) => this.row(isSelected, FIELD_LABELS[field], this.fieldDisplay(selected, field))));
-    return lines;
+    return this.window(lines, this.fields, this.fieldIndex, (field, isSelected) => this.row(isSelected, FIELD_LABELS[field], this.fieldDisplay(selected, field)), room);
   }
 
   private fieldDisplay(row: RoleRow, field: EditableField): string {
@@ -245,7 +248,7 @@ export class RoleSettingsPanel {
     return oneLine(value, 80) || "(empty)";
   }
 
-  private renderChoices(): string[] {
+  private renderChoices(room: number): string[] {
     const selected = this.selected, field = this.field;
     if (!selected || !field) return [this.theme.fg("dim", "No field selected")];
     const lines = [this.theme.bold(this.theme.fg("accent", `${selected.name} · ${FIELD_LABELS[field]}`))];
@@ -253,8 +256,7 @@ export class RoleSettingsPanel {
     const choices = this.choices, current = fieldValue(selected.override ?? selected.effective, field);
     // While discovery runs the list only holds the escape hatch, so say why it is still empty.
     if (!this.values.length && this.choiceOptions().pending) lines.push(this.theme.fg("muted", "Reading this CLI's own model list…"));
-    lines.push(...this.window(choices, this.choiceIndex, (choice, isSelected) => this.row(isSelected, choice, this.choiceDetail(field, choice, current))));
-    if (current && !choices.includes(current)) lines.push(this.theme.fg("dim", `Current value: ${current}`));
-    return lines;
+    const footer = current && !choices.includes(current) ? [this.theme.fg("dim", `Current value: ${current}`)] : [];
+    return this.window(lines, choices, this.choiceIndex, (choice, isSelected) => this.row(isSelected, choice, this.choiceDetail(field, choice, current)), room, footer);
   }
 }

@@ -3,7 +3,8 @@ import { Key } from "@earendil-works/pi-tui";
 import { getAgentDir, getMarkdownTheme, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { AgentManager } from "./manager.js";
 import { WorkspaceDecisionRequired, type ResumeOptions } from "./workspace.js";
-import { deliverReports } from "./notifier.js";
+import { customType as reportType, deliverReports } from "./notifier.js";
+import { renderReportMessage } from "./ui/report.js";
 import { CLI_CHOICES, loadRoles, mergeRoles } from "./roles.js";
 import { detectClis, probeCatalog, type ModelCatalog } from "./cli-discovery.js";
 import { addRole, deleteRole, FIELD_LABELS, fieldValue, readScope, roleRows, setField, writeScope, type Scope } from "./role-settings.js";
@@ -52,6 +53,7 @@ export const humanActionType = "cli-subagents-human-action";
 export default function extension(pi: ExtensionAPI): void {
   // Explicit child marker prevents an auto-discovered copy of this extension from recursively spawning agents.
   if (process.env.PI_CLI_SUBAGENT === "1") return;
+  pi.registerMessageRenderer(reportType, renderReportMessage);
   const cli = process.argv[1];
   const launch: Launch = { command: process.execPath, args: [cli] };
   let dismissPanel: (() => void) | undefined;
@@ -355,7 +357,7 @@ export default function extension(pi: ExtensionAPI): void {
                   dismissPanel = () => { viewer?.dispose(); done(undefined); };
                   viewer = new ConversationViewer(tui, theme, done, async () => {
                     const agent = manager.get(id);
-                    return { agent, ...await reader.read(manager.eventLogs(id)) };
+                    return { agent, ...await reader.readRecent(manager.eventLogs(id)) };
                   }, { keybindings, markdownTheme: getMarkdownTheme(),
                     onSend: async (message) => {
                       try { recordHumanAction(ctx, await manager.send(id, message), `Sent an instruction: "${oneLine(message, 400)}"`); }

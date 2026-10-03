@@ -33,6 +33,7 @@ test('extension tools implement → separate review → resume same implementer;
     registerTool(tool) { tools.set(tool.name, tool); },
     registerCommand(name, command) { commands.set(name, command); },
     registerShortcut() {},
+    registerMessageRenderer() {},
     sendMessage(message, options) {
       messages.push({ message, options });
       entries.push({ type: 'custom_message', ...message });
@@ -121,7 +122,7 @@ test('extension tools implement → separate review → resume same implementer;
 
 test('the role editor is registered but stays out of non-TUI modes', async () => {
   const commands = new Map(), notifications = [];
-  extension({ on() {}, registerTool() {}, registerCommand: (name, command) => commands.set(name, command), registerShortcut() {}, sendMessage() {} });
+  extension({ on() {}, registerTool() {}, registerCommand: (name, command) => commands.set(name, command), registerShortcut() {}, registerMessageRenderer() {}, sendMessage() {} });
   const ctx = { mode: 'rpc', cwd: process.cwd(), isProjectTrusted: () => true, ui: { notify: (message, level) => notifications.push([message, level]) } };
   await commands.get('cli-agents-setting').handler('', ctx);
   assert.deepEqual(notifications.map(([, level]) => level), ['error']);

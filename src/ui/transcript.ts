@@ -10,7 +10,19 @@ export interface TranscriptEntry {
   input?: string;
   status?: "running" | "done" | "error";
 }
-export interface TranscriptSnapshot { entries: TranscriptEntry[]; loading: boolean; notice?: string; revision?: number; usage?: TranscriptUsage; provider?: string; model?: string }
+export interface TranscriptSnapshot {
+  entries: TranscriptEntry[];
+  loading: boolean;
+  /** Recent content is usable, but older history and lifetime totals are still being reconstructed. */
+  historyLoading?: boolean;
+  notice?: string;
+  revision?: number;
+  /** New log bytes, excluding historical reconstruction and the preview-to-history handoff. */
+  outputRevision?: number;
+  usage?: TranscriptUsage;
+  provider?: string;
+  model?: string;
+}
 /** Lifetime tokens reported by the child's assistant messages, plus the latest context size. */
 export interface TranscriptUsage { input: number; output: number; cacheRead: number; cacheWrite: number; cost: number; contextTokens?: number }
 
@@ -54,7 +66,125 @@ export class TranscriptReader {
   private provider?: string;
   private model?: string;
 
-  constructor(private readonly cli: Cli = "pi", private threadId?: string) {}
+  private readonly initialThreadId?: string;
+  private generation = 0;
+  private recentFiles: string[] = [];
+  private preview?: TranscriptReader;
+  private caughtUp = false;
+  private publishedKey = "";
+  private publishedRevision = 0;
+  private outputCursor = "";
+  private outputRevision = 0;
+
+  constructor(private readonly cli: Cli = "pi", private threadId?: string) { this.initialThreadId = threadId; }
+
+  /** Serial calls only: show the tail first, then advance live output and one historical batch per refresh. */
+  async readRecent(files: string[]): Promise<TranscriptSnapshot> {
+    if (!files.length) {
+      if (this.recentFiles.length) { this.reset(); this.preview = undefined; this.caughtUp = false; }
+      this.recentFiles = [];
+      return this.publish(this.snapshot(false), this, false);
+    }
+    const changed = this.recentFiles.some((file, i) => files[i] !== file);
+    const extended = files.length > this.recentFiles.length;
+    this.recentFiles = [...files];
+    if (changed || (!this.preview && !this.caughtUp)) return this.startRecent(files);
+
+    const generation = this.generation;
+    const history = await this.read(files);
+    if (generation !== this.generation) return this.startRecent(files);
+    if (this.caughtUp) return this.publish(history, this, false);
+
+    let preview = this.preview!;
+    let recent: TranscriptSnapshot;
+    if (extended || (this.cli !== "pi" && !preview.threadId && this.threadId)) {
+      this.preview = preview = new TranscriptReader(this.cli, this.threadId);
+      await preview.seekTail(files);
+      recent = preview.snapshot(false);
+    } else if (this.cli === "pi" || preview.threadId) {
+      const previewGeneration = preview.generation;
+      recent = await preview.read(files);
+      if (previewGeneration !== preview.generation) return this.startRecent(files);
+    } else recent = preview.snapshot(false);
+    // Read history BEFORE the tail, and publish any new live bytes before handing off. Only replace
+    // at the last displayed cursor, so historical prepends cannot move a paused view past an append.
+    const cursor = `${this.generation}:${files[preview.fileIndex] ?? ""}:${preview.offset}`;
+    if (!history.loading && !recent.loading && this.fileIndex === preview.fileIndex && this.offset === preview.offset && cursor === this.outputCursor) {
+      this.caughtUp = true;
+      this.preview = undefined;
+      return this.publish(history, this, false);
+    }
+    return this.publish(recent, preview, true);
+  }
+
+  private async startRecent(files: string[]): Promise<TranscriptSnapshot> {
+    this.reset();
+    this.threadId = this.initialThreadId;
+    this.caughtUp = false;
+    this.preview = new TranscriptReader(this.cli, this.threadId);
+    await this.preview.seekTail(files);
+    return this.publish(this.preview.snapshot(false), this.preview, true);
+  }
+
+  private publish(snapshot: TranscriptSnapshot, source: TranscriptReader, historyLoading: boolean): TranscriptSnapshot {
+    const key = `${this.generation}:${historyLoading ? "preview" : "history"}:${source.fileIndex}:${source.revision}`;
+    if (key !== this.publishedKey) { this.publishedKey = key; this.publishedRevision++; }
+    const cursor = `${this.generation}:${source.files[source.fileIndex] ?? ""}:${source.offset}`;
+    if (cursor !== this.outputCursor) { this.outputCursor = cursor; this.outputRevision++; }
+    return { ...snapshot, historyLoading, revision: this.publishedRevision, outputRevision: this.outputRevision,
+      ...(historyLoading ? { usage: undefined } : {}) };
+  }
+
+  /** A bounded initial seek; never join a partial first line to a later event or decode half a UTF-8 prefix. */
+  private async seekTail(files: string[]): Promise<void> {
+    this.files = [...files];
+    this.fileIndex = Math.max(0, files.length - 1);
+    for (let i = files.length - 1; i >= 0; i--) {
+      let handle;
+      try {
+        handle = await open(files[i], "r");
+        const { size } = await handle.stat();
+        if (size === 0 && i > 0) continue;
+        this.fileIndex = i;
+        this.add({ id: `${i}:run`, kind: "notice", title: `Run ${i + 1}`, text: files[i] });
+        let window = Math.min(size, CHUNK_BYTES);
+        while (true) {
+          const start = Math.max(0, size - window), readStart = Math.max(0, start - 1);
+          const bytes = Buffer.alloc(size - readStart);
+          const { bytesRead } = await handle.read(bytes, 0, bytes.length, readStart);
+          const data = bytes.subarray(0, bytesRead);
+          let first = start - readStart;
+          let fragment = false;
+          if (start > 0 && data[0] !== 10) {
+            const newline = data.indexOf(10, first);
+            first = newline < 0 ? data.length : newline + 1;
+            fragment = newline < 0;
+          }
+          // Grow only when the window cannot contain even one complete record. A supported record
+          // is at most MAX_RECORD bytes; one extra chunk covers its preceding boundary.
+          if (start > 0 && data.lastIndexOf(10) < first && window < MAX_RECORD + CHUNK_BYTES) {
+            window = Math.min(size, MAX_RECORD + CHUNK_BYTES, window * 2);
+            continue;
+          }
+          if (start > 0 && this.cli !== "pi" && !this.threadId) {
+            // Learn identity only from the beginning of this run, never from an arbitrary tail event.
+            const head = new TranscriptReader(this.cli);
+            await head.read([files[i]]);
+            this.threadId = head.threadId;
+            this.provider = head.provider; this.model = head.model;
+          }
+          this.offset = readStart + bytesRead;
+          this.clipped = start > 0 || i > 0;
+          this.droppingLine = fragment;
+          if (start === 0 || this.cli === "pi" || this.threadId) this.consume(this.decoder.write(data.subarray(first)));
+          else this.error = "Waiting for the native session identity while history loads.";
+          return;
+        }
+      } catch (error) {
+        this.error = `Event log unavailable: ${(error as Error).message}`;
+      } finally { await handle?.close(); }
+    }
+  }
 
   async read(files: string[]): Promise<TranscriptSnapshot> {
     // A different instance/history or a truncated file must not share parsing state.
@@ -101,6 +231,7 @@ export class TranscriptReader {
     this.error = undefined;
   }
   private reset(): void {
+    this.generation++;
     this.revision++;
     this.files = []; this.fileIndex = 0; this.offset = 0; this.buffer = "";
     this.decoder = new StringDecoder("utf8"); this.droppingLine = false;
