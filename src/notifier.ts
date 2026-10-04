@@ -49,12 +49,12 @@ export function deliverReports(
     let raw = source.text;
     if (source.error) raw = `Error: ${source.error}\n${raw}`.trim();
     if (!raw) raw = report.status === "waiting"
-      ? "Waiting for a response; inspect it with list_agents or /agent-reply."
-      : "No text response; inspect with list_agents or /agents.";
+      ? "Waiting for a response; inspect it with subagent_query or /agent-reply."
+      : "No text response; inspect with subagent_query or /agents.";
     const clipped = raw.length > REPORT_LIMIT;
     const summary = clipped ? `${raw.slice(0, REPORT_HEAD)}\n… ${raw.length - REPORT_LIMIT} characters omitted …\n${raw.slice(-REPORT_TAIL)}\n(truncated preview)` : raw;
-    const resultHint = final ? `\nRead result: list_agents(${JSON.stringify({ id: report.agentId, runId: report.runId })})` : "";
-    const replyHint = report.status === "waiting" ? `\nQuestion ID: ${report.questionId ?? "inspect the instance with list_agents"}; answer it with respond_to_permission, or /agent-reply.` : "";
+    const resultHint = final ? `\nRead result: subagent_query(${JSON.stringify({ action: "result", id: report.agentId, runId: report.runId })})` : "";
+    const replyHint = report.status === "waiting" ? `\nQuestion ID: ${report.questionId ?? "inspect the instance with subagent_query"}; answer it with subagent_reply, or /agent-reply.` : "";
     return `[Subagent ${report.agentId} · ${report.status}]\n${summary}${resultHint}${replyHint}`;
   }).join("\n\n");
   for (const id of ids) pending.add(id);

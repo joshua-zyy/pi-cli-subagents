@@ -110,7 +110,7 @@ async function run(dir: string, runId: string): Promise<void> {
     if (ending || !rpc) throw new Error("Not accepted: worker is starting or shutting down; inspect its state first.");
     if (input.type === "send") {
       if (!state.accepted) throw new Error("Initial task has not been accepted; resolve any startup interaction first.");
-      if (state.questions.length) throw new Error("The child has an unresolved interaction. Use respond_to_permission or /agent-reply; a message is not an approval.");
+      if (state.questions.length) throw new Error("The child has an unresolved interaction. Use subagent_reply or /agent-reply; a message is not an approval.");
       if (typeof input.message !== "string" || !input.message.trim() || !["steer", "followUp"].includes(input.mode)) throw new Error("Invalid message or delivery mode");
       await rpc.send(input.message, input.mode);
     } else if (input.type === "reply") {

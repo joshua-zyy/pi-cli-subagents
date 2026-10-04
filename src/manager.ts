@@ -310,7 +310,7 @@ export class AgentManager {
       if (["running", "starting"].includes(state.phase) && now - state.updatedAt >= 15 * 60_000) reports.push({
         notificationId: `${state.runId}-inactive`, agentId: state.id, runId: state.runId, parentFile: this.parentFile,
         status: "stalled", time: state.updatedAt + 15 * 60_000,
-        text: "No activity for 15 minutes; the child may still be running. Inspect with list_agents or /agents; do not assume failure or start duplicate work.",
+        text: "No activity for 15 minutes; the child may still be running. Inspect with subagent_query or /agents; do not assume failure or start duplicate work.",
         logFile: state.logFile,
       });
     }

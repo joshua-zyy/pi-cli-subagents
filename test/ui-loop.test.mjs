@@ -92,7 +92,7 @@ function harness(t) {
       return (await tools.get(tool).execute('id', params, undefined, undefined, ctx)).content[0].text;
     },
     async spawn(task, role = 'worker') {
-      return json(await this.invoke('spawn_agent', { role, task, cwd }));
+      return json(await this.invoke('subagent', { action: 'start', role, task, cwd }));
     },
     /**
      * The roster is a pane above the editor like the role editor, so it has no custom() overlay:
@@ -412,10 +412,10 @@ test('roster pane and inline messages cannot bypass managed workspace review or 
   git('config', 'core.autocrlf', 'false');
   fs.writeFileSync(path.join(repo, 'base.txt'), 'base\n'); git('add', '.'); git('commit', '-qm', 'fixture');
   h.ctx.cwd = repo;
-  const ws = JSON.parse(await h.invoke('create_workspace', {}));
-  const worker = json(await h.invoke('spawn_agent', { role: 'worker', task: 'CWD', workspace: ws.id }));
+  const ws = JSON.parse(await h.invoke('subagent_workspace', { action: 'create',}));
+  const worker = json(await h.invoke('subagent', { action: 'start', role: 'worker', task: 'CWD', workspace: ws.id }));
   await waitUntil('worker released', () => h.manager.get(worker.id).phase === 'completed' && !processAlive(h.manager.get(worker.id).workerPid));
-  const reviewer = json(await h.invoke('spawn_agent', { role: 'reviewer', task: 'HOLD review', workspace: ws.id }));
+  const reviewer = json(await h.invoke('subagent', { action: 'start', role: 'reviewer', task: 'HOLD review', workspace: ws.id }));
   h.editorAnswer = 'CWD';
   const occupied = await h.openAgents();
   await occupied.press('i'); await occupied.press('s');
@@ -425,7 +425,7 @@ test('roster pane and inline messages cannot bypass managed workspace review or 
   await h.manager.send(reviewer.id, 'review complete');
   await waitUntil('reviewer released', () => h.manager.get(reviewer.id).phase === 'completed' && !processAlive(h.manager.get(reviewer.id).workerPid));
   fs.writeFileSync(path.join(ws.path, 'base.txt'), 'new\n');
-  await h.invoke('integrate_workspace', { workspace: ws.id });
+  await h.invoke('subagent_workspace', { action: 'integrate', workspace: ws.id });
   const integrated = await h.openAgents();
   await integrated.press('i'); await integrated.press('s');
   await integrated.press(keys.escape); await integrated.running;
@@ -451,10 +451,10 @@ test('TUI sync requires dirty-state confirmation and inline continuation preserv
   git('init', '-q'); git('config', 'user.name', 'Test'); git('config', 'user.email', 'test@example.invalid'); git('config', 'core.autocrlf', 'false');
   fs.writeFileSync(path.join(repo, 'base.txt'), 'base\n'); git('add', '.'); git('commit', '-qm', 'fixture');
   h.ctx.cwd = repo;
-  const ws = JSON.parse(await h.invoke('create_workspace', {}));
-  const worker = json(await h.invoke('spawn_agent', { role: 'worker', task: 'CWD', workspace: ws.id }));
+  const ws = JSON.parse(await h.invoke('subagent_workspace', { action: 'create',}));
+  const worker = json(await h.invoke('subagent', { action: 'start', role: 'worker', task: 'CWD', workspace: ws.id }));
   await waitUntil('worker released', () => h.manager.get(worker.id).phase === 'completed' && !processAlive(h.manager.get(worker.id).workerPid));
-  fs.writeFileSync(path.join(ws.path, 'base.txt'), 'integrated\n'); await h.invoke('integrate_workspace', { workspace: ws.id });
+  fs.writeFileSync(path.join(ws.path, 'base.txt'), 'integrated\n'); await h.invoke('subagent_workspace', { action: 'integrate', workspace: ws.id });
   fs.writeFileSync(path.join(repo, 'parent-new.txt'), 'new parent content');
   h.state.selectAnswer = (_title, choices) => choices[1]; h.state.confirmAnswer = false; h.editorAnswer = 'CWD';
   const declined = await h.openAgents();
@@ -488,10 +488,10 @@ test('TUI refuses parent changes made after the inheritance dialog was displayed
   git('init', '-q'); git('config', 'user.name', 'Test'); git('config', 'user.email', 'test@example.invalid'); git('config', 'core.autocrlf', 'false');
   fs.writeFileSync(path.join(repo, 'base.txt'), 'base\n'); git('add', '.'); git('commit', '-qm', 'fixture');
   h.ctx.cwd = repo;
-  const ws = JSON.parse(await h.invoke('create_workspace', {}));
-  const worker = json(await h.invoke('spawn_agent', { role: 'worker', task: 'CWD', workspace: ws.id }));
+  const ws = JSON.parse(await h.invoke('subagent_workspace', { action: 'create',}));
+  const worker = json(await h.invoke('subagent', { action: 'start', role: 'worker', task: 'CWD', workspace: ws.id }));
   await waitUntil('worker released', () => h.manager.get(worker.id).phase === 'completed' && !processAlive(h.manager.get(worker.id).workerPid));
-  fs.writeFileSync(path.join(ws.path, 'base.txt'), 'integrated\n'); await h.invoke('integrate_workspace', { workspace: ws.id });
+  fs.writeFileSync(path.join(ws.path, 'base.txt'), 'integrated\n'); await h.invoke('subagent_workspace', { action: 'integrate', workspace: ws.id });
   h.state.selectAnswer = (_title, choices) => choices[1]; h.editorAnswer = 'CWD';
   h.ctx.ui.confirm = async () => { fs.writeFileSync(path.join(repo, 'unconfirmed.txt'), 'arrived during dialog'); return true; };
   const rejected = await h.openAgents();

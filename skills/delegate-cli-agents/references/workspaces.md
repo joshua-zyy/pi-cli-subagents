@@ -8,7 +8,7 @@ one when parallel work must not touch the parent directory; otherwise share `cwd
 
 ## Create
 
-`create_workspace({})` reports the workspace but does **not** inherit uncommitted parent files. Inspect
+`subagent_workspace({ action: "create" })` reports the workspace but does **not** inherit uncommitted parent files. Inspect
 its committed baseline and the `parentChanges` it reports before you spawn.
 
 To inherit dirty files, inspect **all** current changes and get the user's authorization first.
@@ -21,8 +21,8 @@ permissions to make a child start there.
 
 ## Work in it
 
-One active instance per workspace. Give the reviewing instance the same workspace ID as the one that made
-the change, and start it only after that instance stops.
+One active instance per workspace. Another instance may use the same workspace ID after the previous
+instance releases it; whether that next task is implementation, review or something else is your workflow.
 
 ## Sync and keep
 
@@ -34,13 +34,13 @@ When an instance continues work in an existing workspace, the baseline is an exp
 
 After either choice, read the baseline or file-change notice and tell the child what to re-read; its
 session memory is not a current view of the files. If a pruned acknowledged baseline means the exact
-diff is unknown, have the child re-read all assigned files, not just the journal paths. An old reviewer
-must acknowledge a worker's sync, and normally choose `keep`, so it reviews the pending changes instead
-of syncing them away.
+diff is unknown, have the child re-read all assigned files, not just the journal paths. An older instance
+must acknowledge a changed baseline. `keep` preserves the pending changes; `sync` does not provide a way
+to discard unintegrated work.
 
 ## Integrate
 
-`integrate_workspace({ workspace })`, then verify the main directory yourself. On conflicts, stop and
+`subagent_workspace({ action: "integrate", workspace })` applies pending changes to the main directory. On conflicts, stop and
 inspect rather than forcing application — see [recovery.md](recovery.md) for the stuck and uncertain
 cases. Do not make branch commits, push, delete worktrees, or widen the task by default.
 

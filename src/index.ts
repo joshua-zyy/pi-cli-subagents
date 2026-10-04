@@ -31,6 +31,17 @@ function visible(state: AgentView, includeText = true) {
   return { id, cli, role, phase, runId, sessionId, ...(session?.cli === "codex" ? { threadId: session.threadId } : {}), cwd, updatedAt, lastActivity, questions, ...(includeText ? { text, truncated } : {}), error, logFile, history, runCount,
     ...(state.workspace ? { workspace: state.workspace, workspaceBaseline: state.workspaceBaseline } : {}), ...(task ? { task } : {}), ...(startedAt ? { startedAt } : {}) };
 }
+
+/** Action-specific requirements supplement the flat provider-compatible object schemas. */
+function checkFields(args: Record<string, unknown>, required: string[], optional: string[] = []): void {
+  for (const key of Object.keys(args)) {
+    if (!required.includes(key) && !optional.includes(key)) throw new Error(`Field ${key} is not allowed for this action`);
+  }
+  for (const key of required) {
+    if (typeof args[key] !== "string" || !(args[key] as string).trim()) throw new Error(`This action requires ${key} as a non-empty string`);
+  }
+}
+
 const view = (state: AgentView): string => JSON.stringify(visible(state));
 const content = (text: string) => ({ content: [{ type: "text" as const, text }], details: undefined });
 /**
@@ -119,112 +130,108 @@ export default function extension(pi: ExtensionAPI): void {
   pi.on("session_shutdown", () => stopMonitor());
 
   pi.registerTool({
-    name: "create_workspace", label: "Create managed worktree",
-    description: "Create a parent-owned detached Git worktree. Default: committed HEAD, reporting but not inheriting dirty files. Explicitly authorized includeUncommitted creates an internal baseline commit without updating the parent's HEAD, index or branches. One independently integrable change per workspace. No dependency installs, pushes or cleanup.",
+    name: "subagent_workspace", label: "Subagent workspace",
+    description: "Manage this parent's detached Git worktrees. create uses committed HEAD unless all uncommitted changes were explicitly authorized. integrate applies an idle workspace's unintegrated changes, rejecting conflicts before writing and preserving parent HEAD/index/branches. No installs, pushes or cleanup. Workspaces may be reused sequentially by different instances.",
     parameters: Type.Object({
-      includeUncommitted: Type.Optional(Type.Object({ reason: Type.String({ description: "Why the user authorized inheriting ALL current uncommitted parent changes. Inspect them first; never assume unrelated edits belong to the task.", minLength: 1 }) })),
-    }),
+      action: Type.Union([Type.Literal("create"), Type.Literal("integrate")]),
+      workspace: Type.Optional(Type.String({ description: "Required for integrate; workspace ID returned by create" })),
+      includeUncommitted: Type.Optional(Type.Object({ reason: Type.String({ minLength: 1, description: "create only: why the user authorized inheriting ALL current uncommitted parent changes" }) }, { additionalProperties: false })),
+    }, { additionalProperties: false }),
     async execute(_id, args, _signal, _update, ctx) {
-      return content(JSON.stringify(await parentManager(ctx, launch).workspaces.create(ctx.cwd, args)));
+      if (args.action === "create") {
+        checkFields(args, ["action"], ["includeUncommitted"]);
+        return content(JSON.stringify(await parentManager(ctx, launch).workspaces.create(ctx.cwd, { includeUncommitted: args.includeUncommitted })));
+      }
+      if (args.action !== "integrate") throw new Error("Unknown workspace action; use create or integrate");
+      checkFields(args, ["action", "workspace"]);
+      return content(JSON.stringify(await parentManager(ctx, launch).workspaces.integrate(args.workspace!)));
     },
   });
   pi.registerTool({
-    name: "integrate_workspace", label: "Integrate managed worktree",
-    description: "Apply an idle managed workspace's changes to its original parent directory without changing the index, HEAD or branches. Requires in-scope independent review. Includes untracked, non-ignored files; conflicts reject the entire patch before writing. Retains the worktree and patch. After deliberate continuation, integrates only the subsequent increment. Old instances must choose a baseline before resuming; unfinished operations require inspection, not blind retries.",
-    parameters: Type.Object({ workspace: Type.String({ description: "Workspace ID returned by create_workspace" }) }),
+    name: "subagent", label: "CLI subagent",
+    description: "Start, message or stop a persistent CLI subagent. start requires role and task; choose cwd or workspace, never both. send requires id and message and continues that exact instance: Pi supports running steer/followUp, Codex running steer only, Claude must finish first. stop requires id and retains history. Never silently replaces a session. Workspace continuation may require explicit keep/sync; sync refuses active, staged or unintegrated work. Results return automatically. Query instances and configured roles with subagent_query.",
+    parameters: Type.Object({
+      action: Type.Union([Type.Literal("start"), Type.Literal("send"), Type.Literal("stop")]),
+      role: Type.Optional(Type.String({ description: "start only, required: configured role name" })),
+      task: Type.Optional(Type.String({ description: "start only, required: task and authorized scope" })),
+      cwd: Type.Optional(Type.String({ description: "start only: defaults to parent cwd; mutually exclusive with workspace" })),
+      workspace: Type.Optional(Type.String({ description: "start only: managed workspace ID; mutually exclusive with cwd" })),
+      id: Type.Optional(Type.String({ description: "send/stop only, required: existing instance ID" })),
+      message: Type.Optional(Type.String({ description: "send only, required: instructions for this instance" })),
+      mode: Type.Optional(Type.Union([Type.Literal("steer"), Type.Literal("followUp")], { description: "send only: running delivery; defaults to steer" })),
+      baseline: Type.Optional(Type.Union([Type.Literal("keep"), Type.Literal("sync")], { description: "send only: explicit workspace baseline decision after integration or another instance's sync; keep preserves current files, not remembered files" })),
+      includeUncommitted: Type.Optional(Type.Object({ reason: Type.String({ minLength: 1, description: "send with sync only: why all current parent changes are authorized for inheritance" }) }, { additionalProperties: false })),
+    }, { additionalProperties: false }),
     async execute(_id, args, _signal, _update, ctx) {
-      return content(JSON.stringify(await parentManager(ctx, launch).workspaces.integrate(args.workspace)));
+      if (args.action === "start") {
+        checkFields(args, ["action", "role", "task"], ["cwd", "workspace"]);
+        if (args.workspace !== undefined && args.cwd !== undefined) throw new Error("Pass workspace or cwd, not both");
+        const roles = loadRoles(getAgentDir(), ctx.cwd, ctx.isProjectTrusted());
+        const resolved = roles[args.role!];
+        if (!resolved) throw new Error(`Unknown role: ${args.role}; available: ${Object.keys(roles).join(", ")}`);
+        const state = await parentManager(ctx, launch).spawn(args.role!, inheritParentModel(resolved, ctx), args.cwd ?? ctx.cwd, args.task!, args.workspace);
+        const result = `Subagent ${state.phase}: ${view(state)}`;
+        if (state.phase === "failed") throw new Error(`${result}\nInspect the instance before retrying; work may already have run.`);
+        return content(`${result}\nCompletion and waiting reports return to this parent session.`);
+      }
+      if (args.action === "send") {
+        checkFields(args, ["action", "id", "message"], ["mode", "baseline", "includeUncommitted"]);
+        const state = await parentManager(ctx, launch).send(args.id!, args.message!, (args.mode ?? "steer") as Delivery,
+          { baseline: args.baseline, includeUncommitted: args.includeUncommitted });
+        const result = `Subagent ${state.phase} after input request: ${view(state)}`;
+        if (state.phase === "failed") throw new Error(`${result}\nInspect the instance before retrying; work may already have run.`);
+        return content(result);
+      }
+      if (args.action !== "stop") throw new Error("Unknown subagent action; use start, send or stop");
+      checkFields(args, ["action", "id"]);
+      return content(`Processes stopped; original session retained: ${view(await parentManager(ctx, launch).close(args.id!))}`);
     },
   });
   pi.registerTool({
-    name: "spawn_agent", label: "Spawn CLI subagent",
-    description: "Start an independent, reusable Pi, Codex or Claude Code CLI subagent asynchronously. Returns an ID; keep working while completion reports arrive automatically. Roles: explore/worker/reviewer/oracle or custom roles. Reuse an existing instance with send_input when the new work depends on what it already did.",
+    name: "subagent_query", label: "Query CLI subagents",
+    description: "Read-only inspection of this parent's instances. list returns metadata and managed workspaces without report bodies; get requires id and includes current details and a bounded preview. result requires id and runId and pages that exact original final report; keep both IDs fixed and follow nextOffset until null. Missing results never fall back to another run. Does not resume agents or cross parent sessions. Completion notifications arrive automatically.",
     parameters: Type.Object({
-      role: Type.String({ description: "Role name; use list_agents to discover available roles" }),
-      task: Type.String({ description: "Concrete goal, authorized files and verification criteria; do not widen CLI permissions" }),
-      cwd: Type.Optional(Type.String({ description: "Shared working directory; defaults to the parent directory. Cannot be combined with workspace." })),
-      workspace: Type.Optional(Type.String({ description: "Managed workspace ID; worker and independent reviewer use the same ID, sequentially. Cannot be combined with cwd." })),
-    }),
+      action: Type.Union([Type.Literal("list"), Type.Literal("get"), Type.Literal("result")]),
+      id: Type.Optional(Type.String({ description: "get/result only, required: instance ID" })),
+      runId: Type.Optional(Type.String({ description: "result only, required: original run ID" })),
+      offset: Type.Optional(Type.Integer({ minimum: 0, description: "result only: UTF-16 offset, default 0" })),
+      limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 6000, description: "result only: page size, default/max 6000" })),
+    }, { additionalProperties: false }),
     async execute(_id, args, _signal, _update, ctx) {
-      const roles = loadRoles(getAgentDir(), ctx.cwd, ctx.isProjectTrusted());
-      const resolved = roles[args.role];
-      if (!resolved) throw new Error(`Unknown role: ${args.role}; available: ${Object.keys(roles).join(", ")}`);
-      if (args.workspace !== undefined && args.cwd !== undefined) throw new Error("Pass workspace or cwd, not both");
-      const role = inheritParentModel(resolved, ctx);
-      const state = await parentManager(ctx, launch).spawn(args.role, role, args.cwd ?? ctx.cwd, args.task, args.workspace);
-      const result = `${state.cli === "codex" ? "Codex" : state.cli === "claude" ? "Claude Code" : "Pi"} subagent ${state.phase}: ${view(state)}`;
-      if (state.phase === "failed") throw new Error(`${result}\nInspect the instance before retrying; work may already have run.`);
-      return content(`${result}\nCompletion and waiting reports return to this parent session.`);
-    },
-  });
-  pi.registerTool({
-    name: "send_input", label: "Message CLI subagent",
-    description: "Send instructions to a running child (steer after its current tool; Pi-only followUp after the current run), or resume a completed child in its original session. Codex running followUp and Claude running steer/followUp are not supported; wait for completion before continuing Claude. Never silently creates a replacement session. Managed workspaces reject messages while another instance occupies them. After integration or another instance's sync, explicitly choose keep (current workspace unchanged) or sync (update to parent state only if no unintegrated/staged work). Sync never runs while the instance is active.",
-    parameters: Type.Object({
-      id: Type.String({ description: "Subagent instance ID" }),
-      message: Type.String({ description: "Instructions or a new task for the same child" }),
-      mode: Type.Optional(Type.Union([Type.Literal("steer"), Type.Literal("followUp")], { description: "Delivery while running; defaults to steer" })),
-      baseline: Type.Optional(Type.Union([Type.Literal("keep"), Type.Literal("sync")], { description: "Required after integration/baseline changes. keep preserves current workspace files, not the old session's remembered files. sync safely updates an idle, fully integrated workspace." })),
-      includeUncommitted: Type.Optional(Type.Object({ reason: Type.String({ description: "For sync only: why the user authorized inheriting ALL current uncommitted parent changes. Inspect first; unrelated changes require confirmation.", minLength: 1 }) })),
-    }),
-    async execute(_id, args, _signal, _update, ctx) {
-      const state = await parentManager(ctx, launch).send(args.id, args.message, (args.mode ?? "steer") as Delivery,
-        { baseline: args.baseline, includeUncommitted: args.includeUncommitted });
-      const result = `Subagent ${state.phase} after input request: ${view(state)}`;
-      if (state.phase === "failed") throw new Error(`${result}\nInspect the instance before retrying; work may already have run.`);
-      return content(result);
-    },
-  });
-  pi.registerTool({
-    name: "list_agents", label: "List CLI subagents",
-    description: "Inspect this parent's instances, task history, roles and pending requests; do not poll for completion. Without id, lists metadata only. With id, includes the current result preview (not full text). With id + runId, reads a page of that run's original final result instead; keep both IDs fixed and follow nextOffset until null to read it all. Never accesses another parent session or resumes an agent.",
-    parameters: Type.Object({
-      id: Type.Optional(Type.String({ description: "Subagent instance ID; required with runId" })),
-      runId: Type.Optional(Type.String({ description: "Read this exact run's final result, not the current instance preview" })),
-      offset: Type.Optional(Type.Integer({ minimum: 0, description: "Result offset in UTF-16 code units (default 0); requires id + runId. Use the returned nextOffset." })),
-      limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 6000, description: "Result page size in UTF-16 code units (default/max 6000); requires id + runId" })),
-    }),
-    async execute(_id, args, _signal, _update, ctx) {
-      const manager = parentManager(ctx, launch);
-      if (args.runId !== undefined) {
-        if (!args.id) throw new Error("Reading a run result requires id + runId");
+      if (args.action === "result") {
+        checkFields(args, ["action", "id", "runId"], ["offset", "limit"]);
         const offset = args.offset ?? 0, limit = args.limit ?? 6000;
         if (!Number.isSafeInteger(offset) || offset < 0) throw new Error("Result offset must be a non-negative integer");
         if (!Number.isSafeInteger(limit) || limit < 1 || limit > 6000) throw new Error("Result limit must be an integer from 1 to 6000");
-        const report = manager.getResult(args.id, args.runId);
+        const report = parentManager(ctx, launch).getResult(args.id!, args.runId!);
         if (offset > report.text.length) throw new Error("Result offset exceeds totalLength");
         const end = Math.min(report.text.length, offset + limit);
         return content(JSON.stringify({ agentId: report.agentId, runId: report.runId, status: report.status, time: report.time,
           error: report.error, offset, totalLength: report.text.length, nextOffset: end < report.text.length ? end : null,
           text: report.text.slice(offset, end) }));
       }
-      if (args.offset !== undefined || args.limit !== undefined) throw new Error("Result paging requires id + runId");
+      if (args.action === "get") checkFields(args, ["action", "id"]);
+      else if (args.action === "list") checkFields(args, ["action"]);
+      else throw new Error("Unknown query action; use list, get or result");
+      const manager = parentManager(ctx, launch);
       const roles = loadRoles(getAgentDir(), ctx.cwd, ctx.isProjectTrusted());
       return content(JSON.stringify({ roles: Object.fromEntries(Object.entries(roles).map(([name, role]) => [name, role.description])),
-        agents: (args.id !== undefined ? [manager.get(args.id)] : manager.list()).map(state => visible(state, args.id !== undefined)), workspaces: await manager.workspaces.list() }));
+        agents: (args.action === "get" ? [manager.get(args.id!)] : manager.list()).map(state => visible(state, args.action === "get")), workspaces: await manager.workspaces.list() }));
     },
   });
   pi.registerTool({
-    name: "close_agent", label: "Stop CLI subagent",
-    description: "Stop active work but retain the native session and identity for later send_input. Does not delete history.",
-    parameters: Type.Object({ id: Type.String({ description: "Subagent instance ID" }) }),
-    async execute(_id, args, _signal, _update, ctx) {
-      return content(`Processes stopped; original session retained: ${view(await parentManager(ctx, launch).close(args.id))}`);
-    },
-  });
-
-  pi.registerTool({
-    name: "respond_to_permission", label: "Answer child interaction",
-    description: "Answer one current request from a child owned by this parent. Compare the requested operation with the user's task authorization; approve only within scope, otherwise deny/cancel or ask the user. A humanOnly request cannot be approved by this tool: ask the human UI, or deny/cancel. This does not change global permissions or disable safety extensions. Every decision is recorded locally.",
+    name: "subagent_reply", label: "Answer child interaction",
+    description: "Answer one current request from this parent's child. Requires id, questionId, reason and exactly one of confirmed/value/cancelled matching the request. Only authorize what the user's task covers. A humanOnly approval requires the human UI; the parent may deny/cancel. Does not change persistent permissions. Every decision is recorded locally; a reply is not proof of successful execution.",
     parameters: Type.Object({
-      id: Type.String({ description: "Subagent instance ID from list_agents" }),
+      id: Type.String({ description: "Existing instance ID" }),
       questionId: Type.String({ description: "Exact current interaction ID" }),
-      confirmed: Type.Optional(Type.Boolean({ description: "For confirm: true to approve once, false to deny" })),
-      value: Type.Optional(Type.String({ description: "For select: an exact offered option; for input/editor: response text" })),
-      cancelled: Type.Optional(Type.Literal(true, { description: "Cancel this request rather than answer it" })),
-      reason: Type.String({ description: "Why this decision is within the parent's authorization, or why it was denied/cancelled" }),
-    }),
+      confirmed: Type.Optional(Type.Boolean({ description: "confirm only: true approves once, false denies" })),
+      value: Type.Optional(Type.String({ description: "select: exact offered option; input/editor: response text" })),
+      cancelled: Type.Optional(Type.Literal(true, { description: "Cancel instead of answering" })),
+      reason: Type.String({ minLength: 1, description: "Why the decision is within the user's authorization, or why it is denied/cancelled" }),
+    }, { additionalProperties: false }),
     async execute(_id, args, _signal, _update, ctx) {
+      checkFields(args, ["id", "questionId", "reason"], ["confirmed", "value", "cancelled"]);
       const state = await parentManager(ctx, launch).reply(args.id, args.questionId,
         { confirmed: args.confirmed, value: args.value, cancelled: args.cancelled }, { actor: "parent", reason: args.reason });
       return content(`Response sent to the child's current interaction; delivery is not proof the action completed: ${view(state)}`);
@@ -309,7 +316,7 @@ export default function extension(pi: ExtensionAPI): void {
   };
   async function openAgents(ctx: ExtensionContext, selectedId?: string): Promise<void> {
       // The roster is a widget above the editor, so it needs Pi's TUI layout and raw input.
-      if (ctx.mode !== "tui") { ctx.ui.notify("The panel requires a TUI; use list_agents / send_input / close_agent or /agent-reply instead.", "error"); return; }
+      if (ctx.mode !== "tui") { ctx.ui.notify("The panel requires a TUI; use subagent_query / subagent or /agent-reply instead.", "error"); return; }
       // Keep one panel/action loop per extension instance so concurrent commands cannot compete for input.
       if (panelBusy) { ctx.ui.notify("The agent panel is already open or processing an action; wait or close it with Esc.", "warning"); return; }
       panelBusy = true;

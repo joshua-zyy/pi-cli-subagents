@@ -27,7 +27,7 @@ export interface ChoiceOptions {
 export interface RoleRow {
   name: string;
   origin: Origin;
-  /** Defaults merged with both role files; what `spawn_agent` actually runs. */
+  /** Defaults merged with both role files; what `subagent` actually runs. */
   effective: Role;
   /** Entry stored in the scope being edited, when the user already overrode this role there. */
   override: Role | undefined;

@@ -17,7 +17,7 @@ patch and backups; read them before any retry, and tell the user what state the 
 
 ## Stale or malformed locks
 
-A stale, malformed or mismatched `owner.lock` makes `close_agent` fail even when the recorded task is
+A stale, malformed or mismatched `owner.lock` makes `subagent({ action: "stop", id })` fail even when the recorded task is
 terminal. That is a signal to look, not to delete the lock or start replacement work automatically.
 
 ## Unreachable or unreadable instances
@@ -34,6 +34,6 @@ replacement thread automatically — see [workspaces.md](workspaces.md) for what
 
 ## Stopping versus finishing
 
-`close_agent` stops active work but keeps the native session for later continuation; never use it merely
+`subagent({ action: "stop", id })` stops active work but keeps the native session for later continuation; never use it merely
 because a task finished. A malformed request from a child that has already ended cannot be answered
 again — inspect the current state instead.

@@ -243,7 +243,7 @@ test('running child inactive for 15 minutes produces one stable, non-terminal al
   const alert = manager.reports(901000)[0];
   assert.equal(alert.status, 'stalled');
   assert.equal(alert.notificationId, `${state.runId}-inactive`);
-  assert.match(alert.text, /15 minutes.*list_agents/i);
+  assert.match(alert.text, /15 minutes.*subagent_query/i);
   assert.equal(manager.reports(1000000)[0].notificationId, alert.notificationId);
   assert.equal(manager.get(start.id).phase, 'running', 'reminder must not stop the worker');
   await manager.send(start.id, 'FINISH');

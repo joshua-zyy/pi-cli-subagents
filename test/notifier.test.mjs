@@ -37,7 +37,7 @@ test('error and waiting messages keep actionable details without embedding file 
   deliverReports(h.manager,h.pi,h.ctx,new Set());
   const content=h.sent[0].message.content;
   assert.match(content,/Permission denied/);assert.match(content,/Approve one operation\?/);
-  assert.match(content, /Question ID: q.*respond_to_permission/s);
+  assert.match(content, /Question ID: q.*subagent_reply/s);
   assert.doesNotMatch(content,/C:\\long|Full event log|Result file/);
   assert.deepEqual(h.sent[0].message.details.ids,['failed','waiting']);
 });
@@ -90,7 +90,7 @@ test('long output previews the original tail and points to the exact result', ()
   // This short evidence block fits in the preview; arbitrary longer evidence needs the result reader.
   for (const line of block.split('\n')) assert.ok(content.includes(line), `the clip dropped ${line}`);
   assert.match(content, /… \d+ characters omitted …/);
-  assert.match(content, /truncated.*list_agents.*agent/is);
+  assert.match(content, /truncated.*subagent_query.*agent/is);
 });
 
 test('no-session parent must fail closed rather than create unowned agents', async () => {

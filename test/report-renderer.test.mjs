@@ -11,7 +11,7 @@ import { customType, deliverReports, deliveredIds } from '../dist/notifier.js';
 initTheme('dark', false);
 const id = '11111111-1111-4111-8111-111111111111';
 const runId = '22222222-2222-4222-8222-222222222222';
-const resultLink = `Read result: list_agents(${JSON.stringify({ id, runId })})`;
+const resultLink = `Read result: subagent_query(${JSON.stringify({ action: 'result', id, runId })})`;
 const report = (status = 'completed') => ({ notificationId: `${runId}-result`, agentId: id, runId,
   parentFile: 'parent', status, time: 1, text: 'BODY_MARKER\n' + 'Detailed evidence\n'.repeat(80), logFile: 'trace' });
 function registration() {
@@ -55,7 +55,7 @@ test('a completed report is a compact summary; Pi expansion shows the original b
   assert.equal(collapsed.split('\n').filter(line => line.trim()).length, 1);
   c.setExpanded(true);
   assert.match(text(c), /BODY_MARKER/);
-  assert.match(text(c, 200), /Read result: list_agents/);
+  assert.match(text(c, 200), /Read result: subagent_query/);
   assert.ok(text(c, 200).includes(runId));
   c.setExpanded(false);
   assert.equal(text(c), collapsed);
@@ -100,12 +100,15 @@ test('UI metadata is separate from content and receipts still deduplicate after 
 test('old or unknown report metadata remains expandable without inventing a success state', () => {
   for (const details of [{ ids: ['old'] }, undefined, { reports: [] }, { reports: null },
     { reports: [{ status: 'unexpected' }] }, { reports: [{ agentId: id, status: 'completed' }, null] }]) {
-    const message = { role: 'custom', customType, content: 'OLD_BODY_MARKER', details, display: true, timestamp: 1 };
+    const message = { role: 'custom', customType, content: `OLD_BODY_MARKER\nRead result: list_agents(${JSON.stringify({ id, runId })})`, details, display: true, timestamp: 1 };
+    const original = JSON.stringify(message);
     const c = card(message);
     assert.match(text(c), /status unavailable/);
     assert.match(text(c), /⚠.*\/agents/);
     assert.doesNotMatch(text(c), /completed|OLD_BODY_MARKER/);
     c.setExpanded(true); assert.match(text(c), /OLD_BODY_MARKER/);
+    assert.match(text(c, 200), /Read result: list_agents/);
+    assert.equal(JSON.stringify(message), original, 'historical tool links are evidence, not migration targets');
   }
 });
 

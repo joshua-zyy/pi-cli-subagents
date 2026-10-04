@@ -27,7 +27,9 @@ pi --extension /absolute/path/to/pi-cli-subagents/dist/index.js \
 
 然后直接对 Pi 说，例如：
 
-> 先让 explore 子代理定位测试失败的原因，不要改文件。再让 worker 修复，交给另一个 reviewer 独立审查。需要修改时继续找原来的 worker，最后报告验证结果。
+> 让已配置的 worker 在独立 worktree 中调查并修复这个测试，完成后报告结果。
+
+角色、任务拆分及审查策略由用户决定，插件不预设代理工作流。
 
 父会话必须持久化，**不要使用 `--no-session`**。完成报告自动送达，无需轮询。父进程退出后，运行中的子代理可以继续工作；回到**原来的父会话**即可接收待投递报告。
 
@@ -75,15 +77,12 @@ pi --extension /absolute/path/to/pi-cli-subagents/dist/index.js \
 
 | 父代理可用工具 | 用途 |
 | --- | --- |
-| `spawn_agent` | 按角色启动任务，指定 `cwd` 或 `workspace`，不能同时指定 |
-| `send_input` | 在同一实例的原会话中继续工作 |
-| `list_agents` | 查看实例、历史、角色和未决请求；按需读取指定轮次的结果，不用于轮询完成状态 |
-| `close_agent` | 停止当前工作，保留会话 |
-| `create_workspace` | 创建托管 Git 工作树 |
-| `integrate_workspace` | 将已审查的工作区改动应用到父目录 |
-| `respond_to_permission` | 附具体理由，回答一个当前请求 |
+| `subagent` | `start` 启动角色、`send` 向原实例发消息、`stop` 停止当前工作 |
+| `subagent_query` | `list` 查看元数据与工作区、`get` 查看实例详情、`result` 读取指定轮次结果 |
+| `subagent_reply` | 附具体理由，回答一个当前请求 |
+| `subagent_workspace` | 显式 `create` 托管工作树或 `integrate` 待集成改动 |
 
-`list_agents()` 只返回元信息，不携带结果正文；传 `{id}` 可查看当前详情与有界预览。终态报告通知提供 `list_agents({id, runId})` 入口，读取该轮的原始结果。长结果保持两个 ID 不变，将返回的 `nextOffset` 作为 `offset` 继续读取，直到其为 `null`（`limit` 默认及上限为 6000 个 UTF-16 代码单元）。读取结果不会唤醒或恢复代理。
+`subagent_query({action: "list"})` 只返回元信息，不携带结果正文；传 `{action: "get", id}` 可查看当前详情与有界预览。终态报告通知提供 `subagent_query({action: "result", id, runId})` 入口，读取该轮的原始结果。长结果保持两个 ID 不变，将返回的 `nextOffset` 作为 `offset` 继续读取，直到其为 `null`（`limit` 默认及上限为 6000 个 UTF-16 代码单元）。读取结果不会唤醒或恢复代理。
 
 TUI 报告跟随 Pi 的展开/折叠状态（默认 **Ctrl+O**，支持自定义按键）。折叠时只显示一行实例/状态摘要，失败和待处理请求保持醒目；展开后查看通知正文及精确轮次的结果读取入口。旧通知缺少展示元数据时标为 `status unavailable`，不猜测成功状态。折叠只改外观，父代理收到的内容和投递收据不变；展开文本会剥除 ANSI/终端控制序列，原始记录不变。
 
@@ -93,9 +92,9 @@ Pi 和 Codex 支持运行中的 `steer` 消息；运行中的 `followUp` 仅 Pi 
 
 让 Pi 为**每项可独立集成的改动创建一个托管工作区**：
 
-1. `create_workspace({})` 从已提交的 HEAD 创建 detached 工作树。父仓库未提交的文件只报告、**不继承**；要继承，须先检查并取得明确授权，再使用 `includeUncommitted`。
-2. 用返回的 `workspace` ID 启动 worker。完成后，在**同一工作区**启动独立 reviewer。同一工作区同时只能有一个活跃实例。
-3. 审查结束后，让原 worker 处理必要修改。只集成已审查的改动，再在父目录验证结果。
+1. `subagent_workspace({action: "create"})` 从已提交的 HEAD 创建 detached 工作树。父仓库未提交的文件只报告、**不继承**；要继承，须先检查并取得明确授权，再使用 `includeUncommitted`。
+2. 用 `subagent({action: "start", role, task, workspace})` 启动任务。不同工作区可以并行；同一工作区只能有一个活跃实例，释放后可交给另一个实例。
+3. 按用户工作流决定何时调用 `subagent_workspace({action: "integrate", workspace})`。插件检查技术安全条件，不判断是否遵循了某种审查流程。
 4. 集成后或其他实例同步后，续聊需显式选择 `baseline: "keep"`（沿用工作区当前文件）或 `"sync"`（从父仓库更新）。有未集成或已暂存改动时，sync 会拒绝；后续集成只应用新增量。
 
 集成不改变父仓库的 HEAD、索引和分支。工作树位于 `<仓库>.worktrees/`，不会自动安装依赖或授予信任。共享 `cwd` **不隔离文件**，工作树**不隔离操作系统权限**。
@@ -116,6 +115,6 @@ npm run check   # TypeScript 检查
 npm test        # 构建并运行确定性测试，不调用模型
 ```
 
-修改代码后重新构建，并在 Pi 中执行 `/reload`。自动化测试不等于完整终端验收。详细的代理协作流程见[委派技能](skills/delegate-cli-agents/SKILL.md)。
+修改代码后重新构建，并在 Pi 中执行 `/reload`。自动化测试不等于完整终端验收。工具用法及旧工具名映射见[委派技能](skills/delegate-cli-agents/SKILL.md)。历史通知和会话不重写，可将旧通知中的原实例/run ID 交给新查询工具。
 
 生命周期管理参考 [Paseo](https://github.com/getpaseo/paseo)，状态区与对话界面参考 [pi-subagents](https://github.com/tintinweb/pi-subagents)。

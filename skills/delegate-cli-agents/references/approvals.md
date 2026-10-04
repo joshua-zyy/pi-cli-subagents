@@ -1,8 +1,8 @@
 # Answering a child's request
 
 Read this when a child is `waiting` on a permission or approval request. The workflow itself is in
-[../SKILL.md](../SKILL.md); `list_agents({ id })` returns the unresolved request, and
-`respond_to_permission` answers one of them.
+[../SKILL.md](../SKILL.md); `subagent_query({ action: "get", id })` returns the unresolved request, and
+`subagent_reply` answers one of them.
 
 ## Decide
 

@@ -1,100 +1,101 @@
 ---
 name: delegate-cli-agents
-description: Delegate local coding, exploration, implementation, or independent review to reusable Pi, Codex or Claude Code CLI subagents with single-action approvals. Use when parallel work or an implement–review–fix loop benefits from another real CLI session and the spawn_agent, send_input, list_agents, and close_agent tools are available.
+description: Use the subagent, subagent_query, subagent_reply, and subagent_workspace tools to start and manage persistent Pi, Codex or Claude Code CLI sessions, read results, handle requests, and use isolated worktrees.
 ---
 
-# Delegate CLI agents
+# CLI subagent tools
 
-Delegate **independent, verifiable** work, not volume. One agent is the default; add a second only when
-two workstreams can be verified separately and do not write the same files. If the task fits your own
-context, do it yourself — a child's report is a summary, not a substitute for reading the code.
+These tools provide CLI session management, not a prescribed workflow. The user's instructions decide
+whether to delegate, which configured role to use, whether to reuse an instance, and whether to review
+or integrate its work. Built-in roles are defaults, not fixed jobs or model rankings.
 
-## 1. Brief before you spawn
+## 1. Start, send, stop
 
-`spawn_agent({ role, task, cwd | workspace })` — never both. Use `list_agents` once to see configured
-roles and existing instances, and never poll it for completion. Codex roles need an explicit available
-model.
+Use `subagent` with an explicit action:
 
-State the goal, the authorized paths, what is out of scope, and the evidence you will accept as done.
-Ask for the child's final message to end with this block:
+| Action | Required fields | Optional fields |
+|---|---|---|
+| `start` | `role`, `task` | `cwd` or `workspace` (never both) |
+| `send` | `id`, `message` | `mode`, `baseline`, `includeUncommitted` |
+| `stop` | `id` | none |
 
-    VERDICT: <one line>
-    EVIDENCE: <one line per item, each with a locator>
-    UNVERIFIED: <what you did not check>
+`start` creates a new instance; omitted `cwd` uses the parent directory. Role configuration supplies the
+CLI and model settings. `subagent_query({ action: "list" })` includes configured role descriptions and
+existing instances. Use the actual descriptions, not assumptions about built-in names.
 
-What the work is decides the evidence it owes — never the role's name. `list_agents` returns the roles
-this project actually offers, with their descriptions; route by that description. The built-in names
-below always resolve, but a project or user role file can override what any of them does, and custom
-roles can be added — so read the description before you rely on a name. If no configured role covers the
-work, ask the user which role to use, or add one with `/cli-agents-setting`; do not stretch an unrelated
-role to fit.
+`send` addresses the exact instance. A finished instance resumes its original native session; a running
+Pi accepts `steer` (default) or `followUp`, running Codex accepts `steer` only, and Claude must finish
+before receiving another task. A pending permission request is answered separately, not with send.
+Steering does not interrupt an in-flight tool. A receipt is not proof the instruction was executed.
 
-| work | built-in role | VERDICT | EVIDENCE |
-|---|---|---|---|
-| investigate without changing files | `explore` | the finding | file/symbol or source per claim |
-| implement and verify a change | `worker` | what changed | the exact command and what it printed |
-| independently assess a change | `reviewer` | `PASS` or `BLOCK` | per defect: file:line and a trigger |
-| judge material you hand over | `oracle` | the answer | the material judged, plus confidence |
+`stop` ends active work and retains the session and results. It does not roll back file changes or delete
+history. A resumed session preserves native identity and saved history, not necessarily its old process,
+background shell jobs or in-memory state. Failure never silently creates a replacement.
 
-A report without evidence is not a finished task: do not build on it and do not integrate it. Ask the
-same instance for the missing evidence, or carry the work forward as unverified. Say which revision the
-work is against; a finding without a revision cannot be acted on later.
+Task text carries the user's objective and authorized scope. The plugin does not require a particular
+report format or role sequence. A child report is its output, not proof of business correctness.
 
-A managed worktree is optional — use a shared `cwd` unless the work needs isolation. Before creating or
-integrating one, read [references/workspaces.md](references/workspaces.md).
+## 2. Receive and read results
 
-## 2. Wait for reports
+Results and attention notifications arrive automatically in the original parent session. Continue other
+work or end the turn while waiting; do not use repeated queries or sleep to wait for completion.
 
-Spawning is asynchronous: continue independent work or end the turn — the report wakes you. Completed,
-failed, waiting, unreachable and stalled children all arrive on their own; never poll `list_agents`
-for progress. Use `list_agents()` for metadata and history, or `list_agents({ id })` for current details
-and a bounded result preview. Neither the preview nor the notification guarantees complete evidence.
+| Query action | Required fields | Result |
+|---|---|---|
+| `list` | none | Instance metadata and workspace inventory; no report bodies |
+| `get` | `id` | Current state, recent history, pending requests and bounded result preview |
+| `result` | `id`, `runId` | A page of that exact run's original final report |
 
-When a decision needs omitted material, follow the notification’s `list_agents({ id, runId })` link.
-It returns a page of that run’s original final result, with `status`, `error`, `text`, `totalLength` and
-`nextOffset`. Keep both IDs fixed; pass `offset: nextOffset` until it is `null` to read the entire result
-(default/max `limit: 6000` UTF-16 code units). A later run never replaces this result. A missing result
-is an error, not permission to substitute the latest run. Never read empty text or a completed CLI
-turn as proof the task succeeded. Keep `src/example.ts:42`-style locators, not paraphrases.
+For long results, keep both IDs fixed and follow `nextOffset` as `offset` until null. `limit` defaults to
+6000 UTF-16 code units and cannot exceed 6000. The response includes status, error, text and totalLength.
+A missing result is an error, not permission to use another run. Reading never resumes an instance.
 
-## 3. Reuse the instance that did the related work
+Failure replies preserve the instance/run and error. Inspect before retrying: a timeout may occur after
+work ran, and an unconfirmed receipt does not mean there were no side effects. An unreadable record or
+unreachable instance does not prove an empty history or an ended execution.
 
-A role is a template; each instance is a separate colleague with its own session. `list_agents` returns
-each instance's `history` (latest five assignments with their outcome, oldest first), so recover who did
-what from there instead of trusting recall after your context is compacted. Preserve older result links
-you still need in your task notes. Send follow-up work to the
-instance that already has the context; start a new one for unrelated work; never let an instance review
-its own work. A running child takes `send_input` steering on Pi and Codex (running Codex `followUp`
-is not supported); Claude refuses both while running — wait for it. Steering does not interrupt an
-in-flight tool. Session memory is not a current view of the files: say what has changed and what to
-re-read.
+## 3. Answer a current request
 
-## 4. Close the loop
+`subagent_reply({ id, questionId, reason, confirmed | value | cancelled })` answers one unresolved
+request. Supply exactly one answer matching its type and the user's existing authorization. The tool
+records a parent decision; it cannot impersonate a human or grant persistent permissions.
 
-implement → review → fix → integrate, in that order. Give the reviewing instance the **same workspace
-or cwd** as the one that made the change, and start it only after that instance stops. Send fixes back
-to the **same instance's id**, and only after the review finishes. Then `integrate_workspace`, and verify
-the main directory yourself.
-`BLOCK` means stop and inspect, not force. Do not commit, push or delete worktrees unless asked, and
-never bypass a refusal with a raw `cwd`, a replacement instance or a hand-edited record. When something
-is stuck or inconsistent — a conflict, an unfinished integration, a stale lock, an unreachable or
-unreadable instance, a resume that failed after a sync — read
-[references/recovery.md](references/recovery.md) before touching anything.
+A `humanOnly` approval must use the human UI. The parent may deny/cancel where allowed. See
+[references/approvals.md](references/approvals.md) for request types and permission boundaries.
 
-## 5. Answering a child's request
+## 4. Managed worktrees
 
-A `waiting` child is blocked, not finished. Approve only what the user's own task authorization covers,
-never as a blanket permission; a `humanOnly` request cannot be approved by the parent; a fail-closed
-refusal is not bypassed. Read [references/approvals.md](references/approvals.md) before answering, or
-hand the decision to the human with `/agent-reply <agentId> <questionId>`.
+`subagent_workspace({ action: "create" })` creates an isolated worktree; then use its ID in a start call.
+Different workspaces can run concurrently. One workspace permits one active instance at a time and may
+be reused by another instance after release. Isolation is explicit, not automatically chosen by the plugin.
 
-## 6. The human has their own surface
+`subagent_workspace({ action: "integrate", workspace })` applies its pending changes to the parent.
+It does not commit, push or remove the worktree. The user's workflow decides when integration is appropriate.
+Read [references/workspaces.md](references/workspaces.md) before creating, syncing or integrating one.
 
-A status area above the editor, and `/agents` to inspect results, open a live conversation, message,
-resume, answer a pending request, or stop an instance. Their direct actions appear in this session as
-`[Human → subagent …]` entries without interrupting you: re-check your plan for that instance before
-integrating its work, and treat it as authorization for that instance only.
+For conflicts, stale locks, uncertain operations or failed recovery, read
+[references/recovery.md](references/recovery.md). Do not bypass a refusal by editing records, using raw
+cwd, creating a replacement instance, resetting files or disabling safety checks.
 
-`close_agent` stops active work but keeps the session — never use it merely because a task finished. The
-parent session must be persistent: a running child survives the parent's exit, and its report is
-delivered on return to the **original** parent session.
+## 5. Human controls and persistence
+
+`/agents` lets the user view conversations, message, resume, answer requests or stop instances.
+Their actions appear in the parent context as `[Human → subagent …]` entries. These refer to that
+instance only and do not widen authorization. `/cli-agents-setting` edits role configuration.
+
+The parent must use a persistent Pi session, not `--no-session`. Pending reports return to the original
+parent session; another session in the same directory does not acquire ownership.
+
+## Old tool references
+
+Historical messages remain unchanged. Translate old calls using their original IDs:
+
+| Old name | Current call |
+|---|---|
+| `spawn_agent` | `subagent({ action: "start", ... })` |
+| `send_input` | `subagent({ action: "send", ... })` |
+| `close_agent` | `subagent({ action: "stop", id })` |
+| `list_agents()` / `{id}` / `{id, runId}` | `subagent_query` with `list` / `get` / `result` |
+| `respond_to_permission` | `subagent_reply` |
+| `create_workspace` | `subagent_workspace({ action: "create", ... })` |
+| `integrate_workspace` | `subagent_workspace({ action: "integrate", workspace })` |

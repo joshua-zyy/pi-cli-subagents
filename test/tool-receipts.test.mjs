@@ -51,7 +51,7 @@ const stateFrom = text => JSON.parse(text.slice(text.indexOf('{'), text.lastInde
 test('a refused initial task surfaces a tool error with the actual run, not a successful dispatch', { timeout: 15000 }, async t => {
   const { manager, invoke, released } = setup(t);
   let error;
-  try { await invoke('spawn_agent', { role: 'worker', task: 'REJECT' }); } catch (caught) { error = caught; }
+  try { await invoke('subagent', { action: 'start', role: 'worker', task: 'REJECT' }); } catch (caught) { error = caught; }
   const state = await released(manager.list()[0].id);
   assert.equal(state.phase, 'failed'); assert.equal(state.accepted, false);
   assert.equal(manager.list().length, 1);
@@ -69,7 +69,7 @@ test('a mismatched native resume identity fails the tool before submitting the f
   const native = readJson(original.sessionFile);
   writeJson(original.sessionFile, { ...native, sessionId: randomUUID() });
   let error;
-  try { await invoke('send_input', { id: initial.id, message: 'MUST NOT RUN' }); } catch (caught) { error = caught; }
+  try { await invoke('subagent', { action: 'send', id: initial.id, message: 'MUST NOT RUN' }); } catch (caught) { error = caught; }
   const state = await released(initial.id);
   assert.equal(state.phase, 'failed'); assert.equal(state.accepted, false);
   assert.equal(state.sessionId, original.sessionId); assert.equal(state.runCount, 2);
@@ -94,8 +94,8 @@ test('tool receipts report observed state without equating initial acceptance wi
   ]) {
     const state = { ...base, phase, accepted, ...(error ? { error } : {}) };
     for (const [method, tool, args] of [
-      ['spawn', 'spawn_agent', { role: 'worker', task: 'fixture' }],
-      ['send', 'send_input', { id: base.id, message: 'fixture' }],
+      ['spawn', 'subagent', { action: 'start', role: 'worker', task: 'fixture' }],
+      ['send', 'subagent', { action: 'send', id: base.id, message: 'fixture' }],
     ]) {
       const mock = t.mock.method(AgentManager.prototype, method, async () => state);
       try {

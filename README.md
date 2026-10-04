@@ -27,7 +27,9 @@ pi --extension /absolute/path/to/pi-cli-subagents/dist/index.js \
 
 Ask Pi, for example:
 
-> Have an explore agent locate the cause of the failing test without editing files. Then have a worker fix it and a separate reviewer inspect the changes. Reuse the original worker for any fixes, and report the verification results.
+> Have the configured worker investigate and fix this test in an isolated worktree, and report the result.
+
+Roles, task decomposition and review policy are yours to configure; the extension does not impose an agent workflow.
 
 Use a persistent parent session, **not `--no-session`**. Reports arrive automatically; do not poll for completion. A running child can continue after the parent exits; reopen the **original parent session** to receive its pending reports.
 
@@ -75,15 +77,12 @@ Tools in the live viewer default to one-line summaries, including failures (mark
 
 | Tool available to the parent | Purpose |
 | --- | --- |
-| `spawn_agent` | Start a role with a task and either `cwd` or `workspace` |
-| `send_input` | Continue the same instance in its original session |
-| `list_agents` | Inspect instances, history, roles and pending requests; read a specific run’s result on demand, not for completion polling |
-| `close_agent` | Stop active work without deleting its session |
-| `create_workspace` | Create a managed Git worktree |
-| `integrate_workspace` | Apply reviewed workspace changes to the parent directory |
-| `respond_to_permission` | Answer one current request with an explicit reason |
+| `subagent` | `start` a configured role, `send` to an existing instance, or `stop` active work |
+| `subagent_query` | `list` metadata/workspaces, `get` instance details, or read an exact run with `result` |
+| `subagent_reply` | Answer one current request with an explicit reason |
+| `subagent_workspace` | Explicitly `create` a managed worktree or `integrate` its pending changes |
 
-`list_agents()` returns metadata without result bodies; `{id}` adds the current bounded preview. Final notifications include a `list_agents({id, runId})` link to the original result for that exact run. For longer results, keep both IDs fixed and pass the returned `nextOffset` as `offset` until it is `null` (default/max `limit: 6000` UTF-16 code units). Reading results never resumes an agent.
+`subagent_query({action: "list"})` returns metadata without result bodies; `{action: "get", id}` adds the current bounded preview. Final notifications include a `subagent_query({action: "result", id, runId})` link to the original result for that exact run. For longer results, keep both IDs fixed and pass the returned `nextOffset` as `offset` until it is `null` (default/max `limit: 6000` UTF-16 code units). Reading results never resumes an agent.
 
 In the TUI, reports follow Pi’s expand/collapse state (**Ctrl+O** by default, respecting custom keybindings). Collapsed cards show a one-line instance/status summary, with failures and pending requests highlighted; expand to see the notification body and exact-run result link. Old notifications without display metadata show `status unavailable` rather than an inferred success. Only presentation changes: parent-facing content and delivery receipts remain intact. Expanded text strips ANSI/terminal controls; original records are unchanged.
 
@@ -93,9 +92,9 @@ Pi and Codex accept running `steer` messages; running `followUp` is Pi-only. Wai
 
 Ask Pi to use **one managed workspace per independently integrable change**:
 
-1. `create_workspace({})` creates a detached worktree from committed HEAD. Dirty parent files are reported, **not inherited**; inheriting them requires inspection and explicit authorization via `includeUncommitted`.
-2. Start a worker with the returned `workspace` ID. After it finishes, start a separate reviewer in the **same workspace**. Only one instance may be active there at a time.
-3. Send necessary fixes to the original worker after review finishes. Integrate only reviewed changes, then verify the result in the parent directory.
+1. `subagent_workspace({action: "create"})` creates a detached worktree from committed HEAD. Dirty parent files are reported, **not inherited**; inheriting them requires inspection and explicit authorization via `includeUncommitted`.
+2. Use `subagent({action: "start", role, task, workspace})`. Different workspaces may run concurrently; one workspace permits one active instance at a time and can be reused after release.
+3. Use `subagent_workspace({action: "integrate", workspace})` when appropriate for your workflow. The extension checks technical safety, not whether a particular review procedure was followed.
 4. To continue after integration or another instance's sync, explicitly choose `baseline: "keep"` (current workspace files) or `"sync"` (update from the parent). Sync refuses unintegrated or staged work; later integration applies only the new increment.
 
 Integration leaves the parent's HEAD, index, and branches unchanged. Worktrees live under `<repo>.worktrees/`; dependencies and trust are not set up automatically. Shared `cwd` sessions do **not** isolate files, and worktrees do **not** isolate OS permissions.
@@ -116,6 +115,6 @@ npm run check   # TypeScript check
 npm test        # Build + deterministic tests; no model calls
 ```
 
-After code changes, rebuild and run `/reload` in Pi. Automated tests are not full terminal acceptance. See the [delegation skill](skills/delegate-cli-agents/SKILL.md) for the detailed agent workflow.
+After code changes, rebuild and run `/reload` in Pi. Automated tests are not full terminal acceptance. See the [delegation skill](skills/delegate-cli-agents/SKILL.md) for tool usage and the old-to-new tool-name mapping. Historical notifications and saved sessions are not rewritten; use their original instance/run IDs with the new query tool.
 
 Inspired by [Paseo](https://github.com/getpaseo/paseo) for lifecycle management and [pi-subagents](https://github.com/tintinweb/pi-subagents) for the status and conversation UI.
