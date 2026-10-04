@@ -39,8 +39,11 @@ report format or role sequence. A child report is its output, not proof of busin
 
 ## 2. Receive and read results
 
-Results and attention notifications arrive automatically in the original parent session. Continue other
-work or end the turn while waiting; do not use repeated queries or sleep to wait for completion.
+Results and attention notifications arrive automatically in the original parent session. Busy parents
+receive them as follow-ups after their current execution; idle parents can start a new turn. Continue
+other work or end the turn while waiting; do not use repeated queries or sleep to wait for completion.
+Queued notifications are not receipts until recorded in parent history. Reopening that parent replays
+unrecorded reports using their original run IDs; recorded reports are not delivered again.
 
 | Query action | Required fields | Result |
 |---|---|---|

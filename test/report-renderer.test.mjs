@@ -87,7 +87,7 @@ test('UI metadata is separate from content and receipts still deduplicate after 
   assert.equal(h.message.content, `[Subagent ${id} · completed]\n${r.text}\n${resultLink}`);
   assert.deepEqual(h.message.details.reports, [{ agentId: id, status: 'completed' }]);
   assert.deepEqual(h.message.details.ids, [`${runId}-result`]);
-  assert.deepEqual(h.messages[0].options, { triggerTurn: true, deliverAs: 'steer' });
+  assert.deepEqual(h.messages[0].options, { triggerTurn: true, deliverAs: 'followUp' });
   assert.equal(h.message.display, true);
   assert.deepEqual(convertToLlm([h.message]), convertToLlm([{ ...h.message, details: { ids: h.message.details.ids } }]));
   card(h.message).setExpanded(true);

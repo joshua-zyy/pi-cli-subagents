@@ -61,7 +61,8 @@ export function deliverReports(
   try {
     // Display metadata is separate from model-facing content and the receipt IDs.
     const displayReports = reports.map(({ agentId, status }) => ({ agentId, status }));
-    pi.sendMessage({ customType, content, display: true, details: { ids, reports: displayReports } }, { triggerTurn: true, deliverAs: "steer" });
+    // Busy parents consume these after their current execution, not between its tool calls.
+    pi.sendMessage({ customType, content, display: true, details: { ids, reports: displayReports } }, { triggerTurn: true, deliverAs: "followUp" });
   } catch (error) {
     for (const id of ids) pending.delete(id);
     throw error;

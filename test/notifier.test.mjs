@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { deliverReports, deliveredIds } from '../dist/notifier.js';
+import { AgentSession } from '@earendil-works/pi-coding-agent';
 
 function harness(reports) {
   const sent = [], entries = [];
@@ -19,7 +20,7 @@ test('multiple reports are batched, queued once while pending, and deduplicated 
   assert.deepEqual(h.sent[0].message.details.ids, ['first', 'second']);
   assert.match(h.sent[0].message.content, /\[Subagent agent · completed\]\nDONE/);
   assert.doesNotMatch(h.sent[0].message.content, /Full event log:|Result file:|trace|run first/);
-  assert.deepEqual(h.sent[0].options, { triggerTurn: true, deliverAs: 'steer' });
+  assert.deepEqual(h.sent[0].options, { triggerTurn: true, deliverAs: 'followUp' });
   deliverReports(h.manager, h.pi, h.ctx, pending);
   assert.equal(h.sent.length, 1, 'polling cannot queue a duplicate before message is persisted');
   // Pi persists ExtensionAPI.sendMessage as a SessionManager custom_message entry,
@@ -91,6 +92,31 @@ test('long output previews the original tail and points to the exact result', ()
   for (const line of block.split('\n')) assert.ok(content.includes(line), `the clip dropped ${line}`);
   assert.match(content, /… \d+ characters omitted …/);
   assert.match(content, /truncated.*subagent_query.*agent/is);
+});
+
+test('busy-host delivery uses follow-up and abandoned queues replay the same run without duplicate receipts', async () => {
+  const r = { ...report('original-run'), notificationId: 'original-run-result' }, h = harness([r]);
+  const queued = [], calls = [], pending = new Set();
+  const host = { isStreaming: true, agent: { followUp: message => queued.push(message), steer: () => { throw Error('report interrupted current execution'); } },
+    _runAgentPrompt: async message => queued.push(message) };
+  h.pi.sendMessage = (message, options) => { calls.push(AgentSession.prototype.sendCustomMessage.call(host, message, options)); };
+  deliverReports(h.manager, h.pi, h.ctx, pending);
+  await Promise.all(calls);
+  assert.equal(queued.length, 1); assert.equal(h.entries.length, 0, 'queued is not a persisted receipt');
+  assert.match(queued[0].content, /"runId":"original-run"/);
+  deliverReports(h.manager, h.pi, h.ctx, pending);
+  assert.equal(queued.length, 1);
+  // A lost host queue has no receipt. Reopening the parent uses a fresh pending set.
+  queued.length = 0; host.isStreaming = false;
+  const resumed = new Set();
+  deliverReports(h.manager, h.pi, h.ctx, resumed);
+  await Promise.all(calls);
+  assert.equal(queued.length, 1); assert.match(queued[0].content, /"runId":"original-run"/);
+  h.entries.push({ type: 'custom_message', ...queued[0] });
+  deliverReports(h.manager, h.pi, h.ctx, resumed);
+  assert.equal(resumed.size, 0);
+  deliverReports(h.manager, h.pi, h.ctx, new Set());
+  assert.equal(queued.length, 1, 'persisted receipts prevent replay on another reopen');
 });
 
 test('no-session parent must fail closed rather than create unowned agents', async () => {

@@ -63,7 +63,7 @@ test('extension tools implement → separate review → resume same implementer;
   handlers.session_start({ type: 'session_start', reason: 'resume' }, ctx);
   await waitUntil('delivered after parent returns', () => messages.length === 1);
   assert.equal(messages[0].message.details.ids.length, 1);
-  assert.equal(messages[0].options.deliverAs, 'steer');
+  assert.equal(messages[0].options.deliverAs, 'followUp');
   const id = spawn.id;
   const listed = JSON.parse(await invoke('subagent_query', { action: 'get', id }));
   assert.equal(listed.agents[0].id, id);
