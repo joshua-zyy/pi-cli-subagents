@@ -106,6 +106,7 @@ export default function extension(pi: ExtensionAPI): void {
   }
   pi.on("session_start", (_event, ctx) => {
     stopMonitor();
+    refreshRoleCatalog(ctx);
     const file = ctx.sessionManager.getSessionFile();
     if (!file) return;
     const manager = parentManager(ctx, launch);
@@ -128,6 +129,17 @@ export default function extension(pi: ExtensionAPI): void {
     setTimeout(pump, 100).unref();
   });
   pi.on("session_shutdown", () => stopMonitor());
+  pi.on("before_agent_start", (_event, ctx) => refreshRoleCatalog(ctx));
+
+  function refreshRoleCatalog(ctx: ExtensionContext): void {
+    try {
+      const roles = loadRoles(getAgentDir(), ctx.cwd, ctx.isProjectTrusted());
+      registerSubagent(`Available roles (name: description):\n${Object.entries(roles).map(([name, role]) => `${name}: ${role.description.replace(/\s+/g, " ").trim()}`).join("\n")}`);
+    } catch (error) {
+      registerSubagent("Role catalog unavailable: fix the invalid role configuration before starting a task.");
+      ctx.ui.notify(`Cannot refresh subagent roles: ${(error as Error).message}`, "error");
+    }
+  }
 
   pi.registerTool({
     name: "subagent_workspace", label: "Subagent workspace",
@@ -147,9 +159,9 @@ export default function extension(pi: ExtensionAPI): void {
       return content(JSON.stringify(await parentManager(ctx, launch).workspaces.integrate(args.workspace!)));
     },
   });
-  pi.registerTool({
+  const registerSubagent = (catalog: string): void => pi.registerTool({
     name: "subagent", label: "CLI subagent",
-    description: "Start, message or stop a persistent CLI subagent. start requires role and task; choose cwd or workspace, never both. send requires id and message and continues that exact instance: Pi supports running steer/followUp, Codex running steer only, Claude must finish first. stop requires id and retains history. Never silently replaces a session. Workspace continuation may require explicit keep/sync; sync refuses active, staged or unintegrated work. Results return automatically. Query instances and configured roles with subagent_query.",
+    description: `Start, message or stop a persistent CLI subagent. start requires role and task; choose cwd or workspace, never both. send requires id and message and continues that exact instance: Pi supports running steer/followUp, Codex running steer only, Claude must finish first. stop requires id and retains history. Never silently replaces a session. Workspace continuation may require explicit keep/sync; sync refuses active, staged or unintegrated work. Results return automatically. Query existing instances with subagent_query.\n${catalog}`,
     parameters: Type.Object({
       action: Type.Union([Type.Literal("start"), Type.Literal("send"), Type.Literal("stop")]),
       role: Type.Optional(Type.String({ description: "start only, required: configured role name" })),
@@ -187,6 +199,7 @@ export default function extension(pi: ExtensionAPI): void {
       return content(`Processes stopped; original session retained: ${view(await parentManager(ctx, launch).close(args.id!))}`);
     },
   });
+  registerSubagent("Role catalog loads at session start.");
   pi.registerTool({
     name: "subagent_query", label: "Query CLI subagents",
     description: "Read-only inspection of this parent's instances. list returns metadata and managed workspaces without report bodies; get requires id and includes current details and a bounded preview. result requires id and runId and pages that exact original final report; keep both IDs fixed and follow nextOffset until null. Missing results never fall back to another run. Does not resume agents or cross parent sessions. Completion notifications arrive automatically.",
@@ -214,9 +227,7 @@ export default function extension(pi: ExtensionAPI): void {
       else if (args.action === "list") checkFields(args, ["action"]);
       else throw new Error("Unknown query action; use list, get or result");
       const manager = parentManager(ctx, launch);
-      const roles = loadRoles(getAgentDir(), ctx.cwd, ctx.isProjectTrusted());
-      return content(JSON.stringify({ roles: Object.fromEntries(Object.entries(roles).map(([name, role]) => [name, role.description])),
-        agents: (args.action === "get" ? [manager.get(args.id!)] : manager.list()).map(state => visible(state, args.action === "get")), workspaces: await manager.workspaces.list() }));
+      return content(JSON.stringify({ agents: (args.action === "get" ? [manager.get(args.id!)] : manager.list()).map(state => visible(state, args.action === "get")), workspaces: await manager.workspaces.list() }));
     },
   });
   pi.registerTool({
@@ -499,6 +510,7 @@ export default function extension(pi: ExtensionAPI): void {
           if (action.kind === "save") {
             const file = writeScope(scope, agentDir, cwd, draft[scope]);
             disk[scope] = readScope(scope, agentDir, cwd); draft[scope] = structuredClone(disk[scope]); dirty[scope] = false;
+            refreshRoleCatalog(ctx);
             ctx.ui.notify(`Saved ${file}`, "info");
             continue;
           }

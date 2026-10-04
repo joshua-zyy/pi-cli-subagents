@@ -20,8 +20,10 @@ Use `subagent` with an explicit action:
 | `stop` | `id` | none |
 
 `start` creates a new instance; omitted `cwd` uses the parent directory. Role configuration supplies the
-CLI and model settings. `subagent_query({ action: "list" })` includes configured role descriptions and
-existing instances. Use the actual descriptions, not assumptions about built-in names.
+CLI and model settings. The `subagent` tool description lists the effective role names and descriptions;
+`subagent_query({ action: "list" })` lists instances, not roles. Use actual descriptions, not assumptions
+about built-in names. The catalog refreshes at session start, before each parent turn and after settings
+saves. Project roles appear only in a trusted project.
 
 `send` addresses the exact instance. A finished instance resumes its original native session; a running
 Pi accepts `steer` (default) or `followUp`, running Codex accepts `steer` only, and Claude must finish
