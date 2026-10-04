@@ -26,7 +26,11 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "check": "tsc -p tsconfig.json --noEmit",
-    "test": "npm run build && node scripts/test.mjs",
+    "test": "npm run build && node scripts/test.mjs all",
+    "test:fast": "npm run build && node scripts/test.mjs fast",
+    "test:domain": "npm run build && node scripts/test.mjs domain",
+    "test:acceptance:local": "npm run build && node scripts/test.mjs acceptance-local",
+    "test:list": "node scripts/test.mjs all --list",
     "prepack": "npm run build"
   },
   "peerDependencies": {

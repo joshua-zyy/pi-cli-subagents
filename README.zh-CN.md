@@ -112,8 +112,14 @@ Pi 和 Codex 支持运行中的 `steer` 消息；运行中的 `followUp` 仅 Pi 
 
 ```bash
 npm run check   # TypeScript 检查
-npm test        # 构建并运行确定性测试，不调用模型
+npm test        # 构建并运行全部本地层，不调用模型
+npm run test:fast
+npm run test:domain
+npm run test:acceptance:local
+npm run test:list # 只列本地选集，不构建或执行测试
 ```
+
+入口在模块导入前隔离用户角色配置、清除继承的子代理标记，并串行执行。单域定向检查示例：`npm run test:domain -- workspace.test.mjs`。选层规则、本地范围与实测成本见[测试分层说明](docs/testing.md)。
 
 修改代码后重新构建，并在 Pi 中执行 `/reload`。自动化测试不等于完整终端验收。工具用法及旧工具名映射见[委派技能](skills/delegate-cli-agents/SKILL.md)。历史通知和会话不重写，可将旧通知中的原实例/run ID 交给新查询工具。
 
