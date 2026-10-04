@@ -112,8 +112,14 @@ Managed workspaces require Git with `check-attr --source` (tested on 2.50.1). Sp
 
 ```bash
 npm run check   # TypeScript check
-npm test        # Build + deterministic tests; no model calls
+npm test        # Build + all local tiers; no model calls
+npm run test:fast
+npm run test:domain
+npm run test:acceptance:local
+npm run test:list # List the local selection without building/running it
 ```
+
+Test entries isolate user role configuration and clear the inherited child marker before imports, then run serially. For a focused domain check: `npm run test:domain -- workspace.test.mjs`. See [test tiers and verification costs](docs/testing.md) for selection rules, local-only boundaries and measured timings.
 
 After code changes, rebuild and run `/reload` in Pi. Automated tests are not full terminal acceptance. See the [delegation skill](skills/delegate-cli-agents/SKILL.md) for tool usage and the old-to-new tool-name mapping. Historical notifications and saved sessions are not rewritten; use their original instance/run IDs with the new query tool.
 
