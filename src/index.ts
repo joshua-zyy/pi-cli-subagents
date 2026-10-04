@@ -152,7 +152,9 @@ export default function extension(pi: ExtensionAPI): void {
       if (args.workspace !== undefined && args.cwd !== undefined) throw new Error("Pass workspace or cwd, not both");
       const role = inheritParentModel(resolved, ctx);
       const state = await parentManager(ctx, launch).spawn(args.role, role, args.cwd ?? ctx.cwd, args.task, args.workspace);
-      return content(`${state.cli === "codex" ? "Codex" : state.cli === "claude" ? "Claude Code" : "Pi"} subagent dispatched: ${view(state)}\nThe parent may continue working. Completion and waiting reports return to this parent session.`);
+      const result = `${state.cli === "codex" ? "Codex" : state.cli === "claude" ? "Claude Code" : "Pi"} subagent ${state.phase}: ${view(state)}`;
+      if (state.phase === "failed") throw new Error(`${result}\nInspect the instance before retrying; work may already have run.`);
+      return content(`${result}\nCompletion and waiting reports return to this parent session.`);
     },
   });
   pi.registerTool({
@@ -168,7 +170,9 @@ export default function extension(pi: ExtensionAPI): void {
     async execute(_id, args, _signal, _update, ctx) {
       const state = await parentManager(ctx, launch).send(args.id, args.message, (args.mode ?? "steer") as Delivery,
         { baseline: args.baseline, includeUncommitted: args.includeUncommitted });
-      return content(`Message accepted; wait for the final report: ${view(state)}`);
+      const result = `Subagent ${state.phase} after input request: ${view(state)}`;
+      if (state.phase === "failed") throw new Error(`${result}\nInspect the instance before retrying; work may already have run.`);
+      return content(result);
     },
   });
   pi.registerTool({
