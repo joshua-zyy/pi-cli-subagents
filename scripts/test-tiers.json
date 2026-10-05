@@ -23,6 +23,7 @@
     "transcript-window-adversarial.test.mjs",
     "transcript-window.test.mjs",
     "transcript.test.mjs",
+    "ui-input-receipts.test.mjs",
     "ui-panel.test.mjs",
     "ui-role-settings.test.mjs",
     "ui-status.test.mjs"
