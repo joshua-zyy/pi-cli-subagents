@@ -67,7 +67,7 @@ test('a mismatched native resume identity fails the tool before submitting the f
   const initial = await manager.spawn('worker', { description: 'fixture', instructions: 'fixture' }, cwd, 'REMEMBER original');
   const original = await released(initial.id);
   const native = readJson(original.sessionFile);
-  writeJson(original.sessionFile, { ...native, sessionId: randomUUID() });
+  writeJson(original.sessionFile, { ...native, id: randomUUID() });
   let error;
   try { await invoke('subagent', { action: 'send', id: initial.id, message: 'MUST NOT RUN' }); } catch (caught) { error = caught; }
   const state = await released(initial.id);

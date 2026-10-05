@@ -1,8 +1,41 @@
 import path from "node:path";
 import { mkdirSync } from "node:fs";
+import { open } from "node:fs/promises";
+import { StringDecoder } from "node:string_decoder";
 import { PiProcess, type WireRecord, type Exit } from "./pi-process.js";
 import type { AdapterOptions, CliAdapter, InteractionReply } from "./cli-adapter.js";
-import type { Delivery, NativeSession, Question } from "./types.js";
+import type { Delivery, NativeSession, Question, SessionHandle } from "./types.js";
+
+/** Read only the original header: opening a SessionManager can migrate or repair the file. */
+export async function inspectPiSession(session: SessionHandle): Promise<void> {
+  const file = await open(session.sessionFile, "r");
+  try {
+    // Match Pi's bounded header discovery, not an unbounded transcript scan.
+    const limit = 1024 * 1024, buffer = Buffer.alloc(4096), decoder = new StringDecoder("utf8");
+    let scanned = 0, pending = "";
+    while (scanned <= limit) {
+      // One extra byte distinguishes EOF at the limit from a truncated header.
+      const { bytesRead } = await file.read(buffer, 0, Math.min(buffer.length, limit - scanned + 1), null);
+      scanned += bytesRead;
+      if (scanned > limit) throw new Error(`Pi session header exceeds ${limit}-byte scan limit`);
+      pending += bytesRead ? decoder.write(buffer.subarray(0, bytesRead)) : decoder.end();
+      const lines = pending.split("\n");
+      pending = bytesRead ? lines.pop() ?? "" : "";
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        let header: { type?: unknown; id?: unknown } | null;
+        try { header = JSON.parse(line); } catch { continue; }
+        // Pi skips malformed and falsy entries, but the first parsed entry must be a header.
+        if (!header) continue;
+        if (header.type !== "session" || typeof header.id !== "string") throw new Error("Invalid original Pi session header");
+        if (header.id !== session.sessionId) throw new Error("Original Pi session file belongs to a different session; refusing to synchronize");
+        return;
+      }
+      if (!bytesRead) break;
+    }
+    throw new Error("No valid original Pi session header");
+  } finally { await file.close(); }
+}
 
 export class PiAdapter implements CliAdapter {
   readonly rpc: PiProcess;

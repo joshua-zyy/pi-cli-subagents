@@ -226,6 +226,43 @@ test('sync refuses a live instance, missing native session, and an unfinished sy
   assert.equal(manager.get(worker.id).runCount, 1);
 });
 
+test('Pi identity mismatch is rejected before sync without changing either Git tree or creating a run', { timeout: 30_000 }, async t => {
+  const { repo, manager } = setup(t); const ws = await manager.workspaces.create(repo);
+  const child = await manager.spawn('worker', defaultRoles.worker, repo, 'REMEMBER original-token', ws.id);
+  const first = await complete(manager, child.id);
+  const saved = fs.readFileSync(first.sessionFile);
+  const foreign = Buffer.from(JSON.stringify({ ...JSON.parse(saved), id: 'foreign-session' }));
+  fs.writeFileSync(first.sessionFile, foreign);
+  fs.writeFileSync(path.join(repo, 'src/base.txt'), 'changed parent\n');
+  git(repo, 'add', '.'); git(repo, 'commit', '-qm', 'parent update');
+  const index = git(ws.path, 'rev-parse', '--path-format=absolute', '--git-path', 'index').trim();
+  const snapshot = () => ({
+    workspace: manager.workspaces.get(ws.id), head: git(ws.path, 'rev-parse', 'HEAD'), index: fs.readFileSync(index),
+    content: fs.readFileSync(path.join(ws.path, 'src/base.txt')),
+    parentHead: git(repo, 'rev-parse', 'HEAD'), parentRefs: git(repo, 'show-ref'), parentIndex: fs.readFileSync(path.join(repo, '.git/index')),
+    parentContent: fs.readFileSync(path.join(repo, 'src/base.txt')),
+    spec: fs.readFileSync(path.join(manager.root, child.id, 'spec.json')), runs: fs.readdirSync(path.join(manager.root, child.id, 'runs')),
+  });
+  const before = snapshot();
+  let error;
+  try { await manager.send(child.id, 'MUST NOT EXECUTE', 'steer', { baseline: 'sync' }); } catch (caught) { error = caught; }
+  await waitUntil('no worker after refusal', () => !fs.existsSync(path.join(manager.root, child.id, 'owner.lock')), 10_000);
+  assert.deepEqual(snapshot(), before, 'identity refusal must precede Git changes and new-run creation');
+  assert.match(error?.message ?? '', /different session/);
+  assert.match(error.message, /no synchronization was performed/);
+  assert.deepEqual(fs.readFileSync(first.sessionFile), foreign, 'preflight must not repair or rewrite the native file');
+  assert.equal(manager.get(child.id).runId, first.runId);
+  assert.equal(manager.getResult(child.id, first.runId).text, 'OK');
+
+  fs.writeFileSync(first.sessionFile, saved);
+  await manager.send(child.id, 'RECALL', 'steer', { baseline: 'sync' });
+  const resumed = await complete(manager, child.id);
+  assert.equal(resumed.sessionId, first.sessionId); assert.equal(resumed.text, 'original-token');
+  assert.equal(resumed.runCount, 2); assert.notEqual(resumed.runId, first.runId);
+  assert.equal(fs.readFileSync(path.join(ws.path, 'src/base.txt'), 'utf8'), 'changed parent\n');
+  assert.equal(manager.workspaces.get(ws.id).sync.status, 'applied');
+});
+
 test('sync rejects a sparse parent even when the managed worktree itself is full', { timeout: 30_000 }, async t => {
   const { repo, manager } = setup(t); const ws = await manager.workspaces.create(repo);
   const worker = await manager.spawn('worker', defaultRoles.worker, repo, fileTask('src/base.txt', 'first\n'), ws.id);
