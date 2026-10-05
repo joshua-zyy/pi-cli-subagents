@@ -1,6 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createWriteStream } from "node:fs";
-import { once } from "node:events";
+import { killProcessTree } from "./process-tree.js";
 import type { Launch } from "./types.js";
 
 // Minimal structural view of Pi RPC; event-specific fields belong to Pi's versioned protocol.
@@ -130,13 +130,8 @@ export class PiProcess {
   }
 
   private async kill(): Promise<void> {
-    if (this.forced || this.child.exitCode !== null || this.child.signalCode !== null || !this.child.pid) return;
+    if (this.child.exitCode !== null || this.child.signalCode !== null || !this.child.pid) return;
     this.forced = true;
-    if (process.platform === "win32") {
-      const killer = spawn("taskkill.exe", ["/PID", String(this.child.pid), "/T", "/F"], { windowsHide: true, stdio: "ignore" });
-      try { await once(killer, "close"); } catch { this.child.kill("SIGKILL"); }
-    } else {
-      try { process.kill(-this.child.pid, "SIGKILL"); } catch { this.child.kill("SIGKILL"); }
-    }
+    await killProcessTree(this.child);
   }
 }
