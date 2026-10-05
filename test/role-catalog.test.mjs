@@ -57,6 +57,24 @@ test('catalog refresh removes stale roles and respects trust revocation and inva
   assert.ok(h.notices.some(([text]) => /role/i.test(text)));
 });
 
+test('dispatch refuses inherited role properties but accepts an explicitly configured constructor role', async t => {
+  const h = harness(t), calls = [];
+  h.ctx.sessionManager.getSessionFile = () => path.join(h.ctx.cwd, 'parent.jsonl');
+  t.mock.method(AgentManager.prototype, 'spawn', async (name, resolved) => {
+    calls.push({ name, resolved });
+    return { id: 'fixture', runId: 'fixture-run', role: name, phase: 'completed' };
+  });
+  const start = name => h.tools.get('subagent').execute('start', { action: 'start', role: name, task: 'fixture' }, undefined, undefined, h.ctx);
+  for (const name of ['constructor', 'toString', '__proto__', 'missing-role']) {
+    await assert.rejects(start(name), /Unknown role/);
+  }
+  assert.deepEqual(calls, [], 'invalid role names must fail before reaching the execution layer');
+  const configured = role('A legitimate custom role');
+  h.write('user', { constructor: configured });
+  await start('constructor');
+  assert.deepEqual(calls, [{ name: 'constructor', resolved: configured }], 'check ownership, not a name blacklist');
+});
+
 test('instance queries no longer load role configuration or return a redundant catalog', async t => {
   const h = harness(t); h.write('user', { invalid: {} });
   t.mock.method(AgentManager.prototype, 'list', () => []);

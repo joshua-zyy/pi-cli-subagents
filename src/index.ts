@@ -179,8 +179,8 @@ export default function extension(pi: ExtensionAPI): void {
         checkFields(args, ["action", "role", "task"], ["cwd", "workspace"]);
         if (args.workspace !== undefined && args.cwd !== undefined) throw new Error("Pass workspace or cwd, not both");
         const roles = loadRoles(getAgentDir(), ctx.cwd, ctx.isProjectTrusted());
+        if (!Object.hasOwn(roles, args.role!)) throw new Error(`Unknown role: ${args.role}; available: ${Object.keys(roles).join(", ")}`);
         const resolved = roles[args.role!];
-        if (!resolved) throw new Error(`Unknown role: ${args.role}; available: ${Object.keys(roles).join(", ")}`);
         const state = await parentManager(ctx, launch).spawn(args.role!, inheritParentModel(resolved, ctx), args.cwd ?? ctx.cwd, args.task!, args.workspace);
         const result = `Subagent ${state.phase}: ${view(state)}`;
         if (state.phase === "failed") throw new Error(`${result}\nInspect the instance before retrying; work may already have run.`);
