@@ -300,11 +300,22 @@ export class AgentManager {
       // An inventory diagnostic has no verified execution to report or receipt to invent.
       if (!state.runId) continue;
       const folder = path.join(this.directory(state.id), "reports");
-      for (const file of jsonFiles(folder)) {
-        const report = this.report(path.join(folder, file))!;
-        if (report.parentFile !== this.parentFile) continue;
-        if (report.status === "waiting" && !state.questions.some((q) => q.id === report.questionId)) continue;
-        reports.push({ ...report });
+      let files: string[];
+      try { files = jsonFiles(folder); }
+      catch (error) {
+        console.error(`[pi-cli-subagents] Could not list reports for subagent ${state.id}; inspect ${folder}:`, error);
+        files = [];
+      }
+      for (const file of files) {
+        const reportFile = path.join(folder, file);
+        try {
+          const report = this.report(reportFile);
+          if (!report || report.parentFile !== this.parentFile) continue;
+          if (report.status === "waiting" && !state.questions.some((q) => q.id === report.questionId)) continue;
+          reports.push({ ...report });
+        } catch (error) {
+          console.error(`[pi-cli-subagents] Could not read report for subagent ${state.id}; inspect ${reportFile}:`, error);
+        }
       }
       if (state.phase === "unreachable") reports.push({
         notificationId: `${state.runId}-unreachable`, agentId: state.id, runId: state.runId, parentFile: this.parentFile,

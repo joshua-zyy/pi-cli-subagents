@@ -170,15 +170,91 @@ test('full results are read only for undelivered final notifications, not on eve
   assert.equal(h.manager.get(a.id).text.length, 12000, 'on-demand reads do not replace the bounded cache');
 });
 
-test('a failed original-result read does not acknowledge a notification or substitute its cached preview', () => {
-  const h = harness(), a = h.add();
+test('a failed original-result read does not acknowledge a notification or substitute its cached preview', t => {
+  const h = harness(), a = h.add(), diagnostics = [];
+  t.mock.method(console, 'error', (...args) => diagnostics.push(args));
   h.manager.list(); // A cached preview exists, but is not a substitute for the original.
   const pending = new Set(), getResult = h.manager.getResult.bind(h.manager);
   h.manager.getResult = () => { throw new Error('Original result unavailable'); };
-  assert.throws(() => deliverReports(h.manager, h.pi, h.ctx, pending, 10000), /Original result unavailable/);
+  deliverReports(h.manager, h.pi, h.ctx, pending, 10000);
   assert.equal(h.sent.length, 0); assert.equal(pending.size, 0);
+  for (const text of [a.id, a.runId, 'Original result unavailable']) assert.ok(diagnostics.flat().join(' ').includes(text));
   h.manager.getResult = getResult;
   deliverReports(h.manager, h.pi, h.ctx, pending, 11000);
   assert.equal(h.sent.length, 1);
   assert.deepEqual(h.sent[0].message.details.ids, [`${a.runId}-result`]);
+});
+
+test('a corrupt old report cannot block healthy runs in its own instance or a sibling, and repair retries its original identity', t => {
+  const h = harness(), a = h.add('ORIGINAL EVIDENCE'), b = h.add('SIBLING EVIDENCE'), diagnostics = [];
+  t.mock.method(console, 'error', (...args) => diagnostics.push(args));
+  const saved = fs.readFileSync(a.resultFile), healthyIds = [`${b.runId}-result`];
+  // The damaged run is older than the five-run inventory preview, but still awaiting delivery.
+  for (let time = 2; time <= 7; time++) healthyIds.push(`${a.publish(`Healthy later run ${time}`, 'completed', time).runId}-result`);
+  const corrupt = Buffer.from('{broken report'); fs.writeFileSync(a.resultFile, corrupt);
+  const states = [h.manager.get(a.id), h.manager.get(b.id)], pending = new Set();
+  deliverReports(h.manager, h.pi, h.ctx, pending, 10000, states);
+  assert.equal(h.sent.length, 1);
+  assert.deepEqual(h.sent[0].message.details.ids.slice().sort(), healthyIds.sort());
+  assert.equal(h.sent[0].message.details.reports.length, healthyIds.length);
+  assert.ok(h.sent[0].message.details.reports.every(report => report.status === 'completed'));
+  assert.equal(pending.has(`${a.runId}-result`), false, 'a broken report is not a delivered or failed-task receipt');
+  assert.deepEqual(fs.readFileSync(a.resultFile), corrupt, 'leave the original evidence for inspection');
+  assert.equal(diagnostics.length, 1);
+  assert.ok(diagnostics[0].join(' ').includes(a.id)); assert.ok(diagnostics[0].join(' ').includes(a.resultFile));
+  assert.ok(diagnostics[0].some(arg => arg instanceof SyntaxError), 'keep the original parsing error');
+
+  h.entries.push({ type: 'custom_message', ...h.sent[0].message });
+  fs.writeFileSync(a.resultFile, saved);
+  deliverReports(h.manager, h.pi, h.ctx, pending, 11000);
+  assert.equal(h.sent.length, 2);
+  assert.deepEqual(h.sent[1].message.details.ids, [`${a.runId}-result`]);
+  assert.match(h.sent[1].message.content, /ORIGINAL EVIDENCE/);
+  deliverReports(h.manager, h.pi, h.ctx, pending, 12000);
+  assert.equal(h.sent.length, 2, 'healthy and recovered reports retain normal pending deduplication');
+});
+
+test('an unreadable report directory is isolated from sibling delivery and retried after repair', t => {
+  const h = harness(), a = h.add('RESTORED'), b = h.add('HEALTHY'), diagnostics = [];
+  t.mock.method(console, 'error', (...args) => diagnostics.push(args));
+  const states = [h.manager.get(a.id), h.manager.get(b.id)];
+  const folder = path.dirname(a.resultFile), retained = `${folder}.retained`, pending = new Set();
+  fs.renameSync(folder, retained); fs.writeFileSync(folder, 'not a directory');
+  try {
+    deliverReports(h.manager, h.pi, h.ctx, pending, 10000, states);
+    assert.deepEqual(h.sent[0].message.details.ids, [`${b.runId}-result`]);
+    assert.equal(pending.has(`${a.runId}-result`), false);
+    assert.ok(diagnostics.flat().join(' ').includes(folder));
+    assert.ok(diagnostics.flat().join(' ').includes(a.id));
+    assert.ok(diagnostics.flat().some(arg => arg?.code === 'ENOTDIR'));
+  } finally { fs.unlinkSync(folder); fs.renameSync(retained, folder); }
+  h.entries.push({ type: 'custom_message', ...h.sent[0].message });
+  deliverReports(h.manager, h.pi, h.ctx, pending, 11000);
+  assert.deepEqual(h.sent[1].message.details.ids, [`${a.runId}-result`]);
+});
+
+test('corruption between enumeration and full-result reading cannot poison healthy batch content or receipts', t => {
+  const h = harness(), a = h.add(), b = h.add('HEALTHY ONLY'), diagnostics = [];
+  t.mock.method(console, 'error', (...args) => diagnostics.push(args));
+  const saved = fs.readFileSync(a.resultFile), reports = h.manager.reports.bind(h.manager), pending = new Set();
+  h.manager.reports = (...args) => {
+    const found = reports(...args);
+    fs.writeFileSync(a.resultFile, '{changed after enumeration');
+    return found;
+  };
+  deliverReports(h.manager, h.pi, h.ctx, pending, 10000);
+  assert.equal(h.sent.length, 1);
+  assert.deepEqual(h.sent[0].message.details.ids, [`${b.runId}-result`]);
+  assert.deepEqual(h.sent[0].message.details.reports, [{ agentId: b.id, status: 'completed' }]);
+  assert.deepEqual([...pending], [`${b.runId}-result`]);
+  assert.match(h.sent[0].message.content, /HEALTHY ONLY/);
+  assert.doesNotMatch(h.sent[0].message.content, /HEAD|MIDDLE EVIDENCE/);
+  for (const text of [a.id, a.runId, 'Cannot read result']) assert.ok(diagnostics.flat().join(' ').includes(text));
+  assert.equal(fs.readFileSync(a.resultFile, 'utf8'), '{changed after enumeration');
+
+  h.manager.reports = reports; fs.writeFileSync(a.resultFile, saved);
+  h.entries.push({ type: 'custom_message', ...h.sent[0].message });
+  deliverReports(h.manager, h.pi, h.ctx, pending, 11000);
+  assert.deepEqual(h.sent[1].message.details.ids, [`${a.runId}-result`]);
+  assert.ok(h.sent[1].message.content.includes(evidence), 'repair recovers the original full result, not its cached head');
 });
