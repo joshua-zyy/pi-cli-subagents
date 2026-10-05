@@ -83,6 +83,16 @@ export default function extension(pi: ExtensionAPI): void {
     catch (error) { ctx.ui.notify(`The parent agent was not told about this action: ${(error as Error).message}`, "warning"); }
   }
 
+  /** A resolved send can still have failed; both UI paths must report the observed phase. */
+  function recordHumanInput(ctx: ExtensionContext, agent: AgentView, input: string, action: string): void {
+    if (agent.phase === "failed") {
+      const error = new Error(`Subagent input failed: ${agent.error ?? "No error details available"}\nInstance: ${agent.id}\nRun: ${agent.runId}\nInspect the instance before retrying; work may already have run.`);
+      recordHumanAction(ctx, agent, `Input request failed: ${input}\n${error.message}`);
+      throw error;
+    }
+    recordHumanAction(ctx, agent, `${action}: ${input}`);
+  }
+
   let active: { file: string; ctx: ExtensionContext; manager: AgentManager; pending: Set<string>; timer: NodeJS.Timeout; agents: AgentView[]; widget?: StatusWidget; fleet?: FleetView } | undefined;
   /** Paged transcript windows for this extension instance; cleared when monitoring stops. */
   const transcriptCache = new TranscriptCache();
@@ -307,7 +317,7 @@ export default function extension(pi: ExtensionAPI): void {
         state = await manager.send(id, message, "steer", options);
       }
     }
-    recordHumanAction(ctx, state, `${action}${options.baseline ? ` (workspace baseline: ${options.baseline})` : ""}`);
+    recordHumanInput(ctx, state, `"${oneLine(message, 400)}"${options.baseline ? ` (workspace baseline: ${options.baseline})` : ""}`, action);
     return state;
   }
 
@@ -393,7 +403,7 @@ export default function extension(pi: ExtensionAPI): void {
                       newer: async (boundary) => ({ agent: manager.get(id), ...await lease.window.pageDown(files(), boundary) }),
                       latest: async () => ({ agent: manager.get(id), ...await lease.window.toTail(files()) }) },
                     onSend: async (message) => {
-                      try { recordHumanAction(ctx, await manager.send(id, message), `Sent an instruction: "${oneLine(message, 400)}"`); }
+                      try { recordHumanInput(ctx, await manager.send(id, message), `"${oneLine(message, 400)}"`, "Sent an instruction"); }
                       catch (error) {
                         if (error instanceof WorkspaceDecisionRequired) return { kind: "message", id, resume: true, message };
                         throw error;
@@ -425,7 +435,7 @@ export default function extension(pi: ExtensionAPI): void {
             if (!message?.trim() || epoch !== sessionEpoch) continue;
             if (!steerable) ctx.ui.notify("Starting a new turn in the original session; this can take up to about 60 seconds...", "info");
             const sent = await sendHuman(ctx, manager, action.id, message, epoch,
-              `${steerable ? "Sent an instruction" : "Resumed the original session with"}: "${oneLine(message, 400)}"`);
+              steerable ? "Sent an instruction" : "Resumed the original session with");
             if (!sent) { if (fromFleet) return; continue; }
             ctx.ui.notify(steerable ? "Instructions accepted; a completion report will follow." : "New turn accepted in the original session; a completion report will follow.", "info");
             if (fromFleet) return;
