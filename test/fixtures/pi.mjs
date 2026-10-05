@@ -5,7 +5,8 @@ import { randomUUID } from 'node:crypto';
 const flag = (name) => process.argv[process.argv.indexOf(name) + 1];
 const sessionFile = process.argv.includes('--session') ? flag('--session') : path.join(flag('--session-dir'), 'fake-session.json');
 fs.mkdirSync(path.dirname(sessionFile), { recursive: true });
-const session = fs.existsSync(sessionFile) ? JSON.parse(fs.readFileSync(sessionFile, 'utf8')) : { sessionId: randomUUID(), messages: [] };
+// Native header identity, with fixture-only task state in extra fields (no real model history).
+const session = fs.existsSync(sessionFile) ? JSON.parse(fs.readFileSync(sessionFile, 'utf8')) : { type: 'session', version: 3, id: randomUUID(), cwd: process.cwd(), timestamp: new Date().toISOString(), messages: [] };
 const save = () => fs.writeFileSync(sessionFile, JSON.stringify(session));
 let active = false, buffer = '', question = false, settling;
 const emit = (record) => process.stdout.write(JSON.stringify(record) + '\n');
@@ -18,7 +19,7 @@ function finish(text, stopReason = 'stop') {
   settling = setTimeout(() => { active = false; emit({ type: 'agent_settled' }); }, 100);
 }
 function handle(cmd) {
-  if (cmd.type === 'get_state') return response(cmd, { sessionId: session.sessionId, sessionFile, isStreaming: active });
+  if (cmd.type === 'get_state') return response(cmd, { sessionId: session.id, sessionFile, isStreaming: active });
   if (cmd.type === 'get_messages') return response(cmd, { messages: session.messages });
   if (cmd.type === 'clear_queue') return response(cmd);
   if (cmd.type === 'abort') { clearTimeout(settling); active = false; finish('ABORTED', 'aborted'); return response(cmd); }

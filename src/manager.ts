@@ -7,6 +7,7 @@ import os from "node:os";
 import { control } from "./control.js";
 import { codexHome, codexLaunch } from "./codex-launch.js";
 import { CodexAdapter } from "./codex-adapter.js";
+import { inspectPiSession } from "./pi-adapter.js";
 import { claudeLaunch } from "./claude-launch.js";
 import { inspectClaudeSession } from "./claude-adapter.js";
 import { nativeSession } from "./cli-adapter.js";
@@ -229,6 +230,8 @@ export class AgentManager {
       if (!session || session.cli !== (spec.cli ?? "pi")) throw new Error("No resumable original session; cannot sync for continuation");
       if (session.cli === "pi") {
         if (!existsSync(session.sessionFile)) throw new Error(`Original session file is missing: ${session.sessionFile}; no synchronization was performed`);
+        try { await inspectPiSession(session); }
+        catch (error) { throw new Error(`Pi original-session preflight failed; no synchronization was performed. ${(error as Error).message}`); }
       } else if (session.cli === "claude") {
         try { inspectClaudeSession(spec, session); }
         catch (error) { throw new Error(`Claude original-session preflight failed; no synchronization was performed. ${(error as Error).message}`); }

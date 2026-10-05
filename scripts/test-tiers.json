@@ -12,6 +12,7 @@
     "conversation.test.mjs",
     "fleet.test.mjs",
     "notifier.test.mjs",
+    "pi-session.test.mjs",
     "report-renderer.test.mjs",
     "result-reading.test.mjs",
     "role-catalog.test.mjs",
