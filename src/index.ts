@@ -497,6 +497,8 @@ export default function extension(pi: ExtensionAPI): void {
         const action = await new Promise<RoleSettingsAction | undefined>((resolve) => {
           let settled = false;
           const done = (result: RoleSettingsAction | undefined) => { if (!settled) { settled = true; deliver = undefined; resolve(result); } };
+          // Shutdown or session replacement must also settle the pending pane action.
+          dismissPanel = () => done(undefined);
           // A lower-screen pane: tall enough to be useful, never taller than a third of the terminal.
           panel = new RoleSettingsPanel(rows, scope, trusted, dirty[scope], theme, done,
             () => Math.max(6, Math.min(SETTINGS_MAX_ROWS + 4, Math.floor((widget?.terminal.rows ?? 24) / 3))),
@@ -505,6 +507,7 @@ export default function extension(pi: ExtensionAPI): void {
           deliver = (data) => panel?.handleInput(data);
           refresh();
         });
+        dismissPanel = undefined;
         if (!action || epoch !== sessionEpoch) return;
         const label = scope === "user" ? "personal" : "project";
         try {
@@ -567,7 +570,7 @@ export default function extension(pi: ExtensionAPI): void {
       deliver = undefined;
       stopInput();
       ctx.ui.setWidget(ROLE_SETTINGS_KEY, undefined);
-      panelBusy = false;
+      dismissPanel = undefined; panelBusy = false;
     }
   }
 
