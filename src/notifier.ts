@@ -40,27 +40,34 @@ export function deliverReports(
   const urgent = reports.some((report) => report.status !== "completed");
   const firstSuccess = reports.find((report) => report.status === "completed");
   if (!urgent && firstSuccess && now < firstSuccess.time + 2000) return;
-  const ids = reports.map((report) => report.notificationId);
-  const content = reports.map((report) => {
-    // Only final reports have this stable ID; waiting/inactivity/unreachable are attention events.
-    const final = report.notificationId === `${report.runId}-result`;
-    // Load full text only after receipt filtering and coalescing; never grow the history cache.
-    const source = final ? manager.getResult(report.agentId, report.runId) : report;
-    let raw = source.text;
-    if (source.error) raw = `Error: ${source.error}\n${raw}`.trim();
-    if (!raw) raw = report.status === "waiting"
-      ? "Waiting for a response; inspect it with subagent_query or /agent-reply."
-      : "No text response; inspect with subagent_query or /agents.";
-    const clipped = raw.length > REPORT_LIMIT;
-    const summary = clipped ? `${raw.slice(0, REPORT_HEAD)}\n… ${raw.length - REPORT_LIMIT} characters omitted …\n${raw.slice(-REPORT_TAIL)}\n(truncated preview)` : raw;
-    const resultHint = final ? `\nRead result: subagent_query(${JSON.stringify({ action: "result", id: report.agentId, runId: report.runId })})` : "";
-    const replyHint = report.status === "waiting" ? `\nQuestion ID: ${report.questionId ?? "inspect the instance with subagent_query"}; answer it with subagent_reply, or /agent-reply.` : "";
-    return `[Subagent ${report.agentId} · ${report.status}]\n${summary}${resultHint}${replyHint}`;
-  }).join("\n\n");
+  const prepared = reports.flatMap((report) => {
+    try {
+      // Only final reports have this stable ID; waiting/inactivity/unreachable are attention events.
+      const final = report.notificationId === `${report.runId}-result`;
+      // Load full text only after receipt filtering and coalescing; never grow the history cache.
+      const source = final ? manager.getResult(report.agentId, report.runId) : report;
+      let raw = source.text;
+      if (source.error) raw = `Error: ${source.error}\n${raw}`.trim();
+      if (!raw) raw = report.status === "waiting"
+        ? "Waiting for a response; inspect it with subagent_query or /agent-reply."
+        : "No text response; inspect with subagent_query or /agents.";
+      const clipped = raw.length > REPORT_LIMIT;
+      const summary = clipped ? `${raw.slice(0, REPORT_HEAD)}\n… ${raw.length - REPORT_LIMIT} characters omitted …\n${raw.slice(-REPORT_TAIL)}\n(truncated preview)` : raw;
+      const resultHint = final ? `\nRead result: subagent_query(${JSON.stringify({ action: "result", id: report.agentId, runId: report.runId })})` : "";
+      const replyHint = report.status === "waiting" ? `\nQuestion ID: ${report.questionId ?? "inspect the instance with subagent_query"}; answer it with subagent_reply, or /agent-reply.` : "";
+      return [{ report, content: `[Subagent ${report.agentId} · ${report.status}]\n${summary}${resultHint}${replyHint}` }];
+    } catch (error) {
+      console.error(`[pi-cli-subagents] Could not prepare report ${report.notificationId} (subagent ${report.agentId}, run ${report.runId}); left undelivered:`, error);
+      return [];
+    }
+  });
+  if (!prepared.length) return;
+  const ids = prepared.map(({ report }) => report.notificationId);
+  const content = prepared.map(({ content }) => content).join("\n\n");
   for (const id of ids) pending.add(id);
   try {
     // Display metadata is separate from model-facing content and the receipt IDs.
-    const displayReports = reports.map(({ agentId, status }) => ({ agentId, status }));
+    const displayReports = prepared.map(({ report: { agentId, status } }) => ({ agentId, status }));
     // Busy parents consume these after their current execution, not between its tool calls.
     pi.sendMessage({ customType, content, display: true, details: { ids, reports: displayReports } }, { triggerTurn: true, deliverAs: "followUp" });
   } catch (error) {
