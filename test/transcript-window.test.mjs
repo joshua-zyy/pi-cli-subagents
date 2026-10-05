@@ -374,3 +374,70 @@ test('a cancel after consumed bytes keeps the real cursor, so the next open neit
   assert.equal(mids.length, 24, 'no record is replayed or duplicated after the cancelled page');
   assert.equal(new Set(mids.map(entry => entry.id)).size, 24, 'entry identities stay unique');
 });
+
+test('non-missing stat failures preserve published content and bounds across refresh and navigation', async t => {
+  const w = workspace(t), file = w.run(); append(file, record('KEPT_EVIDENCE', 7));
+  const window = new TranscriptWindow(); t.after(() => window.dispose());
+  const before = await window.open([file]), stats = window.stats(), bytes = fs.readFileSync(file);
+  const stat = fsPromises.stat; let failure;
+  const mock = t.mock.method(fsPromises, 'stat', async (...args) => {
+    if (args[0] === file && failure) throw failure;
+    return stat(...args);
+  });
+  syncBuiltinESMExports();
+  t.after(() => { mock.mock.restore(); syncBuiltinESMExports(); });
+  for (const code of ['EACCES', 'EPERM', 'EIO', 'ENOTDIR', undefined]) {
+    failure = Object.assign(new Error(`fixture stat failure: ${code ?? 'unknown'}`), { code, path: file });
+    for (const method of ['open', 'pageUp', 'pageDown', 'toTail']) {
+      const result = await window[method]([file]).catch(error => error);
+      assert.deepEqual(window.stats(), stats, `${method}/${code} must not turn an I/O failure into a missing source`);
+      assert.equal(result, failure, 'surface the original error, not a successful empty snapshot');
+    }
+  }
+  assert.deepEqual(fs.readFileSync(file), bytes);
+  failure = undefined;
+  assert.deepEqual(await window.open([file]), before, 'recovery reuses the unchanged window without replay');
+  assert.deepEqual(window.stats(), stats);
+  append(file, record('AFTER_RECOVERY', 3));
+  const recovered = await window.open([file]);
+  assert.ok(has(recovered, 'KEPT_EVIDENCE')); assert.ok(has(recovered, 'AFTER_RECOVERY'));
+  assert.equal(recovered.usage.input, 10, 'recovery must not replay and double-count prior usage');
+});
+
+test('a failed source replacement or cancelled missing stat cannot discard the old window; real deletion still invalidates it', async t => {
+  const w = workspace(t), old = w.run(), next = w.run();
+  append(old, record('OLD_EVIDENCE', 7)); append(next, record('NEW_SOURCE', 2));
+  const window = new TranscriptWindow(); t.after(() => window.dispose());
+  const before = await window.open([old]), stats = window.stats();
+  const stat = fsPromises.stat;
+  let failure = Object.assign(new Error('fixture access denied'), { code: 'EACCES', path: next }), cancel = false;
+  const mock = t.mock.method(fsPromises, 'stat', async (...args) => {
+    if (args[0] === next && failure) {
+      if (cancel) window.cancel();
+      throw failure;
+    }
+    return stat(...args);
+  });
+  syncBuiltinESMExports();
+  t.after(() => { mock.mock.restore(); syncBuiltinESMExports(); });
+  const failed = await window.open([next]).catch(error => error);
+  assert.deepEqual(window.stats(), stats, 'reattach must finish metadata checks before resetting the old page');
+  assert.equal(failed, failure);
+  assert.deepEqual(await window.open([old]), before);
+  const cold = new TranscriptWindow(); t.after(() => cold.dispose());
+  await assert.rejects(cold.open([next]), error => error === failure, 'initial errors are not successful empty histories');
+
+  failure = Object.assign(new Error('fixture missing during cancellation'), { code: 'ENOENT', path: next }); cancel = true;
+  assert.deepEqual(await window.open([next]), before, 'cancellation wins over a missing-file result before reattach');
+  assert.deepEqual(window.stats(), stats);
+  failure = undefined; cancel = false;
+  const replaced = await window.open([next]);
+  assert.ok(has(replaced, 'NEW_SOURCE')); assert.ok(!has(replaced, 'OLD_EVIDENCE'));
+  fs.unlinkSync(next);
+  const missing = await window.open([next]);
+  assert.deepEqual(missing.entries, []); assert.match(missing.notice, /run logs do not exist/);
+  append(next, record('RECREATED', 4));
+  const restored = await window.open([next]);
+  assert.ok(has(restored, 'RECREATED')); assert.ok(!has(restored, 'NEW_SOURCE'));
+  assert.equal(restored.usage.input, 4);
+});
