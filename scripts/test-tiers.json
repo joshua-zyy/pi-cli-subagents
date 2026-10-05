@@ -31,6 +31,7 @@
     "claude-adapter.test.mjs",
     "codex-adapter.test.mjs",
     "core.test.mjs",
+    "process-tree.test.mjs",
     "storage-race.test.mjs",
     "test-runner.test.mjs",
     "workspace.test.mjs"
