@@ -217,6 +217,7 @@ export class TranscriptWindow {
       } catch (error) {
         // A closed page is not a missing file: cancellation must never be folded into a reset.
         if (error instanceof Cancelled) throw error;
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
         sources.push({ key, path: file, size: 0, exists: false, ino: 0, dev: 0, mtimeMs: 0, ctimeMs: 0 });
       }
     }
@@ -240,8 +241,10 @@ export class TranscriptWindow {
   }
 
   private async attach(files: string[]): Promise<TranscriptSnapshot> {
-    this.resetState();
     const sources = await this.statAll(files);
+    this.checkCancelled();
+    // Failed or cancelled metadata checks must not discard the previously published window.
+    this.resetState();
     this.sources = sources;
     const index = lastReadable(sources);
     if (index < 0) { this.notice = "Event log unavailable: the run logs do not exist yet."; return this.snapshot(); }

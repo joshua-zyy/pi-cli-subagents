@@ -6,6 +6,7 @@ import { syncBuiltinESMExports } from 'node:module';
 import { TranscriptWindow } from '../dist/ui/transcript-window.js';
 import { TranscriptCache } from '../dist/ui/transcript-cache.js';
 import { ConversationViewer } from '../dist/ui/conversation.js';
+import { waitUntil } from '../dist/storage.js';
 
 const line = value => JSON.stringify(value) + '\n';
 const message = text => ({ type: 'message_end', message: { role: 'assistant', content: text } });
@@ -156,6 +157,39 @@ test('all entries stay reachable in both directions when more than 300 messages 
   assert.equal(snapshot.window.atEnd, true);
   assert.ok(has(snapshot, 'MSG_1999'));
   assert.equal(seen.size, 2000, 'entry-count clipping must not make byte-cached middle messages unreachable');
+});
+
+test('the viewer keeps a paused transcript visible through stat errors and clears the error only after recovery', { timeout: 5000 }, async t => {
+  let viewer; t.after(() => viewer?.dispose());
+  const { dir, window } = await fixture(t), file = path.join(dir, 'events.jsonl');
+  const original = Array.from({ length: 40 }, (_, i) => line(message(`ROW_${String(i).padStart(2, '0')}`))).join('');
+  await fs.writeFile(file, original);
+  const stat = fs.stat; let denied = false, failures = 0;
+  const mock = t.mock.method(fs, 'stat', async (...args) => {
+    if (args[0] === file && denied) { failures++; throw Object.assign(new Error('fixture permission denied'), { code: 'EACCES', path: file }); }
+    return stat(...args);
+  });
+  syncBuiltinESMExports(); t.after(() => { mock.mock.restore(); syncBuiltinESMExports(); });
+  viewer = new ConversationViewer({ terminal: { rows: 14, columns: 100 }, requestRender() {} },
+    { fg: (_, text) => text, bold: text => text }, () => {},
+    async () => ({ agent: { id: 'agent', runId: 'run', role: 'worker', phase: 'running' }, ...await window.open([file]) }), { intervalMs: 10 });
+  const text = () => viewer.render(100).join('\n');
+  await waitUntil('initial transcript', () => text().includes('ROW_39'), 2000);
+  viewer.handleInput('\x1b[H'); assert.match(text(), /ROW_00/);
+  const firstRow = viewer.render(100)[3], before = window.stats();
+  denied = true;
+  await waitUntil('repeated stat failures', () => failures >= 2, 2000);
+  assert.match(text(), /fixture permission denied/);
+  assert.match(text(), /ROW_00/); assert.equal(viewer.render(100)[3], firstRow);
+  assert.doesNotMatch(text(), /run logs do not exist|No messages yet/);
+  assert.deepEqual(window.stats(), before);
+  assert.equal(await fs.readFile(file, 'utf8'), original);
+  denied = false;
+  const extra = line(message('AFTER_RECOVERY')); await fs.appendFile(file, extra);
+  await waitUntil('transcript recovery', () => window.stats().entries === 41 && !text().includes('fixture permission denied'), 2000);
+  assert.match(text(), /ROW_00/); assert.equal(viewer.render(100)[3], firstRow);
+  viewer.handleInput('\x1b[F'); assert.match(text(), /AFTER_RECOVERY/);
+  assert.equal(await fs.readFile(file, 'utf8'), original + extra);
 });
 
 test('a still-missing latest run does not invalidate an unchanged readable tail', async t => {
