@@ -152,7 +152,7 @@ export class TranscriptWindow {
       if (index < 0) return this.snapshot();
       const liveEnd = { source: sources[index].key, offset: sources[index].size };
       if (this.atEnd && this.to !== undefined) return this.refresh(files);
-      await this.replay(files, await this.planRange(sources, stepBack(sources, liveEnd, this.pageBytes), liveEnd, "head"), { kind: "newest" });
+      await this.replayTail(files, liveEnd, this.pageBytes);
       return this.snapshot();
     });
   }
@@ -251,8 +251,21 @@ export class TranscriptWindow {
     const live = sources[index];
     if (this.cli !== "pi" && !this.threadId) await this.learnIdentity(live);
     const liveEnd = { source: live.key, offset: live.size };
-    await this.replay(files, await this.planRange(sources, stepBack(sources, liveEnd, this.initialBytes), liveEnd, "head"), { kind: "newest" });
+    await this.replayTail(files, liveEnd, this.initialBytes);
     return this.snapshot();
+  }
+
+  /** Control events (notably Pi's aggregate agent_end) can fill the tail without any displayable
+   * messages. Expand once within the existing window budget, never on idle refreshes. */
+  private async replayTail(files: string[], end: TranscriptPosition, bytes: number): Promise<void> {
+    const range = await this.planRange(this.sources, stepBack(this.sources, end, bytes), end, "head");
+    await this.replay(files, range, { kind: "newest" });
+    if (this.atStart || this.entries.some(entry => entry.kind !== "assistant" || entry.text)) return;
+    const expanded = await this.planRange(this.sources, stepBack(this.sources, end, this.maxBytes), end, "head");
+    if (!samePosition(expanded.from, range.from)) await this.replay(files, expanded, { kind: "newest" });
+    if (!this.atStart && !this.entries.some(entry => entry.kind !== "assistant" || entry.text)) {
+      this.notice = [this.notice, "No displayable messages in the recent window; Page Up to search older history."].filter(Boolean).join(" ");
+    }
   }
 
   private async refresh(files: string[]): Promise<TranscriptSnapshot> {

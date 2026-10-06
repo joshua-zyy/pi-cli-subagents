@@ -59,6 +59,53 @@ test('the first frame reads a bounded tail and hides incomplete whole-log totals
   assert.ok(stats.readBytes < 3 * 1024 * 1024, 'the old run was never read in full');
 });
 
+test('an ignored aggregate tail still opens on recent messages and resumes live without replaying history', async t => {
+  const w = workspace(t), file = w.run();
+  append(file, record('FAR_OLD'), ...Array.from({ length: 128 }, () => ignored(64 * 1024)), record('RECENT_REPORT', 7),
+    { type: 'agent_end', messages: [{ role: 'assistant', content: 'AGGREGATE_COPY ' + 'x'.repeat(1024 * 1024) }] },
+    { type: 'extension_ui_request', method: 'setStatus', statusKey: 'done' }, { type: 'agent_settled' });
+  const original = fs.readFileSync(file);
+  const window = new TranscriptWindow(); t.after(() => window.dispose());
+  const first = await window.open([file]);
+  assert.ok(has(first, 'RECENT_REPORT'), 'a control-only tail must not hide the last real message');
+  assert.ok(!has(first, 'FAR_OLD') && !has(first, 'AGGREGATE_COPY'), 'no whole-history scan or aggregate-message duplication');
+  assert.equal(first.entries.filter(e => e.text === 'RECENT_REPORT').length, 1);
+  assert.equal(first.window.atEnd, true);
+  assert.equal(first.usageComplete, false);
+  const opened = window.stats();
+  assert.ok(opened.readBytes < original.length, 'bounded fallback does not read this whole log');
+  assert.ok(opened.windowBytes <= LOOKBACK);
+  for (let i = 0; i < 5; i++) await window.open([file]);
+  assert.deepEqual(window.stats(), opened, 'idle refreshes do not extend the lookback');
+  await window.pageUp([file]);
+  const latest = await window.toTail([file]);
+  assert.ok(has(latest, 'RECENT_REPORT'), 'End uses the same visible-tail search as first open');
+  assert.equal(latest.window.atEnd, true);
+  const beforeAppend = window.stats();
+  append(file, record('NEW_LIVE'));
+  assert.ok(has(await window.open([file]), 'NEW_LIVE'));
+  assert.ok(window.stats().readBytes - beforeAppend.readBytes < 4096, 'live refresh reads only the append');
+  assert.deepEqual(fs.readFileSync(file).subarray(0, original.length), original);
+});
+
+test('a metadata-only lookback is bounded and explicitly leaves older history for paging', async t => {
+  const w = workspace(t), file = w.run();
+  append(file, record('BEYOND_LOOKBACK'), ...Array.from({ length: 192 }, () => ignored(64 * 1024)));
+  const window = new TranscriptWindow(); t.after(() => window.dispose());
+  const snapshot = await window.open([file]), opened = window.stats();
+  assert.deepEqual(snapshot.entries, []);
+  assert.equal(snapshot.window.atStart, false);
+  assert.equal(snapshot.window.atEnd, true);
+  assert.match(snapshot.notice, /no displayable messages.*page up/i, 'an empty window is not an empty session');
+  assert.ok(opened.readBytes <= 2 * LOOKBACK + 2 * CHUNK, 'lookback is bounded independently of log size');
+  assert.ok(opened.windowBytes <= LOOKBACK);
+  for (let i = 0; i < 5; i++) await window.open([file]);
+  assert.deepEqual(window.stats(), opened, 'no background full-history walk');
+  let page = snapshot;
+  for (let i = 0; !page.window.atStart && i < 40; i++) page = await window.pageUp([file]);
+  assert.ok(has(page, 'BEYOND_LOOKBACK'), 'the bounded search does not make older messages unreachable');
+});
+
 test('refreshing without appends performs no I/O and never walks older history', async t => {
   const w = workspace(t);
   const file = w.run();
