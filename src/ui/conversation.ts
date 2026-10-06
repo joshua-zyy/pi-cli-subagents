@@ -586,7 +586,8 @@ export class ConversationViewer {
       return this.markdown(clean(entry.text), width, "text");
     }
     const color = entry.status === "error" ? "error" : "warning";
-    return [`${this.theme.fg(color, "!")} ${this.theme.fg(color, title)}`, ...(entry.text ? wrapPlain(clean(entry.text), Math.max(1, width - 2)).map((line) => `  ${this.theme.fg("dim", line)}`) : [])];
+    return [`${this.theme.fg(color, "!")} ${this.theme.fg(color, title)}`, ...(entry.text ? clean(entry.text).split(/\r?\n/)
+      .flatMap((line) => wrapPlain(line, Math.max(1, width - 2))).map((line) => `  ${this.theme.fg("dim", line)}`) : [])];
   }
 }
 

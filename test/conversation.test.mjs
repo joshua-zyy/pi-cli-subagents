@@ -184,6 +184,30 @@ test('the composer is unavailable for a read-only child and reports send failure
   assert.match(resumable.render(60).join('\n'), /Send failed: worker has exited/);
 });
 
+test('multiline interaction notices occupy physical rows without escaping the viewer frame', async t => {
+  const text = '\x1b[33mDangerous bash command\x1b[0m\r\n\r\nVerify the target and scope before allowing.\n命令: rm -rf /tmp/owned-probe\nOptions: Block | Allow once';
+  const notice = entry(1, { kind: 'notice', title: 'Interaction request (select)', text });
+  const h = harness(async () => ({ agent: state, entries: [notice], loading: false }));
+  t.after(() => h.viewer.dispose());
+  await new Promise(setImmediate);
+  for (const rows of [14, 40]) for (const columns of [35, 80, 160]) {
+    h.tui.terminal.rows = rows;
+    h.tui.terminal.columns = columns;
+    for (const key of ['\x1b[H', '\x1b[F']) {
+      h.viewer.handleInput(key);
+      const frame = h.viewer.render(columns);
+      assert.ok(frame.length <= rows, 'the overlay stays within its allocated height');
+      assert.ok(frame.every(row => !/[\r\n]/.test(row)), 'each rendered string must be one physical terminal row');
+      assert.ok(frame.every(row => visibleWidth(row) <= columns), 'every row fits inside the frame');
+    }
+  }
+  const frame = h.viewer.render(160);
+  assert.match(frame.join('\n'), /Dangerous bash command/);
+  assert.match(frame.join('\n'), /Options: Block \| Allow once/);
+  assert.ok(frame.some(row => /^│\s+│$/.test(row)), 'explicit blank lines remain visible');
+  assert.equal(notice.text, text, 'formatting never rewrites the original notice');
+});
+
 test('a loading snapshot followed by failure uses the normal retry interval', async t => {
   let calls = 0;
   const tui = { terminal: { rows: 20, columns: 80 }, requestRender() {} };
