@@ -1,167 +1,167 @@
-# Pi Agents：CLI 子代理能力与会话管理目标
+# Pi Agents: CLI Subagent Capabilities and Session Management Goals
 
-状态：产品方向已确认；当前阶段只聚焦 Pi 主 agent 的 CLI 子代理派发与管理，`@角色` 暂缓。四工具、角色目录和 follow-up 通知已完成本地实施验证，详见[接口设计](subagent-tool-contract.md)。本文其余产品目标不是功能完成声明，也不构成后续实施授权。
+Status: the product direction is confirmed. The current phase focuses only on CLI subagent dispatch and management by the parent Pi agent; `@role` dispatch is deferred. The four tools, role catalog and follow-up notifications have passed local implementation checks; see the [interface design](subagent-tool-contract.md). The remaining goals in this document are neither claims of completed functionality nor authorization for further implementation.
 
-本文取代此前的“主 agent 协调优化”方案。为保留已有文档链接，暂沿用原文件名。文档重写之后，已按另行授权实施三个工具管理增量；真实派发与模型调用仍需另行授权。
+This document replaces the earlier "parent-agent coordination optimization" proposal. It retains the original filename to preserve existing links. Since the rewrite, three tool-management increments have been implemented under separate authorization; real dispatch and model calls still require separate authorization.
 
-## 1. 产品定位
+## 1. Product positioning
 
-**把类似 Paseo Agents 的使用体验带入可安装的 Pi extension，让用户及其 Pi 主 agent 能直接驱使其他 CLI 作为 subagent。**
+**Bring a Paseo Agents-like experience to an installable Pi extension, allowing users and their parent Pi agents to directly use other CLIs as subagents.**
 
-这是 CLI 子代理工具与会话管理界面，不是替用户决定分工的编排器。提供可靠的操作、状态和结果，让用户通过自己的 AGENTS.md、提示词及角色配置决定工作流。
+This is a CLI subagent toolset and session-management interface, not an orchestrator that decides how users divide their work. It provides reliable operations, state and results; users define their workflows through their own AGENTS.md, prompts and role configuration.
 
-长期体验设想是两个入口共用一套实例管理能力；当前仅推进工具派发入口，保留既有用户管理界面，暂不新增 @派发入口：
-
-```text
-主 agent 调用工具 ──┐
-                    ├─ CLI 子代理实例 → 状态、交互、结果 → 发起任务的 Pi 主会话
-用户直接 @角色 ────┘
-```
-
-Paseo 是主要体验与会话管理参考，不意味着引入其服务依赖或移植整个平台。不采用 OMO / OMO-slim 替用户调度与编排的产品方向。
-
-## 2. 插件负责什么、不负责什么
-
-| 插件负责 | 用户及其主 agent 决定 |
-|---|---|
-| 启动 CLI、保存原生会话身份、暴露真实能力限制 | 是否委派、如何拆分任务、选择什么角色 |
-| 向指定实例发消息，说明消息是否被接收及其执行语义 | 是否复用旧实例、给它什么上下文 |
-| 呈现实例状态、对话、结果与待处理请求 | 如何判断成果、是否需要独立审查 |
-| 停止、续聊和恢复，防止静默替换原会话 | 何时停止、返工或调整分工 |
-| 加载用户配置的角色并提供默认示例 | 角色名称、职责、模型、provider 和提示词 |
-
-插件不设置默认审查触发条件，不规定 worker → reviewer 流水线，不规定默认代理数量，不按模型价格或档位分配任务，不自动升级模型。
-
-内置角色是可替换的默认配置，不是产品硬编码的岗位体系。用户应能自定义、覆盖和替换它们；工具与界面不能依赖 explore、worker、reviewer 等特定名称才能工作。
-
-“接口安全契约”与“工作流政策”必须分开。例如，续聊不能静默新建、读取结果不能启动工作，是工具契约；是否找 reviewer、优先复用谁，是用户工作流。自然语言角色描述也不能被宣传为沙箱级权限限制。
-
-## 3. 首批体验范围
-
-| 能力 | 用户应得到的体验 |
-|---|---|
-| 实例列表 | 在 Pi 内查看本主会话创建的实例，分清角色、实例、本轮任务和状态 |
-| 对话与结果 | 打开子代理对话，查看原始内容和可定位的历史结果，而非只有摘要 |
-| 直接操作 | 向实例发消息、处理授权请求、停止、续聊或恢复，不必让主 agent 代传 |
-| 工具派发 | 主 agent 直接看到可用角色说明，通过工具启动实例，获得准确的目录与启动回执 |
-| 返回主会话 | 成功、失败和需处理的阻塞通知原主会话；主 agent 忙时排队，不打断当前操作 |
-
-首批不包含远程连接、移动端、跨设备服务、定时任务或跨主会话接管。保留现有 Pi、Codex、Claude 支持，先做稳 Pi → Pi，再核对其余 CLI 的实际差异；不要求同时重写三个适配器。
-
-主 agent 侧已采用四工具：subagent、subagent_query、subagent_reply、subagent_workspace。保留隔离 worktree、跨实例复用和安全集成能力，不为减少数量而删功能。具体参数、失败语义及兼容策略见接口设计。
-
-## 4. 角色、实例与运行的区分
-
-| 概念 | 含义 |
-|---|---|
-| 角色 | 用户配置的启动模板，含所选 CLI、模型配置和角色提示词等 |
-| 实例 | 一次创建后可持续交互的子代理会话，有稳定身份及原生会话信息 |
-| 运行 / 本轮任务 | 该实例接受的一轮工作，有独立结果定位；同一实例可以有多轮运行 |
-| 所属主会话 | 创建并管理该实例的 Pi 会话，也是用户操作记录与任务通知的归属 |
-
-界面不能把同角色的多个实例混为一个，也不能用最新一轮的结果覆盖旧任务的引用。修改角色配置不应被误解为已存在实例已自动换配置；具体生效时机须在技术设计时核对并明确呈现。
-
-## 5. 用户直接 @角色 的语义（延期设想，不属当前阶段）
-
-以下保留此前讨论，恢复该方向时需重新评估输入歧义、并发和成本，不作为当前实现要求。示意交互：
+The long-term vision has two entry points sharing the same instance-management capabilities. For now, only tool-based dispatch is in scope; the existing user management interface remains, without a new @-dispatch entry point:
 
 ```text
-@research 查一下这个库与当前版本的兼容性
+Parent agent calls tools --+
+                          +-- CLI subagent instance -> state, interactions, results -> originating Pi parent session
+User directly uses @role -+
 ```
 
-1. **直接派发。** 扩展把用户给出的任务交给选定角色，不先请求主 agent 决定是否派发，不让主 agent 改写任务或重新选人。正常角色配置仍然生效。
-2. **默认新建。** @角色 创建新实例，不自动挑最近或最熟悉的旧实例。续聊通过显式选择已有实例完成，并让用户看清目标。
-3. **主会话知情。** 主会话记录用户向哪个实例派发了什么及实际启动结果；这不是再向主 agent 发出一次执行同任务的请求。
-4. **默认当前目录。** 使用当前 Pi 工作目录，派发时显示目标目录；需要隔离时，用户显式选择已有工作区或创建隔离工作区，不自动创建 worktree。
-5. **不隐式兜底。** 角色不存在、配置无效或 CLI 不可用时明确报错，不改派其他角色、切换 CLI，或悄悄把任务转给主 agent 执行。
+Paseo is the primary reference for the experience and session management, not a requirement to adopt its services or port the entire platform. The project does not follow the OMO / OMO-slim direction of scheduling and orchestrating work for the user.
 
-普通未指定角色的消息仍交给主 agent。@派发不扩大文件、费用或其他操作的授权范围。
+## 2. What the extension owns and what it does not
 
-启动回执必须区分“尚未启动”和“可能已启动但确认失败”。后者应提供已有身份或诊断入口，不鼓励直接重试产生重复任务。
-
-## 6. 两个入口共用实例
-
-用户创建的实例可由主 agent 通过现有工具查看和操作；主 agent 创建的实例也可由用户在界面中接手。二者共享身份、归属、权限与生命周期检查，不形成相互不可见的两套列表。
-
-用户直接发消息、停止或处理请求后，主会话应获得操作记录，避免主 agent 依据旧状态行动。记录应明确来源，不把用户行为伪装为主 agent 的工具调用，也不把运行时生成的说明归给子代理。
-
-用户明确要求主 agent 不要干预时，应遵循该指令；不因此自动创建新的隔离权限系统。多个入口同时操作时如何序列化、拒绝冲突及呈现结果，属于实现前需验证的技术契约，不能让两个入口绕过对方的状态检查。
-
-## 7. 通知与结果返回
-
-| 情况 | 目标行为 |
+| Extension responsibility | User and parent-agent decision |
 |---|---|
-| 本轮正常结束 | 通知发起任务的主会话，包含原任务、实例、本轮身份、结果及全文入口 |
-| 本轮失败或异常停止 | 通知真实结果与可用诊断信息，不将退出或空结果包装为成功 |
-| 等待授权或其他需处理的阻塞 | 界面可见并通知主会话；按原授权边界处理，humanOnly 请求不可由主 agent 代批 |
-| 普通流式输出 | 更新实例视图，不按每个输出片段通知或唤醒主 agent |
-| 主 agent 正忙 | 通知排队，在合适的后续处理时机交付，不打断当前操作 |
+| Launch CLIs, preserve native session identity, expose actual capability limits | Whether to delegate, how to split tasks, which role to choose |
+| Send messages to a specific instance and explain receipt and execution semantics | Whether to reuse an instance and what context to provide |
+| Present instance state, conversations, results and pending requests | How to evaluate work and whether independent review is needed |
+| Stop, continue and recover without silently replacing the original session | When to stop, request rework or change assignments |
+| Load user-configured roles and provide default examples | Role names, responsibilities, models, providers and prompts |
 
-完成通知应让主 agent 有机会自动响应，不要求用户再发一句“看看结果”。这是任务事件触发的返回，不是定时催促。主 agent 收到后告知用户、综合结果还是继续工作，取决于用户指令；插件不预设下一步流程。
+The extension does not set default review triggers, prescribe a worker → reviewer pipeline or a default agent count, assign work by model price or tier, or automatically upgrade models.
 
-发送内容、原报告和原始日志保留。折叠、摘要与分页只改变呈现和读取方式，不能删掉证据。结果入口绑定实例 ID 与 run ID；后续运行不能改变旧引用的含义。
+Built-in roles are replaceable defaults, not a hardcoded job hierarchy. Users should be able to customize, override and replace them; tools and UI must not depend on specific names such as explore, worker or reviewer.
 
-必须区分消息已接收、任务已执行、CLI 本轮已结束、结果已送达和业务成果已被认可。插件呈现能够证明的状态，不做语义验收，也不要求固定 VERDICT / EVIDENCE / UNVERIFIED 格式才能接受用户的工作流。
+Keep interface safety contracts separate from workflow policies. For example, continuing a session must not silently create another one, and reading a result must not start work: these are tool contracts. Whether to involve a reviewer or prefer a particular existing instance belongs to the user's workflow. Natural-language role descriptions must not be advertised as sandbox-enforced permissions.
 
-已本地验证 follow-up 路由、丢失队列后的原 run 补交及持久回执去重；异步交付失败等更广泛异常仍需验证，不宣称恰好一次交付。任何情况下都不能因通知异常自动重跑任务。
+## 3. Initial experience scope
 
-## 8. 生命周期、恢复与权限边界
+| Capability | Expected user experience |
+|---|---|
+| Instance list | View instances created by this parent session in Pi, distinguishing roles, instances, current tasks and states |
+| Conversations and results | Open child conversations and locate original content and historical results, not just summaries |
+| Direct operations | Message instances, handle approval requests, stop, continue or recover without relaying everything through the parent agent |
+| Tool-based dispatch | The parent agent sees available role descriptions, launches instances through tools, and receives accurate directory and startup receipts |
+| Return to the parent session | Success, failure and actionable blockers notify the original parent session; notifications queue while it is busy without interrupting its current operation |
 
-1. **原会话恢复。** 恢复原 Pi 主会话时能找回所属实例和未送达结果；在同一目录新建 Pi 会话，不自动接管旧实例。跨会话转交不在首批范围内。
-2. **持久会话可恢复，不承诺进程常驻。** 续聊与恢复指向原 CLI 会话身份和已保存历史；不保证同一进程、内存状态、后台 shell、监听或构建任务跨轮次继续存活。恢复失败明确失败，不静默创建替代。关闭执行资源、结束一轮任务与删除历史是不同操作。
-3. **停止不回滚。** 停止不能被解释为文件改动已撤销。旧执行是否停止不明时，不宣称可安全恢复或启动替代写者。
-4. **能力差异明确。** 不支持的消息模式或恢复操作应拒绝并说明；接收回执不能表述为目标已经读到或执行。工具、界面入口遵循同样约束。
-5. **权限不放大。** 用户直接 @和主 agent 调用工具均不绕过宿主、CLI 或已有工作区安全检查；插件不代替用户批准额外权限，不自动重跑任务、改模型或实施替代方案。
+The initial scope excludes remote connections, mobile clients, cross-device services, scheduled jobs and takeover by another parent session. Keep existing Pi, Codex and Claude support; stabilize Pi → Pi first, then verify the actual differences in the other CLIs. Rewriting all three adapters at once is not required.
 
-原主会话关闭期间的通知需要保留，在恢复原会话后交付，而不是为了发送通知偷偷启动新的主会话。不同 CLI 在父进程退出后能否持续执行，应依据真实能力验证并明确显示，不用统一承诺掩盖差异。“不承诺进程常驻”也不允许把进行中的失联执行当作已完成或可安全重跑：仍须保留身份、检查旧执行占用，并如实报告不确定状态。
+The parent agent now uses four tools: subagent, subagent_query, subagent_reply and subagent_workspace. Preserve isolated worktrees, reuse across instances and safe integration; do not remove capabilities merely to reduce the tool count. See the interface design for parameters, failure semantics and compatibility policy.
 
-## 9. 使用指南与现有约束的处理
+## 4. Roles, instances and runs
 
-内置 skill 和工具说明应成为能力使用指南：介绍入口、参数、消息模式、状态含义、结果读取、授权和恢复，而不是设置分工、复用优先级、审查门槛或默认流水线。
+| Concept | Meaning |
+|---|---|
+| Role | A user-configured launch template, including the selected CLI, model settings and role prompt |
+| Instance | A child session that can be interacted with after creation, with stable identity and native session information |
+| Run / current task | One round of work accepted by an instance, with an independently addressable result; an instance can have multiple runs |
+| Owning parent session | The Pi session that creates and manages the instance and owns its user-action records and task notifications |
 
-源码复核已更正：托管工作区的独立审查要求此前主要位于工具说明和 skill，WorkspaceStore.apply() 没有读取 reviewer 结果或校验 PASS 的硬门禁。四工具迁移已去除这些插件预设的审查政策，保留归属、占用、基线、冲突和不确定操作检查；用户自身的审查要求不受影响。
+The UI must not conflate multiple instances of the same role, nor replace references to old tasks with the latest run's result. Changing role configuration must not imply that existing instances automatically adopted it. The exact point at which changes take effect must be checked during technical design and clearly presented.
 
-角色选择和任务内容仍由用户或其主 agent 决定。插件不尝试用自然语言语义拦截器判断“这个角色是否应该做这件事”。
+## 5. Direct user @role semantics (deferred concept, outside the current phase)
 
-## 10. 可观察的验收场景
+The following preserves earlier discussions. Input ambiguity, concurrency and cost must be reassessed before this direction resumes; these are not current implementation requirements. Example interaction:
 
-以下是产品验收目标，不代表当前已经实现或验证。A2 和 A3 的 @部分延期；A1、A4 当前只验收工具与既有管理界面，不新增用户派发入口。当前四工具的具体门槛和已验证范围见接口设计。
+```text
+@research Check this library's compatibility with the current version
+```
 
-| 编号 | 场景 | 通过条件 |
+1. **Direct dispatch.** The extension passes the user's task to the selected role without first asking the parent agent to decide whether to delegate, rewrite the task or choose another role. Normal role configuration still applies.
+2. **New instance by default.** @role creates a new instance rather than automatically selecting the most recent or familiar one. Continuing work requires explicitly selecting an existing instance with a visible target.
+3. **Parent awareness.** The parent session records which task the user dispatched to which instance and the actual startup result. This is not a second request for the parent agent to execute the same task.
+4. **Current directory by default.** Use the current Pi working directory and show the target directory during dispatch. When isolation is needed, the user explicitly selects an existing workspace or creates an isolated one; no worktree is created automatically.
+5. **No implicit fallback.** Missing roles, invalid configuration and unavailable CLIs produce explicit errors. Do not switch roles or CLIs, or silently forward the task to the parent agent instead.
+
+Ordinary messages without a role still go to the parent agent. @-dispatch does not expand authorization for files, spending or other operations.
+
+Startup receipts must distinguish "not started" from "may have started but confirmation failed." The latter should provide any known identity or diagnostic entry point, not encourage a blind retry that duplicates work.
+
+## 6. Shared instances across both entry points
+
+The parent agent can inspect and operate user-created instances through existing tools; users can also take over parent-agent-created instances through the UI. Both entry points share identity, ownership, permission and lifecycle checks rather than maintaining mutually invisible lists.
+
+After the user directly sends a message, stops an instance or answers a request, the parent session should receive an action record so the parent agent does not act on stale state. Records must identify their source: do not disguise user actions as parent-agent tool calls or attribute runtime-generated explanations to the child.
+
+Honor explicit user instructions for the parent agent not to intervene, without automatically introducing a new permission-isolation system. Serializing simultaneous operations, rejecting conflicts and presenting results are technical contracts to verify before implementation; neither entry point may bypass the other's state checks.
+
+## 7. Notifications and result delivery
+
+| Situation | Target behavior |
+|---|---|
+| Normal run completion | Notify the originating parent session with the original task, instance and run identities, result and full-text entry point |
+| Failure or abnormal termination | Report the actual outcome and available diagnostics; do not present an exit or empty result as success |
+| Approval or another actionable blocker | Make it visible in the UI and notify the parent session; respect the original authorization boundaries, with no parent-agent approval of humanOnly requests |
+| Ordinary streamed output | Update the instance view without notifying or waking the parent agent for each fragment |
+| Busy parent agent | Queue notifications for an appropriate follow-up opportunity without interrupting the current operation |
+
+Completion notifications should give the parent agent a chance to respond automatically, without requiring the user to say "check the result." This is a return triggered by task events, not periodic prompting. Whether the parent then informs the user, synthesizes results or continues working depends on user instructions; the extension does not prescribe the next step.
+
+Preserve sent content, original reports and raw logs. Folding, summaries and pagination change presentation and access, not the evidence. Result entry points bind an instance ID and run ID; later runs must not change the meaning of old references.
+
+Distinguish message receipt, task execution, the end of a CLI run, result delivery and acceptance of the business outcome. The extension presents states it can prove; it neither performs semantic acceptance nor requires a fixed VERDICT / EVIDENCE / UNVERIFIED format to support the user's workflow.
+
+Follow-up routing, redelivery under the original run after queue loss, and deduplication through persisted receipts have been checked locally. Broader failures, including asynchronous delivery failure, still need verification; exactly-once delivery is not claimed. Notification failures must never automatically rerun tasks.
+
+## 8. Lifecycle, recovery and permission boundaries
+
+1. **Original-session recovery.** Resuming the original Pi parent session restores access to its instances and undelivered results. A new Pi session in the same directory does not automatically take over old instances. Cross-session transfer is outside the initial scope.
+2. **Recoverable persisted sessions, not permanent processes.** Continuation and recovery target the original CLI session identity and saved history. They do not guarantee that the same process, memory state, background shell, watcher or build job survives between runs. Recovery failure must be explicit, without silently creating a replacement. Releasing execution resources, ending a run and deleting history are different operations.
+3. **Stopping is not rollback.** Stopping must not imply that file changes were undone. If the old execution's termination is uncertain, do not claim that resuming or starting a replacement writer is safe.
+4. **Explicit capability differences.** Reject unsupported message modes or recovery operations with an explanation. A receipt must not claim that the target has read or executed the message. Tools and UI entry points follow the same constraints.
+5. **No permission expansion.** Neither direct @-dispatch nor parent-agent tool calls bypass host, CLI or existing workspace safety checks. The extension does not approve extra permissions on the user's behalf, automatically rerun tasks, change models or implement fallback plans.
+
+Retain notifications while the original parent session is closed and deliver them when it resumes, rather than secretly starting a new parent session just to send them. Whether a child CLI can continue after its parent process exits must be verified against its actual capabilities and shown clearly, not hidden behind a universal promise. "No permanent-process guarantee" also does not permit treating an unreachable active execution as completed or safe to rerun: preserve identity, check whether the old execution still owns resources, and report uncertainty honestly.
+
+## 9. Usage guidance and existing constraints
+
+The bundled skill and tool descriptions should explain capabilities: entry points, parameters, message modes, state meanings, result reading, approvals and recovery. They should not set task assignments, reuse priorities, review gates or default pipelines.
+
+Source review corrected an earlier assumption: independent review requirements for managed workspaces primarily lived in tool descriptions and the skill. WorkspaceStore.apply() had no hard gate that read reviewer results or checked PASS. The four-tool migration removed those extension-imposed review policies while preserving ownership, occupation, baseline, conflict and uncertain-operation checks. Users' own review requirements are unaffected.
+
+Role selection and task content remain decisions for the user or parent agent. The extension does not attempt to use a natural-language semantic interceptor to decide whether a role should perform a task.
+
+## 10. Observable acceptance scenarios
+
+These are product acceptance goals, not claims of current implementation or verification. The @ portions of A2 and A3 are deferred. A1 and A4 currently cover only tools and the existing management UI, without a new user dispatch entry point. See the interface design for the specific four-tool gates and verified scope.
+
+| ID | Scenario | Passing condition |
 |---|---|---|
-| A1 | 用户配置非内置角色 | 列表和 @入口识别真实配置，不依赖内置角色名称；可覆盖或替换默认配置 |
-| A2 | @角色 派发任务 | 用户任务直接提交给选定角色；主会话知情，但不会再重复执行一次派发 |
-| A3 | 同角色已有多个实例 | 再次 @角色 明确新建；显式选择实例续聊保持原身份，不猜测目标 |
-| A4 | 主 agent 创建实例后用户接手，及反向操作 | 双方看到同一实例与状态，直接操作有来源记录，不能绕过归属或权限检查 |
-| A5 | 默认目录与隔离选择 | 默认当前 Pi 工作目录且可见；不自动创建 worktree；显式选择的目录被准确使用 |
-| A6 | 子代理完成时主 agent 空闲或忙碌 | 原主会话收到对应任务结果并可响应；忙碌时不被中断；不触发预设后续工作流 |
-| A7 | 任务失败或等待人工授权 | 用户和主会话可见真实失败/阻塞，humanOnly 请求不被代批 |
-| A8 | 启动失败或启动确认丢失 | 区分未启动与状态不确定，不自动切换角色/CLI或重复启动 |
-| A9 | 停止后续聊或恢复失败 | 身份不变，停止不伪装回滚；失败不静默生成替代实例 |
-| A10 | 恢复原 Pi 会话与新建同目录会话 | 原会话找回实例和未送达结果；新会话不自动接管 |
-| A11 | 长报告、折叠及多轮续聊 | 原内容可读取，旧 run 引用稳定，不把最新结果替代旧结果 |
-| A12 | 用户选择自己的分工及回报方式 | 无强制角色顺序、审查触发或报告格式；技术能力限制仍明确生效 |
+| A1 | User configures a non-built-in role | The list and @ entry point recognize actual configuration without relying on built-in names; defaults can be overridden or replaced |
+| A2 | Dispatch through @role | The user's task goes directly to the selected role; the parent is informed without dispatching it again |
+| A3 | Multiple instances of the same role already exist | Another @role explicitly creates a new instance; explicitly selected continuation preserves identity without guessing the target |
+| A4 | User takes over a parent-agent-created instance, or vice versa | Both see the same instance and state; direct actions record their source and cannot bypass ownership or permissions |
+| A5 | Default directory and explicit isolation | The current Pi working directory is the visible default; no automatic worktree creation; an explicitly selected directory is used accurately |
+| A6 | Child finishes while the parent agent is idle or busy | The original parent receives the matching task result and can respond; busy execution is not interrupted; no predefined follow-up workflow is triggered |
+| A7 | Task fails or awaits human approval | User and parent see the actual failure/blocker; humanOnly requests are not approved on the user's behalf |
+| A8 | Startup fails or its confirmation is lost | Distinguish not-started from uncertain state; no automatic role/CLI switch or duplicate launch |
+| A9 | Continuation after stopping, or recovery failure | Identity remains stable; stopping does not masquerade as rollback; failure does not silently create a replacement instance |
+| A10 | Resume the original Pi session versus create a new session in the same directory | The original session finds its instances and undelivered results; a new session does not automatically take over |
+| A11 | Long reports, folding and multiple continuation runs | Original content remains readable and old run references stay stable, without substitution by the latest result |
+| A12 | User chooses their own division of work and reporting style | No mandatory role order, review trigger or report format; technical capability limits remain explicit and enforced |
 
-任务并行数量、是否发生独立审查、主 agent 是否主动拆分任务，不作为插件成功指标。应检验的是直接操作是否清晰、身份与消息是否准确、状态是否可信、结果是否能回到正确主会话。
+Parallel task count, the presence of independent review, and whether the parent proactively decomposes tasks are not success metrics for the extension. Evaluate clarity of direct operations, accurate identities and messages, trustworthy state, and delivery to the correct parent session.
 
-## 11. 下一阶段的工作方式
+## 11. Approach for the next phase
 
-差距核查后已分三次实施四工具、角色目录和通知排队，验证范围见接口设计。后续仍按下表推进；不因产品边界确认就自动扩大功能范围。
+After the gap review, the four tools, role catalog and notification queue were implemented in three separate increments. Their verified scope is documented in the interface design. Continue with the stages below; confirming product boundaries does not automatically expand the feature scope.
 
-| 阶段 | 工作 | 交付与限制 |
+| Stage | Work | Deliverables and limits |
 |---|---|---|
-| 差距核查 | 按当前范围对照现有工具、管理界面、角色配置和通知；区分工作流措辞与技术检查 | 明确已有、缺失、冲突和未验证，不重复建设已有能力 |
-| 技术设计 | 四工具参数、角色目录刷新、通知队列、CLI 能力、工作区与恢复 | 阅读当前宿主文档与源码；@相关技术设计延期 |
-| 独立增量实施 | 按可单独验收的用户能力拆分，而非一次重构整个管理器 | 用户批准后再实施；每个增量测试、审阅、验证后再提交 |
-| 实际体验验收 | 在另获恢复派发/真实调用授权后，检查 Pi → Pi，再核对 Codex / Claude | 本地假 CLI 检查不冒充真实模型与真实 CLI 验证 |
+| Gap review | Compare the current scope against tools, management UI, role configuration and notifications; distinguish workflow wording from technical checks | Identify existing, missing, conflicting and unverified behavior without rebuilding existing capabilities |
+| Technical design | Four-tool parameters, role-catalog refresh, notification queue, CLI capabilities, workspaces and recovery | Read current host documentation and source; defer @-related technical design |
+| Independent implementation increments | Split by independently verifiable user capabilities rather than refactoring the entire manager at once | Implement after user approval; test, review and verify each increment before committing |
+| Real experience acceptance | After separate authorization to resume dispatch and real calls, check Pi → Pi, then Codex / Claude | Local fake-CLI checks do not count as real-model or real-CLI verification |
 
-## 12. 参考依据与证据范围
+## 12. References and evidence scope
 
-主要参考是 Paseo 的 Agents 会话管理，而非它的全部产品架构。此前审阅的固定版本为 `cc8fe41e2828a34d4d9706c0b8353c0e91987a25`：
+The main reference is Paseo's Agents session management, not its entire product architecture. The previously reviewed version was pinned to `cc8fe41e2828a34d4d9706c0b8353c0e91987a25`:
 
-- [Agent 生命周期文档](https://github.com/getpaseo/paseo/blob/cc8fe41e2828a34d4d9706c0b8353c0e91987a25/docs/agent-lifecycle.md)：持久身份与运行时驻留分离，关闭与删除不是同一件事。
-- [AgentManager 实现](https://github.com/getpaseo/paseo/blob/cc8fe41e2828a34d4d9706c0b8353c0e91987a25/packages/server/src/server/agent/agent-manager.ts)：保存的句柄用于恢复；关闭成功之前不释放原运行时的占用语义。
+- [Agent lifecycle documentation](https://github.com/getpaseo/paseo/blob/cc8fe41e2828a34d4d9706c0b8353c0e91987a25/docs/agent-lifecycle.md): persisted identity is separate from runtime residency; closing and deleting are different operations.
+- [AgentManager implementation](https://github.com/getpaseo/paseo/blob/cc8fe41e2828a34d4d9706c0b8353c0e91987a25/packages/server/src/server/agent/agent-manager.ts): saved handles support recovery; the original runtime's occupation is not released before closing succeeds.
 
-这些是源码与文档参考，不是本轮运行 Paseo 的端到端体验证明。本文的 @角色、双入口和通知语义来自用户确认，不声称 Paseo 已有相同输入方式。此前 OMO / OMO-slim 的编排研究不再作为产品设计依据。若后续确需移植代码，另行核对所选版本许可证。
+These are source and documentation references, not evidence of running Paseo end to end in this round. The @role, dual-entry-point and notification semantics here come from user confirmation; this document does not claim that Paseo has the same input method. Earlier OMO / OMO-slim orchestration research is no longer a basis for product design. If code is to be ported later, check the selected version's license separately.
 
-**下一步：重载扩展检查四工具与角色目录；恢复真实派发后再验收 Pi → Pi 协作体验，真实调用须另获授权。**
+**Next step: reload the extension to inspect the four tools and role catalog; once real dispatch is authorized again, evaluate the Pi → Pi collaboration experience. Real calls require separate authorization.**

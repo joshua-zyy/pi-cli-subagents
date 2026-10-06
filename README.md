@@ -1,6 +1,6 @@
 # pi-cli-subagents
 
-[中文文档](README.zh-CN.md)
+[Chinese README](README.zh-CN.md)
 
 Delegate work from Pi to **reusable Pi, Codex, and Claude Code sessions**. Run independent tasks concurrently, receive completion reports automatically, and continue with the same agent for follow-up work. Optional Git worktrees keep parallel edits separate.
 
