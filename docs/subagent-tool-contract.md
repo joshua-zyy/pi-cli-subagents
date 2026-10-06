@@ -1,186 +1,186 @@
-# CLI subagent 四工具接口设计
+# CLI Subagent Four-Tool Interface Design
 
-状态：四工具、角色目录和 follow-up 通知已分增量实施，代码基线为 `b406426`。本地验证通过；真实模型及真实 CLI 协作体验尚未验收。
+Status: the four tools, role catalog and follow-up notifications were implemented in separate increments, with `b406426` as the code baseline. Local verification passed; the real-model and real-CLI collaboration experience has not yet been accepted.
 
-当前范围只包含 Pi 主 agent 使用的 CLI 子代理派发与管理；`@角色` 及用户直接新建派发入口暂缓。保留现有用户管理界面。本文细化产品目标，不构成后续代码修改、真实派发或模型调用的授权。
+The current scope covers only CLI subagent dispatch and management by the parent Pi agent. `@role` and a new direct user dispatch entry point are deferred; the existing user management UI remains. This document refines the product goals and does not authorize further code changes, real dispatch or model calls.
 
-## 1. 设计结论
+## 1. Design conclusion
 
-采用四个职责分离的工具，角色目录直接进入派发工具说明。保留原生会话、历史结果及工作区身份，不通过删能力来减少工具数量。
+Use four tools with separate responsibilities, exposing the role catalog directly in the dispatch tool's description. Preserve native sessions, historical results and workspace identity; do not reduce the tool count by removing capabilities.
 
-| 新工具 | 操作 | 现有能力来源 |
+| New tool | Operations | Existing capability source |
 |---|---|---|
 | `subagent` | `start` / `send` / `stop` | `spawn_agent` / `send_input` / `close_agent` |
-| `subagent_query` | `list` / `get` / `result` | `list_agents` 的三种读取方式 |
-| `subagent_reply` | 回答一个指定请求，不需要 action | `respond_to_permission` |
+| `subagent_query` | `list` / `get` / `result` | The three reading modes of `list_agents` |
+| `subagent_reply` | Answer one specific request; no action required | `respond_to_permission` |
 | `subagent_workspace` | `create` / `integrate` | `create_workspace` / `integrate_workspace` |
 
-不新增自动分工、自动复用、模型覆盖、强制审查、自动重试或自动 worktree 策略。工作区工具正常可用，是否调用由用户及其主 agent 决定，不要求用户先打开额外开关。
+Do not add automatic task assignment, automatic instance reuse, model overrides, mandatory reviews, automatic retries or an automatic worktree policy. Workspace tools remain available normally; the user and parent agent decide whether to use them, without an additional opt-in switch.
 
-以下为逻辑参数契约，不是最终 TypeBox/JSON Schema 代码。各 action 有自己的必填字段和允许字段；不适用字段必须拒绝，不能被静默忽略。实现采用根对象 schema，并在执行前补充 action 级字段检查；已通过本地接口测试，不以文档示例或本地通过推断所有模型端点兼容。
+The following is a logical parameter contract, not the final TypeBox/JSON Schema code. Each action has its own required and allowed fields; inapplicable fields must be rejected rather than silently ignored. The implementation uses a root-object schema with additional action-level field checks before execution. Local interface tests have passed; neither documentation examples nor local success establish compatibility with every model endpoint.
 
-## 2. `subagent`：实例生命周期
+## 2. `subagent`: instance lifecycle
 
-### 2.1 参数
+### 2.1 Parameters
 
-| action | 必填 | 可选 | 语义 |
+| action | Required | Optional | Semantics |
 |---|---|---|---|
-| `start` | `role`、`task` | `cwd` 或 `workspace` | 创建新实例，执行首轮任务；cwd 与 workspace 互斥 |
-| `send` | `id`、`message` | `mode`、`baseline`、`includeUncommitted` | 运行中投递指令，结束后在同一原生会话开启新轮次 |
-| `stop` | `id` | 无 | 停止活动执行，保留原生会话和历史，不删除文件或回滚改动 |
+| `start` | `role`, `task` | `cwd` or `workspace` | Create an instance and execute its first task; cwd and workspace are mutually exclusive |
+| `send` | `id`, `message` | `mode`, `baseline`, `includeUncommitted` | Deliver instructions while running, or begin a new run in the same native session after completion |
+| `stop` | `id` | None | Stop active execution while retaining the native session and history; do not delete files or roll back changes |
 
-`start` 默认使用当前 Pi 工作目录；指定 workspace 时由记录解析实际路径。role 必须是当前有效配置中的名称。CLI、provider、model 等从角色配置解析，不开放本轮模型路由参数。task/message 必须非空。
+`start` defaults to the current Pi working directory; when workspace is specified, resolve its actual path from the record. The role must exist in the current effective configuration. Resolve CLI, provider and model from role configuration; do not expose per-run model-routing parameters. task/message must be non-empty.
 
-`send.mode` 保持 `steer | followUp`，默认 steer。它控制子代理收取指令，与结果通知主 agent 的投递方式不是同一个设置。
+`send.mode` remains `steer | followUp`, defaulting to steer. It controls how the child receives instructions, not how result notifications are delivered to the parent agent.
 
-| 目标状态/CLI | `send` 行为 |
+| Target state / CLI | `send` behavior |
 |---|---|
-| Pi 运行中 | 按指定 steer/followUp 投递；不把接收回执解释为已经执行 |
-| Codex 运行中 | 支持的 steer 路径；followUp 明确拒绝 |
-| Claude 运行中 | 当前不支持运行中投递，明确拒绝；等待本轮结束后才能续聊 |
-| 有未解决的交互请求 | 指向 `subagent_reply` 或用户交互入口，不把普通消息当批准 |
-| 已结束且原会话可恢复 | 等旧执行释放，再在同实例中开始新 run |
-| 会话缺失、占用不明或状态不确定 | 拒绝并提供诊断线索，不静默新建替代 |
+| Running Pi | Deliver using the selected steer/followUp mode; receipt does not imply execution |
+| Running Codex | Use the supported steer path; explicitly reject followUp |
+| Running Claude | Running delivery is currently unsupported and explicitly rejected; wait for the run to end before continuing |
+| Unresolved interaction request | Direct the caller to `subagent_reply` or the user interaction entry point; ordinary messages are not approvals |
+| Finished, with a recoverable original session | Wait for the old execution to release resources, then start a new run in the same instance |
+| Missing session, unclear occupation or uncertain state | Reject with diagnostic guidance; do not silently create a replacement |
 
-上述 CLI 能力来自当前实现，不承诺上游所有版本永远相同。
+These CLI capabilities describe the current implementation, not a promise that every upstream version will behave identically forever.
 
-恢复契约限定为原生会话身份及已保存历史的恢复，不承诺子 CLI 进程或后台任务始终驻留。结束后 send 可能重新启动 CLI 并加载原会话，不意味着原后台 shell、监听任务或内存状态仍在。原会话不可恢复必须明确失败；进行中执行失联时仍须检查占用与状态，不得借恢复操作重复启动未知写者。
+Recovery covers native session identity and saved history, not permanent residency of the child CLI process or background jobs. Sending after completion may restart the CLI and load the original session; it does not mean the old background shell, watcher or memory state remains. An unrecoverable original session must fail explicitly. If an active execution becomes unreachable, check occupation and state; recovery must not launch a duplicate writer whose predecessor's state is unknown.
 
-`baseline: keep | sync` 和 `includeUncommitted: { reason }` 仅用于托管工作区。集成或基线变化后继续实例，须显式选择基线；sync 不在活动实例上执行，也不能覆盖未集成改动。reason 记录调用方说明，不等于插件已证明存在用户授权。
+`baseline: keep | sync` and `includeUncommitted: { reason }` apply only to managed workspaces. Continuing an instance after integration or a baseline change requires an explicit baseline choice. Sync cannot run on an active instance or overwrite unintegrated changes. The reason records the caller's explanation; it is not proof that the extension has established user authorization.
 
-### 2.2 返回与错误
+### 2.2 Results and errors
 
-沿用现有实例信息：`id`、`runId`、`role`、`cli`、`phase`、`cwd`、已知原生会话身份、待处理请求，以及适用的 workspace / workspaceBaseline。按需附带错误与定位，不回传整个原生配置或凭证。
+Keep existing instance information: `id`, `runId`, `role`, `cli`, `phase`, `cwd`, known native session identity, pending requests, and workspace / workspaceBaseline where applicable. Include errors and locations as needed, not the entire native configuration or credentials.
 
-不要新增一个含糊的 `success: true` 来概括所有状态：
+Do not introduce an ambiguous `success: true` that collapses all states:
 
-| 结果 | 必须表达什么 |
+| Result | What it must express |
 |---|---|
-| 已接收 | 接收范围和当前状态；不保证任务成功 |
-| 明确拒绝 | 原因；不能把本次操作说成已派发 |
-| 启动/投递确认不明 | 已知实例与 run、记录位置、哪些事实不确定；禁止自动重试 |
-| 已结束或已失败 | 原样报告任务状态，不用“已派发成功”遮盖即时失败 |
-| stop 已确认 | 旧执行已停止/释放；不代表工作内容已经撤销 |
-| stop 未确认 | 保留不确定性与诊断线索，不宣布可安全接管 |
+| Accepted | What was accepted and the current state; no guarantee of task success |
+| Explicit rejection | The reason; do not describe this operation as dispatched |
+| Uncertain startup/delivery confirmation | Known instance and run, record locations and uncertain facts; no automatic retry |
+| Completed or failed | Report the actual task state; do not hide immediate failure behind a successful-dispatch label |
+| Confirmed stop | The old execution has stopped/released resources; its work has not necessarily been undone |
+| Unconfirmed stop | Preserve uncertainty and diagnostic guidance; do not announce that takeover is safe |
 
-现有 `AgentState.accepted` 表示本轮初始任务的接收状态，不是每次 send 的独立收据。不能用已有 true 值证明新消息已送达。send 的答复依据控制请求的实际结果；不新增未经原生 CLI 支持的“已读/已执行”保证。
+The existing `AgentState.accepted` describes receipt of the run's initial task, not an independent receipt for every send. An existing true value cannot prove delivery of a new message. A send response is based on the control request's actual result; do not add read/executed guarantees unsupported by the native CLI.
 
-### 2.3 示例
+### 2.3 Examples
 
 ```json
-{"action":"start","role":"implementer","task":"完成指定改动","workspace":"<workspace-id>"}
+{"action":"start","role":"implementer","task":"Complete the specified change","workspace":"<workspace-id>"}
 ```
 
 ```json
-{"action":"send","id":"<agent-id>","message":"继续处理这个问题","baseline":"keep"}
+{"action":"send","id":"<agent-id>","message":"Continue working on this issue","baseline":"keep"}
 ```
 
 ```json
 {"action":"stop","id":"<agent-id>"}
 ```
 
-示例角色名不表示插件必须内置该角色，实际以用户配置为准。
+The example role name does not require the extension to provide that built-in role; actual roles come from user configuration.
 
-## 3. `subagent_query`：只读查询
+## 3. `subagent_query`: read-only queries
 
-| action | 必填 | 可选 | 返回 |
+| action | Required | Optional | Returns |
 |---|---|---|---|
-| `list` | 无 | 无 | 本主会话实例的精简元数据及托管工作区清单，不带报告正文 |
-| `get` | `id` | 无 | 指定实例的状态、最近任务历史、待处理请求及有界结果预览 |
-| `result` | `id`、`runId` | `offset`、`limit` | 指定 run 的原始最终报告分页 |
+| `list` | None | None | Compact metadata for this parent's instances and the managed-workspace inventory, without report bodies |
+| `get` | `id` | None | State, recent task history, pending requests and a bounded result preview for the specified instance |
+| `result` | `id`, `runId` | `offset`, `limit` | Pages of the specified run's original final report |
 
-保留 `list` 返回工作区清单，是为了发现可复用的工作区及其占用状态，不额外增加第五个列表工具。`get` 可同时提供该实例关联工作区的必要信息；不增加跨主会话扫描。
+Keep the workspace inventory in `list` so reusable workspaces and their occupation can be discovered without a fifth listing tool. `get` may include necessary information about the instance's associated workspace; do not add cross-parent-session scanning.
 
-result 沿用当前分页契约：offset 默认 0；limit 默认/上限 6000 UTF-16 code units；返回 `agentId`、`runId`、`status`、`time`、`error`、`offset`、`totalLength`、`nextOffset`、`text`。固定 id/runId，按 nextOffset 继续，直到 null。
+The result action retains the current pagination contract: offset defaults to 0; limit defaults to and cannot exceed 6000 UTF-16 code units. Return `agentId`, `runId`, `status`, `time`, `error`, `offset`, `totalLength`, `nextOffset` and `text`. Keep id/runId fixed and follow nextOffset until null.
 
-缺失、损坏、跨实例或跨主会话的结果必须拒绝。没有原报告不能替换成当前最新结果；读取不能启动、唤醒、停止实例或批准操作。结果预览和状态结束都不证明业务成果已被认可。
+Reject missing, corrupt, cross-instance or cross-parent-session results. A missing original report cannot be replaced with the current latest result. Reading must not start, wake or stop an instance, or approve an operation. Neither a result preview nor terminal state proves acceptance of the business outcome.
 
-## 4. `subagent_reply`：指定请求答复
+## 4. `subagent_reply`: answer a specific request
 
-保留参数：`id`、`questionId`、`reason` 必填；`confirmed`、`value`、`cancelled: true` 三者恰选一项，并与请求类型匹配。
+Retain the parameters: `id`, `questionId` and `reason` are required; supply exactly one of `confirmed`, `value` or `cancelled: true`, matching the request type.
 
-| 请求类型 | 答复 |
+| Request type | Answer |
 |---|---|
-| confirm | confirmed 布尔值，或取消 |
-| select | 当前合法选项的 value，或取消 |
-| input/editor | value 文本，或取消 |
+| confirm | A confirmed boolean, or cancellation |
+| select | The value of a currently valid option, or cancellation |
+| input/editor | Text in value, or cancellation |
 
-请求必须属于当前父会话和指定实例，尚未结束或过期。身份来源由工具实现设为 parent，不能允许模型传 `actor: human`。humanOnly 批准留给人类入口；请求允许的拒绝/取消仍可处理。
+The request must belong to the current parent session and specified instance and must not be resolved or expired. The tool implementation sets the actor to parent; the model cannot supply `actor: human`. humanOnly approvals remain with the human entry point; denial/cancellation may still be handled where the request allows it.
 
-返回当前状态及“答复已接收”的真实结果，不声称被批准的操作已完成。保留现有本地决定记录。普通 send 不能旁路这套检查。
+Return the current state and actual response-receipt result, without claiming that the approved operation completed. Preserve existing local decision records. Ordinary send operations cannot bypass these checks.
 
-单独保留此工具，是为了让授权答复与普通生命周期操作可区分；并不把它扩展成自动审批策略。
+Keep this tool separate so approval responses remain distinguishable from ordinary lifecycle operations; do not turn it into an automatic approval policy.
 
-## 5. `subagent_workspace`：托管 worktree
+## 5. `subagent_workspace`: managed worktrees
 
-| action | 必填 | 可选 | 返回 |
+| action | Required | Optional | Returns |
 |---|---|---|---|
-| `create` | 无 | `includeUncommitted: { reason }` | 工作区 id、path/cwd、基线、revision、状态、父目录未提交改动及占用信息 |
-| `integrate` | `workspace` | 无 | workspace、status、changedFiles，以及适用的 patchFile |
+| `create` | None | `includeUncommitted: { reason }` | Workspace id, path/cwd, baseline, revision, state, parent-directory uncommitted changes and occupation information |
+| `integrate` | `workspace` | None | workspace, status, changedFiles and patchFile where applicable |
 
-create 以当前 Pi 工作目录所属仓库为来源；默认基于已提交 HEAD，不悄悄继承未提交改动。是否继承全部当前未提交改动必须明确授权。暂不增加从任意 ref/分支/PR 创建等新能力。
+Create uses the repository containing the current Pi working directory. It defaults to committed HEAD and must not silently inherit uncommitted changes. Inheriting all current uncommitted changes requires explicit authorization. Do not add creation from arbitrary refs, branches or PRs in this phase.
 
-integrate 将该工作区尚未集成的改动应用到原父目录，保留原记录和补丁，不改父目录 index、HEAD 或分支，不自动提交、推送或删除 worktree。返回状态沿用 `applied | already_integrated | no_changes`。
+Integrate applies the workspace's unintegrated changes to the original parent directory, retaining records and patches. It does not change the parent's index, HEAD or branches, or automatically commit, push or remove the worktree. Return states remain `applied | already_integrated | no_changes`.
 
-必须保持的技术边界：
+Preserve these technical boundaries:
 
-1. 工作区归属与仓库身份正确，操作锁和执行占用已检查。
-2. 基线与同步记录有效，未完成/不确定操作不能被盲目重试。
-3. 应用前检查冲突及父文件变化；已集成的增量不再次应用。
-4. 启动或续聊使用同一工作区时经过同样的占用检查；不能通过 raw cwd 绕过已知托管工作区约束。
-5. 出错保留足够恢复证据，不自动删除文件、恢复旧基线或强制应用补丁。
+1. Correct workspace ownership and repository identity; operation locks and execution occupation are checked.
+2. Valid baselines and sync records; unfinished or uncertain operations cannot be retried blindly.
+3. Conflicts and parent-file changes are checked before applying; previously integrated increments are not applied again.
+4. Starting or continuing in the same workspace uses the same occupation checks; raw cwd cannot bypass known managed-workspace constraints.
+5. Errors retain enough recovery evidence; do not automatically delete files, restore old baselines or force-apply patches.
 
-工作区生命周期独立于单个 agent：同一个 workspace 可以在先前实例结束后交给另一个实例使用。不自动认定新实例是 reviewer，也不强制某个角色顺序。
+Workspace lifecycle is independent of any one agent: a workspace may pass to another instance after the previous one finishes. Do not automatically classify the new instance as a reviewer or enforce a role order.
 
-源码复核更正：当前 `WorkspaceStore.apply()` 检查占用、仓库、基线、补丁与冲突，但没有读取 reviewer 结果或校验 PASS 的硬门禁。此前“需要独立审查”主要写在工具说明和 skill 中；四工具迁移已中立化这些工作流措辞，保留技术安全检查。
+Source-review correction: `WorkspaceStore.apply()` checks occupation, repository, baseline, patches and conflicts, but has no hard gate that reads reviewer results or checks PASS. Earlier independent-review requirements primarily lived in tool descriptions and the skill. The four-tool migration made that workflow wording neutral while preserving technical safety checks.
 
-### 并行隔离示例
+### Parallel isolation example
 
 ```text
-workspace.create → W1     workspace.create → W2
+workspace.create -> W1        workspace.create -> W2
 subagent.start(workspace=W1)  subagent.start(workspace=W2)
-             ↓ 各自执行，结果自动返回 ↓
-按用户工作流检查成果，再分别 workspace.integrate
+          Each runs independently; results return automatically
+Check results according to the user's workflow, then workspace.integrate each
 ```
 
-此处 workspace.* 是文档简写，实际调用 `subagent_workspace(action=...)`。示例不是默认自动流水线；不需要隔离的任务仍可以指定 cwd 或使用当前目录。
+Here workspace.* is documentation shorthand; actual calls use `subagent_workspace(action=...)`. This is not an automatic default pipeline. Tasks that do not need isolation can still specify cwd or use the current directory.
 
-## 6. 角色发现与自动返回
+## 6. Role discovery and automatic return
 
-`subagent` 的工具说明列出当前有效的角色名与简短 description。不列完整 instructions，不鼓励按模型档位挑选，不要求先 query 才能知道角色。角色配置由插件解析；查询工具用于实例而不是首次角色发现。
+The `subagent` tool description lists currently effective role names and short descriptions. It does not include full instructions, encourage selection by model tier, or require an initial query to discover roles. The extension resolves role configuration; query tools are for instances, not initial role discovery.
 
-目录生成必须遵守项目可信状态与配置优先级。实现在 session_start、before_agent_start 及设置保存后重新注册派发工具说明；不重写全部提示词。已验证配置替换、可信状态变化和无效配置清除旧目录。外部文件在一轮执行中变化时，目录到下一次刷新才更新；启动仍按调用时的有效配置解析。
+Catalog generation must respect project trust and configuration precedence. The implementation re-registers the dispatch tool description at session_start, before_agent_start and after settings are saved, without rewriting the entire prompt. Configuration replacement, trust changes and removal of stale catalogs after invalid configuration have been verified. External file changes during a turn appear at the next catalog refresh; startup still resolves the effective configuration at call time.
 
-结果与需处理的阻塞走现有自动通知通道，不需要子代理另调一个“上报工具”。通知绑定原主会话、实例与 run，并提供新的 result 查询入口。原文过长时用预览加全文分页，不删证据。
+Results and actionable blockers use the existing automatic notification channel; the child does not need a separate reporting tool. Notifications bind the original parent session, instance and run and provide the new result query entry point. Long originals use a preview plus full-text pagination, without deleting evidence.
 
-通知语义：主 agent 空闲时可触发处理，忙碌时 follow-up 排队，不插入 steering。`deliverReports` 已改用 followUp；不能把它与 `subagent.send.mode` 混为一谈。队列不是持久回执，原主会话恢复后可补交未记录通知，已记录通知按 ID 去重；这不是所有异常下的恰好一次交付保证。
+Notification semantics: an idle parent may be triggered to handle the event; a busy parent receives queued follow-ups, not steering messages. `deliverReports` now uses followUp; this is distinct from `subagent.send.mode`. The queue is not a persisted receipt. Resuming the original parent can redeliver unrecorded notifications, while recorded notifications are deduplicated by ID. This is not an exactly-once guarantee under every failure mode.
 
-插件不决定主 agent 收到后必须继续实施、审查或集成。当前阶段不新增通用子→主主动消息工具。
+The extension does not decide that the parent must implement, review or integrate after receiving a result. This phase adds no general-purpose proactive child-to-parent messaging tool.
 
-## 7. 迁移策略与验证门槛
+## 7. Migration strategy and verification gates
 
-不同时向模型暴露新四工具和旧七工具。同步更新工具说明、skill、通知中的结果读取提示及相关测试；不增加仅为保持旧工具名称而长期并存的入口。
+Do not expose the new four tools and old seven tools to the model simultaneously. Update tool descriptions, the skill, notification result-reading hints and relevant tests together; do not keep permanent parallel entry points solely to preserve old tool names.
 
-原始会话、实例 ID、run ID、角色快照和工作区记录继续保留，不为改工具名创建新实例或改写旧报告。旧通知中的旧工具调用提示仍是历史原文；使用指南应给出名称映射，模型可按原 id/runId 调新查询入口，不修改旧证据。
+Preserve original sessions, instance IDs, run IDs, role snapshots and workspace records. Renaming tools must not create new instances or rewrite old reports. Old tool-call hints in historical notifications remain original history. The usage guide should provide a name mapping so the model can use original id/runId values with the new query tool, without editing old evidence.
 
-| 验证范围 | 必须证明 |
+| Verification area | Required evidence |
 |---|---|
-| 工具定义 | 只暴露四个；角色目录是当前有效配置；按 action 校验；未知/不适用字段拒绝 |
-| 生命周期映射 | 新建是新实例，send 续接原身份；不支持模式明确失败；超时/拒绝不自动替代 |
-| 查询与答复 | 查询无执行副作用；完整结果可还原；答复归属、过期、类型、humanOnly 不回归 |
-| 工作区 | 两个实例各用一个 worktree；同 workspace 串行交接；冲突拒绝、增量集成和基线续聊保持正确 |
-| 通知与兼容 | 原主会话接收；忙碌 follow-up；恢复补交；旧实例和旧 run 可读；历史通知不改写 |
+| Tool definitions | Only four tools exposed; role catalog reflects effective configuration; action-level validation rejects unknown or inapplicable fields |
+| Lifecycle mapping | Start creates a new instance; send continues the original identity; unsupported modes fail explicitly; timeouts/rejections do not trigger automatic replacement |
+| Queries and replies | Queries have no execution side effects; full results can be reconstructed; reply ownership, expiration, type and humanOnly behavior do not regress |
+| Workspaces | Two instances use separate worktrees; one workspace supports sequential handoff; conflict rejection, incremental integration and baseline continuation remain correct |
+| Notifications and compatibility | Delivery to the original parent; busy follow-up queuing; recovery redelivery; old instances and runs remain readable; historical notifications are unchanged |
 
-角色可覆盖但当前不能移除内置角色、启动确认不明的回执、损坏报告影响同批通知等问题，与合并工具不是一回事。先以反例核查，独立列增量，不把所有可靠性修补塞进工具改名。
+Issues such as roles being overridable but not currently removable, uncertain startup receipts, and corrupt reports affecting a notification batch are separate from merging tools. Verify them with counterexamples and separate increments rather than packing every reliability fix into a tool rename.
 
-四工具迁移时测得 name/description/parameters 的 JSON 从 6,279 降至 5,147 字节；该测量在加入动态角色目录前完成，不是最终 token 数。4 比 7 少，不代表更容易正确调用。继续优先用本地测试与伪 CLI 验证，真实调用另行授权。
+During the four-tool migration, serialized name/description/parameters JSON fell from 6,279 to 5,147 bytes. That measurement preceded the dynamic role catalog and is not a final token count. Having 4 tools rather than 7 does not by itself mean correct usage is easier. Continue to prioritize local tests and fake CLIs; real calls require separate authorization.
 
-## 8. 当前证据与未验证项
+## 8. Current evidence and unverified items
 
-已对照 `src/index.ts`、`src/types.ts`、`src/manager.ts`、`src/notifier.ts`、`src/worker.ts`、`src/roles.ts`、`src/workspace.ts` 和现有 skill 的契约。本草案没有新增运行时类型、状态表、数据库或队列实现。
+The contracts were checked against `src/index.ts`, `src/types.ts`, `src/manager.ts`, `src/notifier.ts`, `src/worker.ts`, `src/roles.ts`, `src/workspace.ts` and the existing skill. This draft introduced no runtime types, state tables, databases or queue implementations.
 
-实施提交：`4b46bdc`（四工具迁移）、`29de2e4`（有效角色目录）、`b406426`（follow-up 通知）。截至该基线，全量本地测试 385/385、typecheck/build 通过；项目依赖与实际安装 Pi 的加载器刷新探针通过。通知测试使用真实 SDK 路由方法配合受控执行桩，覆盖忙碌排队、丢失队列后的原 run 补交与持久回执去重，不等于完整模型循环验收。
+Implementation commits: `4b46bdc` (four-tool migration), `29de2e4` (effective role catalog) and `b406426` (follow-up notifications). At that baseline, all 385/385 local tests and typecheck/build passed, as did tool-refresh probes using the project's dependency and the installed Pi loader. Notification tests use actual SDK routing methods with controlled execution stubs, covering busy queuing, original-run redelivery after queue loss and persisted-receipt deduplication; this is not acceptance of the complete model loop.
 
-未运行真实模型、真实 CLI 协作或独立代理审查；@派发、多入口新增行为和真实端点兼容性仍未验证。
+No real models, real CLI collaboration or independent agent review were run. @-dispatch, new multi-entry-point behavior and real-endpoint compatibility remain unverified.
 
-下一步：重载扩展检查工具与角色目录；真实协作体验验收须另获授权。
+Next step: reload the extension to inspect the tools and role catalog; real collaboration acceptance requires separate authorization.
