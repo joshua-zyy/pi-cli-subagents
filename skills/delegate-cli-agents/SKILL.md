@@ -1,136 +1,55 @@
 ---
 name: delegate-cli-agents
-description: Use the subagent, subagent_query, subagent_reply, and subagent_workspace tools to start and manage persistent Pi, Codex or Claude Code CLI sessions, read results, handle requests, and use isolated worktrees.
+description: Handle CLI subagent approvals, truncated or missing results, managed-worktree baselines, and interrupted sessions. Use the tool descriptions for routine dispatch and parameters.
 ---
 
-# CLI subagent tools
+# CLI subagent operational reference
 
-These tools provide CLI session management, not a prescribed workflow. The user's instructions decide
-whether to delegate, which configured role to use, whether to reuse an instance, and whether to review
-or integrate its work. Built-in roles are defaults, not fixed jobs or model rankings.
+The tools describe routine calls and list the configured roles. This reference covers delivery,
+permissions, workspace baselines and recovery. The user and parent agent choose the workflow;
+no fixed role sequence or report format is required.
 
-## 1. Start, send, stop
+## Notifications and results
 
-Use `subagent` with an explicit action:
+Reports return automatically to the original parent session. Busy parents receive them as follow-ups
+after their current execution; idle parents can start a new turn. Continue other work or end the turn
+while waiting rather than polling or sleeping for completion.
 
-| Action | Required fields | Optional fields |
-|---|---|---|
-| `start` | `role`, `task` | `cwd` or `workspace` (never both) |
-| `send` | `id`, `message` | `mode`, `baseline`, `includeUncommitted` |
-| `stop` | `id` | none |
+A notification or `subagent_query({ action: "get", id })` may contain only a preview. If it is truncated,
+read the missing text with `result` before claiming a complete review. Receiving a completed report is
+not the same as verifying its claims.
 
-`start` creates a new instance; omitted `cwd` uses the parent directory. Role configuration supplies the
-CLI and model settings. The `subagent` tool description lists the effective role names and descriptions;
-`subagent_query({ action: "list" })` lists instances, not roles. Use actual descriptions, not assumptions
-about built-in names. The catalog refreshes at session start, before each parent turn and after settings
-saves. Project roles appear only in a trusted project.
+Queued notifications are not receipts until recorded in parent history. Reopening the original parent
+replays unrecorded reports with their original run IDs; recorded reports are not delivered again.
 
-`send` addresses the exact instance. A finished instance resumes its original native session; a running
-Pi accepts `steer` (default) or `followUp`, running Codex accepts `steer` only, and Claude must finish
-before receiving another task. A pending permission request is answered separately, not with send.
-Steering does not interrupt an in-flight tool. A receipt is not proof the instruction was executed.
+## Pending requests
 
-`stop` ends active work and retains the session and results. It does not roll back file changes or delete
-history. A resumed session preserves native identity and saved history, not necessarily its old process,
-background shell jobs or in-memory state. Failure never silently creates a replacement.
+Inspect the current request with `subagent_query({ action: "get", id })` before answering: use its
+request type and exact offered options, not guesses from the notification. Send the answer through
+`subagent_reply`, not `subagent` send. See [references/approvals.md](references/approvals.md) for
+single-action authorization and human-only requests.
 
-Task text carries the user's objective and authorized scope. The plugin does not require a particular
-report format or role sequence. A child report is its output, not proof of business correctness.
+## Managed worktrees
 
-### Lightweight task descriptions
+Read [references/workspaces.md](references/workspaces.md) before creating, syncing or integrating a
+workspace. It covers committed versus uncommitted baselines, workspace ownership, and what the child
+must re-read after files change underneath its saved conversation. Isolation does not expand permissions.
 
-Give the child enough context to work independently. Use these points as needed, not as a fixed
-word count or template:
+## Recovery and persistence
 
-- **Objective and boundaries**: what to solve; whether to research, review or implement; authorized changes and prohibitions.
-- **Essential context**: relevant paths, confirmed facts, existing interfaces and key decisions. Distinguish facts from assumptions; do not assume a new instance knows the parent's history.
-- **Acceptance and return needs**: observable behavior to prove, known verification commands, and the conclusions or evidence needed this turn. Escalate ambiguities affecting scope or authorization first.
+Stopping does not roll back edits or delete history. Resuming preserves native identity and saved
+history, not necessarily the old process, background jobs or in-memory state. Steering does not interrupt
+an in-flight tool, and a delivery receipt does not prove the instruction was executed.
 
-Constrain implementation only as required by the user, compatibility or collaboration. Leave unconstrained
-internal design, file layout and execution steps to the child. For follow-ups, state the current objective,
-changes and still-applicable boundaries rather than resending the entire task description by default.
+For failed or uncertain operations, inspect the retained state before retrying: work may already have
+run. Follow [references/recovery.md](references/recovery.md) for conflicts, stale locks, unreadable
+records and failed resumes. Do not bypass a refusal by editing records or starting a replacement instance.
 
-## 2. Receive and read results
+The parent must use a persistent Pi session, not `--no-session`. Another session in the same directory
+does not acquire its instances or pending reports.
 
-Results and attention notifications arrive automatically in the original parent session. Busy parents
-receive them as follow-ups after their current execution; idle parents can start a new turn. Continue
-other work or end the turn while waiting; do not use repeated queries or sleep to wait for completion.
-Queued notifications are not receipts until recorded in parent history. Reopening that parent replays
-unrecorded reports using their original run IDs; recorded reports are not delivered again.
+## Human controls
 
-| Query action | Required fields | Result |
-|---|---|---|
-| `list` | none | Instance metadata and workspace inventory; no report bodies |
-| `get` | `id` | Current state, recent history, pending requests and bounded result preview |
-| `result` | `id`, `runId` | A page of that exact run's original final report |
-
-For long results, keep both IDs fixed and follow `nextOffset` as `offset` until null. `limit` defaults to
-6000 UTF-16 code units and cannot exceed 6000. The response includes status, error, text and totalLength.
-A missing result is an error, not permission to use another run. Reading never resumes an instance.
-
-Failure replies preserve the instance/run and error. Inspect before retrying: a timeout may occur after
-work ran, and an unconfirmed receipt does not mean there were no side effects. An unreadable record or
-unreachable instance does not prove an empty history or an ended execution.
-
-### Lightweight return reports
-
-Specify relevant return needs in the task, without mandatory fields, ordering or a role pipeline:
-
-- **Conclusion**: answers, completed work, or work that remains partial or blocked.
-- **Artifacts**: relevant changes, files or other outputs and their locations for the parent to inspect.
-- **Evidence**: checks actually run and their results, reproduction steps or sources. Identify checks not run.
-- **Remaining issues**: unresolved problems, risks, limitations and decisions needed from the parent or user.
-
-For implementation, emphasize changes and verification; for review, findings, locations and reproduction;
-for research, answers, sources and uncertainty. Reference accessible artifacts or original results for
-details instead of repeating the task description or dumping process logs. Concision must not hide
-failures or unverified items.
-
-Keep the child's completion claims, actual runtime state and acceptance conclusions distinct. If a
-preview is truncated, use `result` to read the missing original text before claiming a complete review.
-
-## 3. Answer a current request
-
-`subagent_reply({ id, questionId, reason, confirmed | value | cancelled })` answers one unresolved
-request. Supply exactly one answer matching its type and the user's existing authorization. The tool
-records a parent decision; it cannot impersonate a human or grant persistent permissions.
-
-A `humanOnly` approval must use the human UI. The parent may deny/cancel where allowed. See
-[references/approvals.md](references/approvals.md) for request types and permission boundaries.
-
-## 4. Managed worktrees
-
-`subagent_workspace({ action: "create" })` creates an isolated worktree; then use its ID in a start call.
-Different workspaces can run concurrently. One workspace permits one active instance at a time and may
-be reused by another instance after release. Isolation is explicit, not automatically chosen by the plugin.
-
-`subagent_workspace({ action: "integrate", workspace })` applies its pending changes to the parent.
-It does not commit, push or remove the worktree. The user's workflow decides when integration is appropriate.
-Read [references/workspaces.md](references/workspaces.md) before creating, syncing or integrating one.
-
-For conflicts, stale locks, uncertain operations or failed recovery, read
-[references/recovery.md](references/recovery.md). Do not bypass a refusal by editing records, using raw
-cwd, creating a replacement instance, resetting files or disabling safety checks.
-
-## 5. Human controls and persistence
-
-`/agents` lets the user view conversations, message, resume, answer requests or stop instances.
-Their actions appear in the parent context as `[Human → subagent …]` entries. These refer to that
-instance only and do not widen authorization. `/cli-agents-setting` edits role configuration.
-
-The parent must use a persistent Pi session, not `--no-session`. Pending reports return to the original
-parent session; another session in the same directory does not acquire ownership.
-
-## Old tool references
-
-Historical messages remain unchanged. Translate old calls using their original IDs:
-
-| Old name | Current call |
-|---|---|
-| `spawn_agent` | `subagent({ action: "start", ... })` |
-| `send_input` | `subagent({ action: "send", ... })` |
-| `close_agent` | `subagent({ action: "stop", id })` |
-| `list_agents()` / `{id}` / `{id, runId}` | `subagent_query` with `list` / `get` / `result` |
-| `respond_to_permission` | `subagent_reply` |
-| `create_workspace` | `subagent_workspace({ action: "create", ... })` |
-| `integrate_workspace` | `subagent_workspace({ action: "integrate", workspace })` |
+`/agents` lets the user inspect, message, resume, answer requests or stop instances;
+`/cli-agents-setting` edits roles. `[Human → subagent …]` entries record actions on that instance only,
+not additional authorization.

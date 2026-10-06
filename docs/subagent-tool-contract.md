@@ -161,7 +161,7 @@ The extension does not decide that the parent must implement, review or integrat
 
 Do not expose the new four tools and old seven tools to the model simultaneously. Update tool descriptions, the skill, notification result-reading hints and relevant tests together; do not keep permanent parallel entry points solely to preserve old tool names.
 
-Preserve original sessions, instance IDs, run IDs, role snapshots and workspace records. Renaming tools must not create new instances or rewrite old reports. Old tool-call hints in historical notifications remain original history. The usage guide should provide a name mapping so the model can use original id/runId values with the new query tool, without editing old evidence.
+Preserve original sessions, instance IDs, run IDs, role snapshots and workspace records. Renaming tools must not create new instances or rewrite old reports. Old tool-call hints in historical notifications remain original history. Current usage guidance names only supported tools. Read historical notifications using their original instance/run IDs with `subagent_query`, without editing old evidence.
 
 | Verification area | Required evidence |
 |---|---|

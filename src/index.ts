@@ -171,7 +171,7 @@ export default function extension(pi: ExtensionAPI): void {
   });
   const registerSubagent = (catalog: string): void => pi.registerTool({
     name: "subagent", label: "CLI subagent",
-    description: `Start, message or stop a persistent CLI subagent. start requires role and task; choose cwd or workspace, never both. send requires id and message and continues that exact instance: Pi supports running steer/followUp, Codex running steer only, Claude must finish first. stop requires id and retains history. Never silently replaces a session. Workspace continuation may require explicit keep/sync; sync refuses active, staged or unintegrated work. Results return automatically. Query existing instances with subagent_query.\n${catalog}`,
+    description: `Start, message or stop a persistent CLI subagent. start requires role and task; choose cwd or workspace, never both. send requires id and message and continues that exact instance: Pi supports running steer/followUp, Codex running steer only, Claude must finish first. stop requires id and retains history. Never silently replaces a session. Workspace continuation may require explicit keep/sync; sync refuses active, staged or unintegrated work. Results return automatically. Query existing instances with subagent_query.\n\nDelegate outcomes, not implementation recipes. Give the goal, essential context (relevant paths and confirmed facts), authorized scope, and acceptance or return needs. A new instance has not seen this conversation. Let the child investigate, choose an approach and verify its work; prescribe implementation details only when the user, compatibility or shared-work constraints require them.\n\n${catalog}`,
     parameters: Type.Object({
       action: Type.Union([Type.Literal("start"), Type.Literal("send"), Type.Literal("stop")]),
       role: Type.Optional(Type.String({ description: "start only, required: configured role name" })),
@@ -179,7 +179,7 @@ export default function extension(pi: ExtensionAPI): void {
       cwd: Type.Optional(Type.String({ description: "start only: defaults to parent cwd; mutually exclusive with workspace" })),
       workspace: Type.Optional(Type.String({ description: "start only: managed workspace ID; mutually exclusive with cwd" })),
       id: Type.Optional(Type.String({ description: "send/stop only, required: existing instance ID" })),
-      message: Type.Optional(Type.String({ description: "send only, required: instructions for this instance" })),
+      message: Type.Optional(Type.String({ description: "send only, required: follow-up goal, new context and changed constraints; repeat the full task only when needed" })),
       mode: Type.Optional(Type.Union([Type.Literal("steer"), Type.Literal("followUp")], { description: "send only: running delivery; defaults to steer" })),
       baseline: Type.Optional(Type.Union([Type.Literal("keep"), Type.Literal("sync")], { description: "send only: explicit workspace baseline decision after integration or another instance's sync; keep preserves current files, not remembered files" })),
       includeUncommitted: Type.Optional(Type.Object({ reason: Type.String({ minLength: 1, description: "send with sync only: why all current parent changes are authorized for inheritance" }) }, { additionalProperties: false })),

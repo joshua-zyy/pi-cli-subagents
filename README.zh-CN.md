@@ -121,6 +121,6 @@ npm run test:list # 只列本地选集，不构建或执行测试
 
 入口在模块导入前隔离用户角色配置、清除继承的子代理标记，并串行执行。单域定向检查示例：`npm run test:domain -- workspace.test.mjs`。选层规则、本地范围与实测成本见[测试分层说明](docs/testing.md)。
 
-修改代码后重新构建，并在 Pi 中执行 `/reload`。自动化测试不等于完整终端验收。工具用法及旧工具名映射见[委派技能](skills/delegate-cli-agents/SKILL.md)。历史通知和会话不重写，可将旧通知中的原实例/run ID 交给新查询工具。
+修改代码后重新构建，并在 Pi 中执行 `/reload`。自动化测试不等于完整终端验收。常规调用以工具说明为准；审批、结果读取、工作区和恢复操作见[操作参考技能](skills/delegate-cli-agents/SKILL.md)。历史通知和会话不重写，可将旧通知中的原实例/run ID 交给新查询工具。
 
 生命周期管理参考 [Paseo](https://github.com/getpaseo/paseo)，状态区与对话界面参考 [pi-subagents](https://github.com/tintinweb/pi-subagents)。

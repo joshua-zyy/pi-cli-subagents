@@ -22,16 +22,20 @@ function harness(t) {
 }
 const role = description => ({ description, instructions: 'PRIVATE_INSTRUCTIONS', model: 'PRIVATE_MODEL' });
 
-test('dispatch description exposes effective names and descriptions, not model settings or prompts', async t => {
+test('dispatch exposes delegation guidance and effective roles without model settings or prompts', async t => {
   const h = harness(t);
+  const guidance = 'Delegate outcomes, not implementation recipes.';
+  assert.ok(h.description().includes(guidance), 'guidance is available without loading a skill');
   h.write('user', { analyst: role('Personal analysis'), worker: role('Personal worker') });
   h.write('project', { analyst: role('Project analysis'), projectonly: role('Project only') });
   await h.events.get('session_start')({}, h.ctx);
+  assert.ok(h.description().includes(guidance), 'session-start catalog refresh retains guidance');
   assert.match(h.description(), /analyst.*Personal analysis/);
   assert.match(h.description(), /worker.*Personal worker/);
   assert.doesNotMatch(h.description(), /Project analysis|projectonly|PRIVATE_/);
   h.trust(true);
   await h.events.get('before_agent_start')({}, h.ctx);
+  assert.ok(h.description().includes(guidance), 'turn-start catalog refresh retains guidance');
   assert.match(h.description(), /analyst.*Project analysis/);
   assert.match(h.description(), /projectonly.*Project only/);
   assert.doesNotMatch(h.description(), /Personal analysis|PRIVATE_/);

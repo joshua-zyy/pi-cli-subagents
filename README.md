@@ -121,6 +121,6 @@ npm run test:list # List the local selection without building/running it
 
 Test entries isolate user role configuration and clear the inherited child marker before imports, then run serially. For a focused domain check: `npm run test:domain -- workspace.test.mjs`. See [test tiers and verification costs](docs/testing.md) for selection rules, local-only boundaries and measured timings.
 
-After code changes, rebuild and run `/reload` in Pi. Automated tests are not full terminal acceptance. See the [delegation skill](skills/delegate-cli-agents/SKILL.md) for tool usage and the old-to-new tool-name mapping. Historical notifications and saved sessions are not rewritten; use their original instance/run IDs with the new query tool.
+After code changes, rebuild and run `/reload` in Pi. Automated tests are not full terminal acceptance. Routine calls are documented by the tools; see the [operational reference](skills/delegate-cli-agents/SKILL.md) for approvals, results, workspaces and recovery. Historical notifications and saved sessions are not rewritten; use their original instance/run IDs with the new query tool.
 
 Inspired by [Paseo](https://github.com/getpaseo/paseo) for lifecycle management and [pi-subagents](https://github.com/tintinweb/pi-subagents) for the status and conversation UI.
