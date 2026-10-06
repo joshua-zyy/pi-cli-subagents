@@ -1,10 +1,10 @@
 # Managed workspaces
 
-Read this before you create, sync or integrate a managed workspace. Everything else about delegation is
-in [../SKILL.md](../SKILL.md).
+Read this before you create, sync or integrate a managed workspace. Tool descriptions cover routine
+calls; [../SKILL.md](../SKILL.md) covers delivery, permissions and recovery.
 
-A managed workspace is a Git worktree this extension owns, one per independently integrable change. Use
-one when parallel work must not touch the parent directory; otherwise share `cwd`.
+A managed workspace is a Git worktree owned by this extension. Choose isolation according to the task's
+requirements; passing `cwd` instead uses that directory directly without creating a worktree.
 
 ## Create
 
