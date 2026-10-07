@@ -124,7 +124,13 @@ async function run(dir: string, runId: string): Promise<void> {
       }
       if (input.actor === "parent" && (typeof input.reason !== "string" || !input.reason.trim())) throw new Error("A parent decision requires a reason");
       if (input.actor !== undefined && input.actor !== "parent" && input.actor !== "human") throw new Error("Unknown decision actor");
-      if (q.humanOnly && input.value === "Approve once" && input.actor !== "human") throw new Error("This request requires human approval");
+      if (input.actor === "parent" && !input.cancelled) {
+        // A refusal is always safe. Producing an authorization is not: without a policy that states
+        // what a response means, the parent may only refuse and the human answers the request.
+        const refusal = q.method === "confirm" && input.confirmed === false;
+        const permitted = q.method === "confirm" ? q.parentPolicy?.confirm === true : q.parentPolicy?.values?.includes(input.value!) === true;
+        if (!refusal && !permitted) throw new Error("This request requires human approval; the parent agent may only refuse it, not approve it");
+      }
       // Record intent before sending: a failed log write must not silently approve an action.
       appendFileSync(path.join(runDir, "permissions.jsonl"), `${JSON.stringify({ time: Date.now(), runId, questionId: q.id,
         actor: input.actor ?? "human", decision: input.cancelled ? "cancelled" : q.method === "confirm" ? input.confirmed ? "approved" : "denied" : "answered",

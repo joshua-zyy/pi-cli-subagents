@@ -38,15 +38,18 @@ test('parent can explicitly review a child request while the human command remai
   await assert.rejects(invoke('subagent_reply',{id,questionId:'other',confirmed:true,reason:'not the current request'}),/ended|exist/);
   await assert.rejects(invoke('subagent_reply',{id,questionId:'permission-1',value:'bad',reason:'wrong answer type'}),/type/);
   assert.equal(manager.get(id).phase,'waiting');
-  await invoke('subagent_reply',{id,questionId:'permission-1',confirmed:true,reason:'Within the parent-assigned task'});
+  // A Pi confirm can mean "remember this", so the parent agent may refuse but never approve it.
+  await assert.rejects(invoke('subagent_reply',{id,questionId:'permission-1',confirmed:true,reason:'Within the parent-assigned task'}),/parent|human/i);
+  assert.equal(manager.get(id).phase,'waiting','a refused approval must leave the request pending');
+  await invoke('subagent_reply',{id,questionId:'permission-1',confirmed:false,reason:'Not authorized for this task'});
   await waitUntil('complete',()=>manager.get(id).phase==='completed'&&!processAlive(manager.get(id).workerPid));
   assert.equal(confirmations,0);
-  assert.equal(manager.get(id).text,'ALLOW');
+  assert.equal(manager.get(id).text,'DENY');
   assert.deepEqual(await waiting(),[]);
   await assert.rejects(invoke('subagent_reply',{id,questionId:'permission-1',confirmed:true,reason:'duplicate'}),/ended|exist|exited/);
   const audit=fs.readFileSync(path.join(manager.root,id,'runs',manager.get(id).runId,'permissions.jsonl'),'utf8').trim().split('\n').map(JSON.parse);
-  assert.equal(audit.length,1); assert.equal(audit[0].actor,'parent'); assert.equal(audit[0].reason,'Within the parent-assigned task');
-  assert.equal(audit[0].decision,'approved');
+  assert.equal(audit.length,1,'a refused approval must not be recorded as a decision'); assert.equal(audit[0].actor,'parent'); assert.equal(audit[0].reason,'Not authorized for this task');
+  assert.equal(audit[0].decision,'denied');
   const second=JSON.parse((await invoke('subagent',{ action: 'start',role:'worker',task:'WAIT',cwd})).match(/\{.+\}/)[0]);
   await waitUntil('human waiting',()=>manager.get(second.id).phase==='waiting');
   await commands.get('agent-reply').handler(`${second.id} permission-1`,ctx);
@@ -84,7 +87,22 @@ test('permission tools reject foreign parents, missing persistent sessions and i
   assert.deepEqual(options,['Allow once','Deny']);
   await assert.rejects(invoke('subagent_reply',{id:select.id,questionId:'permission-1',confirmed:true,reason:'wrong method'}),/type/);
   await assert.rejects(invoke('subagent_reply',{id:select.id,questionId:'permission-1',value:'Allow forever',reason:'not offered'}),/available options/);
-  await invoke('subagent_reply',{id:select.id,questionId:'permission-1',value:'Deny',reason:'Not authorized'});
+  // An unrecognized option set carries no audited meaning, so no value from it may be approved.
+  await assert.rejects(invoke('subagent_reply',{id:select.id,questionId:'permission-1',value:'Deny',reason:'Not authorized'}),/parent|human/i);
+  assert.equal(manager.get(select.id).phase,'waiting');
+  await invoke('subagent_reply',{id:select.id,questionId:'permission-1',cancelled:true,reason:'Not authorized'});
   await waitUntil('select complete',()=>manager.get(select.id).phase==='completed'&&!processAlive(manager.get(select.id).workerPid));
-  assert.equal(manager.get(select.id).text,'Deny');
+  assert.equal(manager.get(select.id).text,'CANCELLED');
+  // The audited safety-guard contract: the parent may refuse or allow one action, never a standing grant.
+  const guard=JSON.parse((await invoke('subagent',{ action: 'start',role:'worker',task:'WAIT_SAFETY',cwd})).match(/\{.+\}/)[0]);
+  await waitUntil('guard waiting',()=>manager.get(guard.id).phase==='waiting');
+  const guardQuestion=(await waiting()).find(entry=>entry.id===guard.id).questions[0];
+  assert.deepEqual(guardQuestion.options,['Block','Allow once','Allow for this session','Always allow in this cwd']);
+  for(const forbidden of ['Allow for this session','Always allow in this cwd']){
+    await assert.rejects(invoke('subagent_reply',{id:guard.id,questionId:'permission-1',value:forbidden,reason:'standing grant'}),/parent|human/i);
+    assert.equal(manager.get(guard.id).phase,'waiting','a refused standing grant must leave the request pending');
+  }
+  await invoke('subagent_reply',{id:guard.id,questionId:'permission-1',value:'Allow once',reason:'One-off read-only grep inside the assigned scope'});
+  await waitUntil('guard complete',()=>manager.get(guard.id).phase==='completed'&&!processAlive(manager.get(guard.id).workerPid));
+  assert.equal(manager.get(guard.id).text,'Allow once','the standing grant must never reach the child');
 });
