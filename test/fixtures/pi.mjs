@@ -46,10 +46,15 @@ function handle(cmd) {
     }, 1500);
     return;
   }
-  if (cmd.message === 'WAIT' || cmd.message === 'WAIT_SELECT') {
+  if (cmd.message === 'WAIT' || cmd.message === 'WAIT_SELECT' || cmd.message === 'WAIT_SAFETY') {
     question = true;
     emit(cmd.message === 'WAIT' ?
       { type: 'extension_ui_request', id: 'permission-1', method: 'confirm', title: 'Allow fixture operation?', message: 'Requires a human answer' } :
+      cmd.message === 'WAIT_SAFETY' ?
+      // The audited option set of @firstpick/pi-extension-safety-guard; two of these grant more
+      // than one action, so the parent agent must not be able to submit them.
+      { type: 'extension_ui_request', id: 'permission-1', method: 'select', title: 'Dangerous bash command', message: 'Reason: possible secret file access',
+        options: ['Block', 'Allow once', 'Allow for this session', 'Always allow in this cwd'] } :
       { type: 'extension_ui_request', id: 'permission-1', method: 'select', title: 'Select fixture response', options: ['Allow once', 'Deny'] });
     return;
   }

@@ -7,7 +7,7 @@ import type { AdapterOptions, CliAdapter, InteractionReply } from "./cli-adapter
 import { childEnvironment, type Exit } from "./pi-process.js";
 import type { AgentSpec, NativeSession, Delivery } from "./types.js";
 
-// pi-lens-ignore: no-any-type
+// pi-lens-ignore: no-any-type, no-unsafe-dictionary-type
 type Json = Record<string, any>;
 const object = (value: unknown): value is Json => value !== null && typeof value === "object" && !Array.isArray(value);
 const uuid = /^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/;
@@ -227,8 +227,10 @@ export class ClaudeAdapter implements CliAdapter {
     const humanOnly = p.classifier_approvable === false || p.decision_reason_type === "rule" || p.matched_ask_rule != null;
     const approval: Approval = { id: randomUUID(), requestId, toolId: p.tool_use_id, input: structuredClone(p.input), messageId: this.activeMessage!, humanOnly, attempted: false };
     this.approvals.set(approval.id, approval);
+    const options = ["Deny once", "Approve once", "Cancel turn"];
     this.options.onEvent({ type: "question", question: { id: approval.id, method: "select", title: "Approve one Claude tool call?",
-      message: `${humanOnly ? "Human approval required; the parent may only deny or cancel.\n" : ""}${details}`, options: ["Deny once", "Approve once", "Cancel turn"], ...(humanOnly ? { humanOnly: true } : {}) } });
+      message: `${humanOnly ? "Human approval required; the parent may only deny or cancel.\n" : ""}${details}`, options,
+      parentPolicy: { values: humanOnly ? ["Deny once", "Cancel turn"] : options }, ...(humanOnly ? { humanOnly: true } : {}) } });
   }
   async ready(): Promise<NativeSession> {
     const result = await this.request({ subtype: "initialize", appendSystemPrompt: `# Delegated role: ${this.options.spec.roleName}\n${this.options.spec.role.instructions}`,

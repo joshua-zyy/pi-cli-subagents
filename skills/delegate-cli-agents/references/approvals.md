@@ -12,12 +12,20 @@ only what that authorization covers; otherwise deny or cancel, or leave it for t
 with the actor who made it.
 
 An approval is always a single action. It is never a blanket permission, never a session-wide or
-permanent grant (those are not offered), and never a reason to disable a safety extension.
+permanent grant, and never a reason to disable a safety extension.
+
+## What the parent may submit
+
+Each request states the responses this parent may submit. Use one of them, or refuse it
+(`cancelled`, or `confirmed: false`). Claude and Codex requests carry their own one-action choices;
+an audited Pi safety-guard request may be refused or allowed once, never "for this session" or
+"always in this cwd". A request without a stated policy — including a record written by an earlier
+version — is answered by the human: refusing from the parent still works, approving does not.
 
 ## Boundaries the parent cannot cross
 
-- `humanOnly` requests cannot be approved by the parent — the message says so. Ask the human, or
-  deny/cancel.
+- A response outside the request's stated policy cannot be approved by the parent. Ask the human, or
+  refuse.
 - Dedicated native dialogs and unscoped requests fail closed. A refusal is not something to work around
   with a raw `cwd`, a replacement instance or a hand-edited record.
 - Pi, Codex and Claude Code each offer their own choice values, including `Deny once`, `Approve once`

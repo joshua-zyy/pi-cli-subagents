@@ -8,6 +8,7 @@ import { childEnvironment, type Exit } from "./pi-process.js";
 import { CODEX_MODE_PRESETS } from "./roles.js";
 import type { CodexMode, NativeSession, Delivery } from "./types.js";
 
+// pi-lens-ignore: no-unsafe-dictionary-type
 type RecordValue = Record<string, any>;
 const object = (value: unknown): value is RecordValue => value !== null && typeof value === "object" && !Array.isArray(value);
 const textInput = (text: string) => [{ type: "text", text }];
@@ -213,7 +214,8 @@ export class CodexAdapter implements CliAdapter {
     this.options.onEvent({ type: "question", question: { id, method: cancelOnly ? "select" : "confirm",
       title: command ? "Approve one Codex command?" : "Approve one Codex file change?",
       message: details + (cancelOnly ? "\nThe native server offers no decline-and-continue option. Cancel turn ends this turn without approving the command." : ""),
-      ...(cancelOnly ? { options: ["Approve once", "Cancel turn"] } : {}) } });
+      // Codex offers a one-time accept, a decline and a cancel; its session-wide decision is never sent.
+      ...(cancelOnly ? { options: ["Approve once", "Cancel turn"], parentPolicy: { values: ["Approve once", "Cancel turn"] } } : { parentPolicy: { confirm: true } }) } });
   }
   private rejectInteraction(error: string): void {
     if (this.failed || this.ending) return;

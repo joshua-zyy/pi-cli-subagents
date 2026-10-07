@@ -37,6 +37,23 @@ export async function inspectPiSession(session: SessionHandle): Promise<void> {
   } finally { await file.close(); }
 }
 
+/**
+ * The only Pi interaction contract this extension has audited: the option set of
+ * @firstpick/pi-extension-safety-guard. "Block" and "Allow once" settle one command, while
+ * "Allow for this session" and "Always allow in this cwd" write a wider grant (the last one
+ * persists under the agent directory). A Pi UI request carries no source identifier, so this is
+ * the only Pi case where the meaning of a response is known; every other Pi interaction stays
+ * answerable by the human alone.
+ */
+const AUDITED_PI_OPTIONS = ["Block", "Allow once", "Allow for this session", "Always allow in this cwd"];
+const AUDITED_PI_PARENT_VALUES = ["Block", "Allow once"];
+
+function auditedParentPolicy(method: unknown, options: unknown): Pick<Question, "parentPolicy" | "humanOnly"> {
+  const audited = method === "select" && Array.isArray(options)
+    && options.length === AUDITED_PI_OPTIONS.length && AUDITED_PI_OPTIONS.every((value, index) => options[index] === value);
+  return { humanOnly: true, ...(audited ? { parentPolicy: { values: AUDITED_PI_PARENT_VALUES } } : {}) };
+}
+
 export class PiAdapter implements CliAdapter {
   readonly rpc: PiProcess;
   readonly closed: Promise<Exit>;
@@ -68,6 +85,7 @@ export class PiAdapter implements CliAdapter {
         id: String(record.id), method: record.method as Question["method"], title: String(record.title ?? "Subagent needs a response"),
         message: typeof record.message === "string" ? record.message : undefined,
         options: record.options, placeholder: record.placeholder, prefill: record.prefill,
+        ...auditedParentPolicy(record.method, record.options),
         ...(typeof record.timeout === "number" ? { expiresAt: Date.now() + record.timeout } : {}),
       };
       this.options.onEvent({ type: "question", question });

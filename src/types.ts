@@ -59,6 +59,13 @@ export interface Question {
   expiresAt?: number;
   /** Native policy requires a human for approval; parent denial/cancellation remains safe. */
   humanOnly?: boolean;
+  /**
+   * Which responses the parent agent may submit. Absent means the parent may only refuse
+   * (`cancelled`, or `confirmed: false`), because this extension never lets an agent produce an
+   * authorization whose scope it cannot establish. Records written by earlier versions carry no
+   * policy and therefore stay unanswerable by the parent.
+   */
+  parentPolicy?: { values?: string[]; confirm?: boolean };
 }
 /** Legacy Pi fields remain readable, including pre-adapter request/state records. */
 export interface SessionHandle { sessionId: string; sessionFile: string }
