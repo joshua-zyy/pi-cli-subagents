@@ -2,13 +2,14 @@
 import test from 'node:test';import assert from 'node:assert/strict';import fs from 'node:fs';import path from 'node:path';
 import {execFileSync} from 'node:child_process';import {fileURLToPath} from 'node:url';
 import {AgentManager} from '../dist/manager.js';import {processAlive,waitUntil} from '../dist/storage.js';
+import { tempDir } from './helpers/tmp.mjs';
 const fixture=fileURLToPath(new URL('./fixtures/claude.mjs',import.meta.url)),pi=fileURLToPath(new URL('./fixtures/pi.mjs',import.meta.url));
 const role={cli:'claude',description:'test',instructions:'Only the assigned task'},piRole={description:'review',instructions:'Read only'};
 const git=(cwd,...args)=>execFileSync('git',['-C',cwd,...args],{encoding:'utf8',windowsHide:true});
 const fileTask=(file,content)=>`FILE ${JSON.stringify({file,...(content===undefined?{}:{content})})}`;
 const sync={baseline:'sync',includeUncommitted:{reason:'User authorized these fixture changes'}};
 function setup(t,flags=[]){
- const root=fs.mkdtempSync(path.resolve('.test-output/claude-workspace-')),repo=path.join(root,'repo'),home=path.join(root,'home'),parent=path.join(root,'parent.jsonl');
+ const root=tempDir('claude-workspace'),repo=path.join(root,'repo'),home=path.join(root,'home'),parent=path.join(root,'parent.jsonl');
  fs.mkdirSync(repo);fs.mkdirSync(home);fs.writeFileSync(path.join(home,'fixture-home'),'');fs.writeFileSync(parent,'{}\n');
  git(repo,'init','-q');git(repo,'config','user.name','Test');git(repo,'config','user.email','test@example.invalid');git(repo,'config','core.autocrlf','false');
  fs.writeFileSync(path.join(repo,'base.txt'),'base\n');git(repo,'add','.');git(repo,'commit','-qm','fixture');

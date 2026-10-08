@@ -9,10 +9,10 @@ import { randomUUID } from 'node:crypto';
 import { AgentManager } from '../dist/manager.js';
 import { defaultRoles } from '../dist/roles.js';
 import { processAlive, waitUntil, readJson, writeJson } from '../dist/storage.js';
+import { tempDir } from './helpers/tmp.mjs';
 
 const fixture = fileURLToPath(new URL('./fixtures/pi.mjs', import.meta.url));
 const launch = { command: process.execPath, args: [fixture] };
-const output = path.resolve('.test-output'); fs.mkdirSync(output, { recursive: true });
 // A saved PID can belong to another process after this CLI exits, especially on Windows.
 // The unique instance directory is present in both first-start and resume argv.
 function originalCliAlive(state, instanceDirectory) {
@@ -29,7 +29,7 @@ function originalCliAlive(state, instanceDirectory) {
   return normalize(commandLine).includes(normalize(instanceDirectory));
 }
 function setup(t) {
-  const cwd = fs.mkdtempSync(path.join(output, 'manager-'));
+  const cwd = tempDir('manager');
   const parent = path.join(cwd, 'parent.jsonl'); fs.writeFileSync(parent, '{}\n');
   const manager = new AgentManager(parent, launch);
   t.after(async () => {

@@ -3,9 +3,9 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { TranscriptReader } from '../dist/ui/transcript.js';
-const root = path.resolve('.test-output'); fs.mkdirSync(root, { recursive: true });
+import { tempDir } from './helpers/tmp.mjs';
 function fixture(t) {
-  const dir = fs.mkdtempSync(path.join(root, 'codex-transcript-'));
+  const dir = tempDir('codex-transcript');
   const file = path.join(dir, 'run-1.jsonl'); fs.writeFileSync(file, '');
   const reader = new TranscriptReader('codex', 'thread-1');
   const append = (...records) => fs.appendFileSync(file, records.map(record => JSON.stringify(record) + '\n').join(''));

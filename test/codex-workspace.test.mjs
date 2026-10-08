@@ -8,15 +8,15 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { AgentManager } from '../dist/manager.js';
 import { processAlive, waitUntil, readJson } from '../dist/storage.js';
+import { tempDir } from './helpers/tmp.mjs';
 const fixture = fileURLToPath(new URL('./fixtures/codex.mjs', import.meta.url));
 const pi = fileURLToPath(new URL('./fixtures/pi.mjs', import.meta.url));
 const role = { cli: 'codex', description: 'test', instructions: 'Only the assigned fixture task', model: 'gpt-6-luna' };
 const piRole = { description: 'reviewer', instructions: 'Inspect the assigned files' };
 const git = (cwd, ...args) => execFileSync('git', ['-C', cwd, ...args], { encoding: 'utf8', windowsHide: true });
-const output = path.resolve('.test-output'); fs.mkdirSync(output, { recursive: true });
 const fileTask = (file, content) => `FILE ${JSON.stringify({ file, ...(content === undefined ? {} : { content }) })}`;
 function setup(t, flags = []) {
-  const root = fs.mkdtempSync(path.join(output, 'codex-workspace-'));
+  const root = tempDir('codex-workspace');
   const repo = path.join(root, 'repo'), home = path.join(root, 'home'), parent = path.join(root, 'parent.jsonl');
   fs.mkdirSync(repo); fs.mkdirSync(home); fs.writeFileSync(path.join(home, 'fixture-home'), ''); fs.writeFileSync(parent, '{}\n');
   git(repo, 'init', '-q'); git(repo, 'config', 'user.name', 'Test'); git(repo, 'config', 'user.email', 'test@example.invalid');

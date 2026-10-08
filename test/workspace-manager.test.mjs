@@ -8,13 +8,13 @@ import { fileURLToPath } from 'node:url';
 import { AgentManager } from '../dist/manager.js';
 import { defaultRoles } from '../dist/roles.js';
 import { waitUntil, processAlive } from '../dist/storage.js';
+import { tempDir } from './helpers/tmp.mjs';
 
 const fixture = fileURLToPath(new URL('./fixtures/pi.mjs', import.meta.url));
 const launch = { command: process.execPath, args: [fixture] };
-const output = path.resolve('.test-output'); fs.mkdirSync(output, { recursive: true });
 const git = (cwd, ...args) => execFileSync('git', ['-C', cwd, ...args], { encoding: 'utf8', windowsHide: true });
 function setup(t) {
-  const root = fs.mkdtempSync(path.join(output, 'workspace-manager-'));
+  const root = tempDir('workspace-manager');
   const repo = path.join(root, 'repo'); fs.mkdirSync(repo);
   git(repo, 'init', '-q'); git(repo, 'config', 'user.name', 'Test'); git(repo, 'config', 'user.email', 'test@example.invalid');
   git(repo, 'config', 'core.autocrlf', 'false');

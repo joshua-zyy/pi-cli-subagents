@@ -5,10 +5,10 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ClaudeAdapter, inspectClaudeSession } from '../dist/claude-adapter.js';
 import { waitUntil } from '../dist/storage.js';
+import { tempDir } from './helpers/tmp.mjs';
 const fixture = fileURLToPath(new URL('./fixtures/claude.mjs', import.meta.url));
-fs.mkdirSync('.test-output', { recursive: true });
 function setup(t) {
-  const cwd = fs.mkdtempSync(path.resolve('.test-output/claude-adapter-'));
+  const cwd = tempDir('claude-adapter');
   const home = path.join(cwd, 'home'); fs.mkdirSync(home); fs.writeFileSync(path.join(home, 'fixture-home'), '');
   const spec = { version: 3, cli: 'claude', id: 'fixture', cwd, claudeHome: home, roleName: 'worker',
     role: { cli: 'claude', description: 'test', instructions: 'Do only assigned work.' }, launch: { command: process.execPath, args: [fixture] } };

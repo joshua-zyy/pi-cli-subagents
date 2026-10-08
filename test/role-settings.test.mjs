@@ -5,8 +5,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { addRole, deleteRole, fieldChoices, fieldIsChoice, readScope, roleRows, roleSummary, setField, visibleFields, writeScope } from '../dist/role-settings.js';
 import { mergeRoles, validateRoleFile } from '../dist/roles.js';
+import { tempDir } from './helpers/tmp.mjs';
 
-const temp = () => fs.mkdtempSync(path.resolve('.test-output/role-settings-'));
+const temp = () => tempDir('role-settings');
 const base = { description: 'worker role', instructions: 'Do the assigned work.' };
 
 test('scope files: personal and project paths stay separate and validated', () => {

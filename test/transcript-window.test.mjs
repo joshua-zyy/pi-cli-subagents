@@ -7,8 +7,8 @@ import path from 'node:path';
 import { syncBuiltinESMExports } from 'node:module';
 import { TranscriptWindow } from '../dist/ui/transcript-window.js';
 import { logSourceKey } from '../dist/ui/transcript.js';
+import { tempDir } from './helpers/tmp.mjs';
 
-const root = path.resolve('.test-output'); fs.mkdirSync(root, { recursive: true });
 const CHUNK = 512 * 1024;
 const LOOKBACK = 4 * 1024 * 1024 + CHUNK;   // documented boundary lookback cap
 
@@ -25,7 +25,7 @@ const has = (snapshot, text) => snapshot.entries.some(entry => entry.text.includ
 const find = (snapshot, text) => snapshot.entries.find(entry => entry.text.includes(text));
 
 function workspace(t) {
-  const dir = fs.mkdtempSync(path.join(root, 'window-'));
+  const dir = tempDir('window');
   t.after(() => fs.rmSync(dir, { recursive: true, force: true, maxRetries: 4, retryDelay: 30 }));
   const files = [];
   const run = () => {

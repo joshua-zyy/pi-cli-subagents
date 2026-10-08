@@ -8,10 +8,10 @@ import { execFileSync } from 'node:child_process';
 import { syncBuiltinESMExports } from 'node:module';
 import { AgentManager } from '../dist/manager.js';
 import { readJson, writeJson } from '../dist/storage.js';
+import { tempDir } from './helpers/tmp.mjs';
 
-const output = path.resolve('.test-output'); fs.mkdirSync(output, { recursive: true });
 function fixture(count = 100) {
-  const cwd = fs.mkdtempSync(path.join(output, 'history-cache-')), parent = path.join(cwd, 'parent.jsonl');
+  const cwd = tempDir('history-cache'), parent = path.join(cwd, 'parent.jsonl');
   fs.writeFileSync(parent, '{}\n');
   const manager = new AgentManager(parent, { command: process.execPath, args: [] }), id = randomUUID();
   const dir = path.join(manager.root, id), runs = [];

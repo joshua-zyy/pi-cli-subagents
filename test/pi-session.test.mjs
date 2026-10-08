@@ -5,10 +5,10 @@ import fsp from 'node:fs/promises';
 import path from 'node:path';
 import { syncBuiltinESMExports } from 'node:module';
 import { inspectPiSession } from '../dist/pi-adapter.js';
+import { tempDir } from './helpers/tmp.mjs';
 
 function setup(t) {
-  const root = path.resolve('.test-output'); fs.mkdirSync(root, {recursive:true});
-  const dir = fs.mkdtempSync(path.join(root, 'pi-session-'));
+  const dir = tempDir('pi-session');
   t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));
   return {sessionFile:path.join(dir,'session.jsonl'),sessionId:'original'};
 }

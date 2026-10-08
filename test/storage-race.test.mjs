@@ -5,11 +5,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { writeJson } from '../dist/storage.js';
-
-const root = path.resolve('.test-output'); fs.mkdirSync(root, { recursive: true });
+import { tempDir } from './helpers/tmp.mjs';
 
 test('atomic writes survive a concurrent reader instead of losing state to a Windows rename conflict', { timeout: 30_000 }, async (t) => {
-  const file = path.join(fs.mkdtempSync(path.join(root, 'write-race-')), 'state.json');
+  const file = path.join(tempDir('write-race'), 'state.json');
   fs.writeFileSync(file, '{}\n');
   const reader = spawn(process.execPath, ['--input-type=module', '-e',
     `import fs from 'node:fs';const end=Date.now()+2500;while(Date.now()<end){try{fs.readFileSync(${JSON.stringify(file)},'utf8')}catch{}}`], { stdio: 'ignore' });

@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { ConversationViewer } from '../dist/ui/conversation.js';
 import { TranscriptReader } from '../dist/ui/transcript.js';
+import { tempDir } from './helpers/tmp.mjs';
 
 const theme = { fg: (_color, text) => text, bold: text => text };
 const agent = { id: 'agent-1', role: 'worker', phase: 'running', runId: 'run-2' };
@@ -42,8 +43,7 @@ test('initial catch-up never publishes intermediate old messages as the visible 
 });
 
 test('first visible content comes from the last chunk of the last run without losing history or lifetime usage', async t => {
-  const root = path.resolve('.test-output'); fs.mkdirSync(root, { recursive: true });
-  const dir = fs.mkdtempSync(path.join(root, 'viewer-loading-'));
+  const dir = tempDir('viewer-loading');
   const oldFile = path.join(dir, 'old.jsonl'), activeFile = path.join(dir, 'active.jsonl');
   const record = (text, input) => ({ type: 'message_end', message: { role: 'assistant', content: text,
     usage: { input, output: 1, totalTokens: input + 1 } } });

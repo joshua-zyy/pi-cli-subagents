@@ -7,12 +7,12 @@ import extension from '../dist/index.js';
 import { AgentManager } from '../dist/manager.js';
 import { deliverReports } from '../dist/notifier.js';
 import { waitUntil, processAlive } from '../dist/storage.js';
+import { tempDir } from './helpers/tmp.mjs';
 
 const fixture = fileURLToPath(new URL('./fixtures/pi.mjs', import.meta.url));
-const out = path.resolve('.test-output');fs.mkdirSync(out,{recursive:true});
 test('parent can explicitly review a child request while the human command remains available', {timeout:12000}, async t=>{
   const saved = process.argv[1];process.argv[1] = fixture;
-  const cwd = fs.mkdtempSync(path.join(out,'approve-'));
+  const cwd = tempDir('approve');
   const parent = path.join(cwd,'parent.jsonl');fs.writeFileSync(parent,'{}\n');
   const tools = new Map(), commands = new Map(), notices=[];
   let confirmations=0;
@@ -62,7 +62,7 @@ test('parent can explicitly review a child request while the human command remai
 
 test('permission tools reject foreign parents, missing persistent sessions and invalid decisions', {timeout:12000}, async t=>{
   const saved=process.argv[1];process.argv[1]=fixture;
-  const cwd=fs.mkdtempSync(path.join(out,'permission-scope-'));
+  const cwd=tempDir('permission-scope');
   const parent=path.join(cwd,'parent.jsonl'),foreign=path.join(cwd,'foreign.jsonl');
   fs.writeFileSync(parent,'{}\n');fs.writeFileSync(foreign,'{}\n');
   const tools=new Map();extension({on(){},registerTool(tool){tools.set(tool.name,tool)},registerCommand(){},registerShortcut(){},registerMessageRenderer(){}});

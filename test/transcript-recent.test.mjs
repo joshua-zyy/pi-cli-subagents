@@ -4,15 +4,15 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { TranscriptReader } from '../dist/ui/transcript.js';
 import { ConversationViewer } from '../dist/ui/conversation.js';
+import { tempDir } from './helpers/tmp.mjs';
 
 const CHUNK = 512 * 1024, WINDOW = 4 * 1024 * 1024 + CHUNK;
-const root = path.resolve('.test-output'); fs.mkdirSync(root, { recursive: true });
 const event = (text, input = 1) => ({ type: 'message_end', message: { role: 'assistant', content: text,
   provider: 'fixture', model: 'fixture-model', usage: { input, output: 1, totalTokens: input + 1 } } });
 const line = value => JSON.stringify(value) + '\n';
 const ignored = bytes => line({ type: 'ignored', padding: 'x'.repeat(bytes) });
 function files(t) {
-  const dir = fs.mkdtempSync(path.join(root, 'recent-transcript-'));
+  const dir = tempDir('recent-transcript');
   t.after(() => fs.rmSync(dir, { recursive: true, force: true, maxRetries: 4, retryDelay: 30 }));
   return { dir, old: path.join(dir, 'old.jsonl'), latest: path.join(dir, 'latest.jsonl') };
 }

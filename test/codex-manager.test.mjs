@@ -8,12 +8,12 @@ import { TranscriptReader } from '../dist/ui/transcript.js';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { readJson, waitUntil, processAlive, writeJson } from '../dist/storage.js';
+import { tempDir } from './helpers/tmp.mjs';
 const fixture = fileURLToPath(new URL('./fixtures/codex.mjs', import.meta.url));
 const pi = fileURLToPath(new URL('./fixtures/pi.mjs', import.meta.url));
-const output = path.resolve('.test-output'); fs.mkdirSync(output, { recursive: true });
 const role = { cli: 'codex', description: 'fixture', instructions: 'Do only this task', model: 'gpt-6-luna', effort: 'medium' };
 function setup(t) {
-  const cwd = fs.mkdtempSync(path.join(output, 'codex-manager-'));
+  const cwd = tempDir('codex-manager');
   const home = path.join(cwd, 'home'); fs.mkdirSync(home); fs.writeFileSync(path.join(home, 'fixture-home'), '');
   const parent = path.join(cwd, 'parent.jsonl'); fs.writeFileSync(parent, '{}\n');
   const options = { launch: { command: process.execPath, args: [fixture] }, home };

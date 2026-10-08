@@ -6,12 +6,12 @@ import path from 'node:path';
 import childProcess from 'node:child_process';
 import { syncBuiltinESMExports } from 'node:module';
 import extension from '../dist/index.js';
+import { tempDir } from './helpers/tmp.mjs';
 
 const turn = () => new Promise(resolve => setImmediate(resolve));
 const escape = '\x1b';
 function harness(t) {
-  const root = path.resolve('.test-output'); fs.mkdirSync(root,{recursive:true});
-  const dir = fs.mkdtempSync(path.join(root,'settings-lifecycle-')), home = path.join(dir,'home'), cwd = path.join(dir,'project');
+  const dir = tempDir('settings-lifecycle'), home = path.join(dir,'home'), cwd = path.join(dir,'project');
   fs.mkdirSync(home); fs.mkdirSync(path.join(cwd,'.pi'),{recursive:true});
   const files = [path.join(home,'cli-subagents.roles.json'),path.join(cwd,'.pi','cli-subagents.roles.json')];
   for (const file of files) fs.writeFileSync(file,'{}\n');

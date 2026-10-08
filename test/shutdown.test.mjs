@@ -6,11 +6,11 @@ import { fileURLToPath } from 'node:url';
 import { AgentManager } from '../dist/manager.js';
 import { CodexAdapter } from '../dist/codex-adapter.js';
 import { waitUntil, processAlive } from '../dist/storage.js';
+import { tempDir } from './helpers/tmp.mjs';
 const codex = fileURLToPath(new URL('./fixtures/codex.mjs', import.meta.url));
 const pi = fileURLToPath(new URL('./fixtures/pi.mjs', import.meta.url));
-fs.mkdirSync('.test-output', { recursive: true });
 function setup(flags = []) {
-  const cwd = fs.mkdtempSync(path.resolve('.test-output/shutdown-')), home = path.join(cwd, 'home');
+  const cwd = tempDir('shutdown'), home = path.join(cwd, 'home');
   fs.mkdirSync(home); fs.writeFileSync(path.join(home, 'fixture-home'), '');
   const role = { cli: 'codex', model: 'fixture', description: 'test', instructions: 'test' };
   const launch = { command: process.execPath, args: [codex, ...flags] };

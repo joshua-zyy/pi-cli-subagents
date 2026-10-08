@@ -1,7 +1,6 @@
 // Real adapter end() paths, controlled child-process events; no CLI/model is launched.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import fs from 'node:fs';
 import path from 'node:path';
 import cp from 'node:child_process';
 import { EventEmitter } from 'node:events';
@@ -10,11 +9,11 @@ import { syncBuiltinESMExports } from 'node:module';
 import { PiProcess } from '../dist/pi-process.js';
 import { CodexAdapter } from '../dist/codex-adapter.js';
 import { ClaudeAdapter } from '../dist/claude-adapter.js';
+import { tempDir } from './helpers/tmp.mjs';
 
 const flush = () => new Promise(resolve => setImmediate(resolve));
 function harness(t, platform = 'win32') {
-  fs.mkdirSync('.test-output', {recursive:true});
-  const cwd = fs.mkdtempSync(path.resolve('.test-output/process-tree-'));
+  const cwd = tempDir('process-tree');
   const children = [], killers = [], errors = [];
   const descriptor = Object.getOwnPropertyDescriptor(process, 'platform');
   Object.defineProperty(process, 'platform', {...descriptor, value:platform});

@@ -5,10 +5,10 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { CodexAdapter } from '../dist/codex-adapter.js';
 import { waitUntil } from '../dist/storage.js';
+import { tempDir } from './helpers/tmp.mjs';
 const fixture = fileURLToPath(new URL('./fixtures/codex.mjs', import.meta.url));
-const output = path.resolve('.test-output'); fs.mkdirSync(output, { recursive: true });
 function setup(t, overrides = {}) {
-  const cwd = fs.mkdtempSync(path.join(output, 'codex-protocol-'));
+  const cwd = tempDir('codex-protocol');
   const home = path.join(cwd, 'native-home'); fs.mkdirSync(home); fs.writeFileSync(path.join(home, 'fixture-home'), '');
   const spec = { version: 2, cli: 'codex', id: 'test-instance', parentFile: path.join(cwd, 'parent.jsonl'), cwd, codexHome: home,
     roleName: 'worker', role: { cli: 'codex', description: 'test', instructions: 'Do only the assigned work.', model: 'gpt-6-luna', effort: 'high' },

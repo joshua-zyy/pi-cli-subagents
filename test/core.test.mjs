@@ -1,16 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { PiProcess } from '../dist/pi-process.js';
 import { loadRoles } from '../dist/roles.js';
 import { writeJson, waitUntil } from '../dist/storage.js';
+import { tempDir } from './helpers/tmp.mjs';
 
 export const fixture = fileURLToPath(new URL('./fixtures/pi.mjs', import.meta.url));
-const output = path.resolve('.test-output');
-fs.mkdirSync(output, { recursive: true });
-const temp = () => fs.mkdtempSync(path.join(output, 'unit-'));
+const temp = () => tempDir('unit');
 
 test('RPC correlates requests, preserves Unicode separators, and surfaces rejection', async () => {
   const dir = temp(); const events = [];
