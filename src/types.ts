@@ -51,6 +51,8 @@ export interface AgentSpec {
 export interface Question {
   id: string;
   method: "select" | "confirm" | "input" | "editor";
+  /** Set only for the bundled, call-correlated task-question contract. */
+  kind?: "question";
   title: string;
   message?: string;
   options?: string[];
@@ -65,7 +67,7 @@ export interface Question {
    * authorization whose scope it cannot establish. Records written by earlier versions carry no
    * policy and therefore stay unanswerable by the parent.
    */
-  parentPolicy?: { values?: string[]; confirm?: boolean };
+  parentPolicy?: { values?: string[]; confirm?: boolean; text?: true };
 }
 /** Legacy Pi fields remain readable, including pre-adapter request/state records. */
 export interface SessionHandle { sessionId: string; sessionFile: string }
@@ -106,7 +108,7 @@ export interface AgentState extends Partial<SessionHandle> {
 export interface StartRequest { runId: string; message: string; session?: NativeSession | SessionHandle; createdAt?: number }
 export interface Endpoint { port: number; token: string; runId: string }
 /** The interaction a waiting report is about, so the notifier can state it without re-reading state. */
-export type PendingRequest = Pick<Question, "method" | "options" | "parentPolicy" | "humanOnly">;
+export type PendingRequest = Pick<Question, "method" | "options" | "parentPolicy" | "humanOnly" | "kind">;
 export interface Report {
   notificationId: string;
   agentId: string;

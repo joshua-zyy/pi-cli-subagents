@@ -1,8 +1,16 @@
 # Answering a child's request
 
-Read this when a child is `waiting` on a permission or approval request. The workflow itself is in
+Read this when a child is `waiting` on a permission request or task question. The workflow itself is in
 [../SKILL.md](../SKILL.md); `subagent_query({ action: "get", id })` returns the unresolved request, and
 `subagent_reply` answers one of them.
+
+## Task questions
+
+Pi children have a bundled `subagent_ask_parent` tool for one task-context question at a time.
+Recognized requests have `kind: "question"`: use an exact offered value, or answer a follow-up input
+with `value` text when `parentPolicy.text` is true. Answer from the authorized task context; escalate
+if the missing decision belongs to the user. An answer does not authorize new actions or change
+permissions. This does not make unknown Pi dialogs answerable.
 
 ## Decide
 

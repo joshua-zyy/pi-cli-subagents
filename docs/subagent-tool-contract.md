@@ -111,6 +111,8 @@ Return the current state and actual response-receipt result, without claiming th
 
 Keep this tool separate so approval responses remain distinguishable from ordinary lifecycle operations; do not turn it into an automatic approval policy.
 
+Pi additionally receives a bundled, child-only `subagent_ask_parent` resource at launch and resume. Its single-question contract uses 2–4 choices with a custom-text continuation. The adapter binds its dialogs to the tool call, versioned title and expected method/options, setting `kind: "question"` and an explicit parent policy; only its input continuation permits `parentPolicy.text: true`. The existing reply tool answers in the same native turn. Unknown dialogs and native permission restrictions are unchanged. This is not a general-purpose messaging channel or a permission grant. The protocol/mapping and local lifecycle checks do not establish real-model collaboration acceptance.
+
 ## 5. `subagent_workspace`: managed worktrees
 
 | action | Required | Optional | Returns |

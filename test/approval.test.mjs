@@ -119,3 +119,57 @@ test('permission tools reject foreign parents, missing persistent sessions and i
   await waitUntil('guard complete',()=>manager.get(guard.id).phase==='completed'&&!processAlive(manager.get(guard.id).workerPid));
   assert.equal(manager.get(guard.id).text,'Allow once','the standing grant must never reach the child');
 });
+
+test('owned Pi questions accept parent choices, custom text and cancellation in the original run', {timeout:15000}, async t=>{
+  const saved=process.argv[1];process.argv[1]=fixture;
+  const cwd=tempDir('parent-question'),parent=path.join(cwd,'parent.jsonl');fs.writeFileSync(parent,'{}\n');
+  const tools=new Map();extension({on(){},registerTool(tool){tools.set(tool.name,tool)},registerCommand(){},registerShortcut(){},registerMessageRenderer(){}});
+  const manager=new AgentManager(parent,{command:process.execPath,args:[fixture]});
+  t.after(async()=>{for(const state of manager.list())if(processAlive(state.workerPid))await manager.close(state.id);process.argv[1]=saved;});
+  const warnings=[],statuses=[],sent=[];
+  const ctx={cwd,isProjectTrusted:()=>false,sessionManager:{getSessionFile:()=>parent,getEntries:()=>[]},
+    ui:{notify:message=>warnings.push(message),setStatus:(_key,value)=>statuses.push(value),select:()=>{throw new Error('Do not ask the human for task context');}}};
+  const invoke=async(name,args)=>(await tools.get(name).execute('test',args,undefined,undefined,ctx)).content[0].text;
+  const notify=()=>deliverReports(manager,{sendMessage:(message,options)=>sent.push({message,options})},ctx,new Set(),Date.now(),manager.list());
+  let existingId,originalSessionId,taskCount=0;
+  for(const mode of ['option','custom','cancel']){
+    const initial=JSON.parse((await invoke('subagent',existingId
+      ? {action:'send',id:existingId,message:'ASK_PARENT'}
+      : {action:'start',role:'worker',task:'ASK_PARENT',cwd})).match(/\{.+\}/)[0]);
+    const {id,runId,sessionId}=initial;
+    if(existingId){assert.equal(id,existingId);assert.equal(sessionId,originalSessionId);}
+    existingId=id;originalSessionId=sessionId;taskCount++;
+    const q=await waitUntil('owned question',()=>manager.get(id).questions[0],3000);
+    assert.equal(q.kind,'question');assert.equal(q.humanOnly,false);
+    assert.deepEqual(q.options,['1. Unit — Fast tests','2. Integration — Full local scenario','3. Type something.']);
+    notify();
+    const notice=sent.find(s=>s.message.content.includes(q.id));
+    assert.equal(notice.options.deliverAs,'steer');assert.match(notice.message.content,/task question/i);
+    await invoke('subagent_reply',{id,questionId:q.id,reason:'Use the agreed verification scope',
+      ...(mode==='cancel'?{cancelled:true}:{value:mode==='custom'?q.options[2]:q.options[0]})});
+    if(mode==='custom'){
+      const input=await waitUntil('custom answer',()=>manager.get(id).questions.find(q=>q.method==='input'),3000);
+      assert.equal(input.kind,'question');assert.deepEqual(input.parentPolicy,{text:true});
+      notify();const message=sent.find(s=>s.message.content.includes(input.id)).message.content;
+      assert.match(message,/value.*text/i);assert.doesNotMatch(message,/human answers|requires the human/i);
+      await invoke('subagent_reply',{id,questionId:input.id,value:'Only the focused regression.',reason:'Task context, not permission to change scope'});
+    }
+    await waitUntil('question run completion',()=>manager.get(id).phase==='completed'&&!processAlive(manager.get(id).workerPid),4000);
+    const state=manager.get(id);assert.equal(state.runId,runId);assert.equal(state.sessionId,sessionId);assert.deepEqual(state.questions,[]);
+    const result=JSON.parse(await invoke('subagent_query',{action:'result',id,runId}));
+    const answer=JSON.parse(result.text);
+    assert.equal(answer.cancelled,mode==='cancel');
+    if(mode!=='cancel'){
+      assert.equal(answer.answers[0].kind,mode==='custom'?'custom':'option');
+      assert.equal(answer.answers[0].answer,mode==='custom'?'Only the focused regression.':'Unit');
+    }
+    const native=JSON.parse(fs.readFileSync(state.session.sessionFile,'utf8'));
+    assert.equal(native.messages.filter(m=>m.role==='user').length,taskCount,'answering must not submit a replacement task');
+    const events=fs.readFileSync(state.logFile,'utf8').trim().split('\n').map(JSON.parse);
+    assert.equal(events.filter(e=>e.type==='agent_start').length,1);
+    const audit=fs.readFileSync(path.join(manager.root,id,'runs',runId,'permissions.jsonl'),'utf8').trim().split('\n').map(JSON.parse);
+    assert.equal(audit.length,mode==='custom'?2:1);assert(audit.every(row=>row.actor==='parent'&&row.runId===runId));
+    assert(audit.every(row=>row.kind==='question'&&['answered','cancelled'].includes(row.decision)));
+  }
+  assert.deepEqual(warnings,[]);assert(statuses.some(s=>s?.includes('waiting for parent review')));
+});

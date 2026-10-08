@@ -1,6 +1,7 @@
 // Deterministic RPC fixture: no model/network/configuration access.
 import fs from 'node:fs';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { randomUUID } from 'node:crypto';
 const flag = (name) => process.argv[process.argv.indexOf(name) + 1];
 const sessionFile = process.argv.includes('--session') ? flag('--session') : path.join(flag('--session-dir'), 'fake-session.json');
@@ -11,6 +12,31 @@ const save = () => fs.writeFileSync(sessionFile, JSON.stringify(session));
 let active = false, buffer = '', question = false, settling;
 const emit = (record) => process.stdout.write(JSON.stringify(record) + '\n');
 const response = (cmd, data = {}) => emit({ type: 'response', id: cmd.id, command: cmd.type, success: true, data });
+const dialogs = new Map();
+async function askParent() {
+  const at = process.argv.findIndex((value, i) => value === '--extension' && path.basename(process.argv[i + 1] ?? '') === 'pi-question-tool.js');
+  if (at < 0) throw new Error('The child question resource was not explicitly loaded');
+  const registered = [];
+  const module = await import(pathToFileURL(process.argv[at + 1]).href);
+  module.default({registerTool:tool=>registered.push(tool)});
+  const tool = registered.find(tool=>tool.name === 'subagent_ask_parent');
+  if (!tool) throw new Error('The child question tool was not registered');
+  const args = {questions:[{header:'Tests',question:'Which existing tests should run?',options:[
+    {label:'Unit',description:'Fast tests'}, {label:'Integration',description:'Full local scenario'},
+  ]}]};
+  const callId='parent-call';
+  const dialog=(method,title,extra)=>new Promise(resolve=>{
+    const id=randomUUID(); dialogs.set(id,resolve);
+    emit({type:'extension_ui_request',id,method,title,...extra});
+  });
+  emit({type:'tool_execution_start',toolCallId:callId,toolName:tool.name,args});
+  const result=await tool.execute(callId,args,undefined,undefined,{hasUI:true,mode:'rpc',ui:{
+    select:(title,options)=>dialog('select',title,{options}),
+    input:(title,placeholder)=>dialog('input',title,{placeholder}),
+  }});
+  emit({type:'tool_execution_end',toolCallId:callId,toolName:tool.name,result,isError:false});
+  finish(JSON.stringify(result.details));
+}
 function finish(text, stopReason = 'stop') {
   const message = { role: 'assistant', content: [{ type: 'text', text }], stopReason };
   session.messages.push(message); save();
@@ -24,6 +50,7 @@ function handle(cmd) {
   if (cmd.type === 'clear_queue') return response(cmd);
   if (cmd.type === 'abort') { clearTimeout(settling); active = false; finish('ABORTED', 'aborted'); return response(cmd); }
   if (cmd.type === 'extension_ui_response') {
+    if (dialogs.has(cmd.id)) { const resolve=dialogs.get(cmd.id); dialogs.delete(cmd.id); resolve(cmd.cancelled ? undefined : cmd.value); return; }
     if (!question || cmd.id !== 'permission-1') throw new Error('wrong UI response');
     question = false; return finish(cmd.cancelled ? 'CANCELLED' : cmd.value ?? (cmd.confirmed ? 'ALLOW' : 'DENY'));
   }
@@ -35,6 +62,7 @@ function handle(cmd) {
   if (cmd.message.includes('\n\n[Workspace baseline]\n')) cmd = { ...cmd, message: cmd.message.split('\n\n[Workspace baseline]\n')[0] };
   active = true; response(cmd); emit({ type: 'agent_start' });
   if (cmd.message.startsWith('HOLD')) return;
+  if (cmd.message === 'ASK_PARENT') { void askParent().catch(error=>finish(error.message,'error')); return; }
   if (cmd.message === 'STREAM') {
     emit({ type: 'message_start', message: { role: 'assistant', content: [] } });
     emit({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', contentIndex: 0, delta: 'Inspecting implementation' } });

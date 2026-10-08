@@ -88,6 +88,8 @@ TUI 报告跟随 Pi 的展开/折叠状态（默认 **Ctrl+O**，支持自定义
 
 等待请求通过 `steer` 在忙碌主 agent 的下一次模型请求前送达，不终止正在执行的工具。其余批次仍通过 `followUp` 在当前执行结束后送达。主 agent 自己审核任务授权内的请求；只有缺少授权或原生请求确实要求人工时才升级给人。
 
+Pi 子代理每次启动或恢复时会显式加载随包提供的 `subagent_ask_parent`，不要求全局安装问答插件。一次提出一个任务背景问题，提供 2–4 个选项及自定义回答入口。父代理通过 `subagent_reply` 选择原始选项，或为后续输入提交 `value` 文本；请求标记为 `kind: "question"`，回答只是任务上下文，不扩大权限。只有与内置工具调用、版本化标记及预期对话形状一致的请求才获得该策略；未知弹窗仍须由人工批准。
+
 Pi 和 Codex 支持运行中的 `steer` 消息；运行中的 `followUp` 仅 Pi 支持。Claude 必须等当前任务结束后再续聊。面板仅限 TUI，工具也可用于 RPC/非交互模式。
 
 ## 隔离并行改动
@@ -105,7 +107,7 @@ Pi 和 Codex 支持运行中的 `steer` 消息；运行中的 `followUp` 仅 Pi 
 
 ## 安全与限制
 
-- **审批仅针对单次动作。** 扩展不提供会话级或持久权限授权。每个子请求都带有父代理可提交的答复范围：只有扩展已核实作用的取值才可代答（Claude 与 Codex 各自的一次性选项，以及已审计的安全扩展四选项——父代理只能选拒绝或“允许一次”，不能选 `Allow for this session` 或 `Always allow in this cwd`）。其余请求（含旧版本写入的记录）必须由人通过面板或 `/agent-reply <agentId> <questionId>` 回答；父代理仍可拒绝。批准不代表执行成功。
+- **父代理的权限批准仅针对单次动作。** 父代理不能授予会话级或持久权限。每个权限请求都带有父代理可提交的答复范围：只有扩展已核实作用的取值才可代答（Claude 与 Codex 各自的一次性选项，以及已审计的安全扩展四选项——父代理只能选拒绝或“允许一次”，不能选 `Allow for this session` 或 `Always allow in this cwd`）。其余请求（含旧版本写入的记录）必须由人通过面板或 `/agent-reply <agentId> <questionId>` 回答；父代理仍可拒绝。批准不代表执行成功。
 - **集成写入前会检查冲突**，但崩溃或 I/O 故障仍可能留下部分改动。重试前检查保留的补丁、备份和未完成日志。陈旧锁和崩溃的执行者不会自动恢复；快照、集成和同步期间应暂停外部写入。
 - **本地记录可能包含敏感源码。** 会话、日志、快照和备份位于父会话旁的 `<父会话文件>.subagents/`，关闭实例不会删除它们。
 - **兼容性有边界。** Pi 是主要的端到端验证对象。Codex 协议按 CLI 0.159.2 核对；Claude 需要 PATH 中有原生 Claude Code >=2.1.283（Windows 为 `claude.exe`）。真实父 Pi → Codex/Claude 编排、实时 TUI 审批/基线对话框及任意崩溃恢复尚未完整验证。
@@ -125,4 +127,10 @@ npm run test:list # 只列本地选集，不构建或执行测试
 
 修改代码后重新构建，并在 Pi 中执行 `/reload`。自动化测试不等于完整终端验收。常规调用以工具说明为准；审批、结果读取、工作区和恢复操作见[操作参考技能](skills/delegate-cli-agents/SKILL.md)。历史通知和会话不重写，可将旧通知中的原实例/run ID 交给新查询工具。
 
-生命周期管理参考 [Paseo](https://github.com/getpaseo/paseo)，状态区与对话界面参考 [pi-subagents](https://github.com/tintinweb/pi-subagents)。
+## 致谢
+
+- [Paseo](https://github.com/getpaseo/paseo)：生命周期设计参考；Pi 工具调用与对话的关联逻辑改编自其[固定版本的映射器](https://github.com/getpaseo/paseo/blob/99fc204c55c8c1666477282eeba562ba87a3135f/packages/server/src/server/agent/providers/pi/extensions/rpiv-ask-user-question/index.ts)（Apache-2.0）。
+- [@juicesharp/rpiv-ask-user-question 2.12.0](https://www.npmjs.com/package/@juicesharp/rpiv-ask-user-question/v/2.12.0)：子 Pi 内置工具的单问题 RPC 选项／自定义回答流程来源（MIT）。
+- [pi-subagents](https://github.com/tintinweb/pi-subagents)：状态区与对话界面的设计参考。
+
+复用代码的版权与许可原文集中放在 [README 的致谢折叠区](README.md#credits)，相关源码保留了修改说明。

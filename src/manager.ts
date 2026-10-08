@@ -316,7 +316,7 @@ export class AgentManager {
           // Carry the live policy, including native human-only restrictions, without rewriting
           // stored reports. Resolved requests were filtered above and must not be re-announced.
           reports.push(pending ? { ...report, request: { method: pending.method, options: pending.options,
-            parentPolicy: pending.parentPolicy, humanOnly: pending.humanOnly } } : { ...report });
+            parentPolicy: pending.parentPolicy, humanOnly: pending.humanOnly, ...(pending.kind ? { kind: pending.kind } : {}) } } : { ...report });
         } catch (error) {
           console.error(`[pi-cli-subagents] Could not read report for subagent ${state.id}; inspect ${reportFile}:`, error);
         }

@@ -128,13 +128,14 @@ async function run(dir: string, runId: string): Promise<void> {
         // A refusal is always safe. Producing an authorization is not: without a policy that states
         // what a response means, the parent may only refuse and the human answers the request.
         const refusal = q.method === "confirm" && input.confirmed === false;
-        const permitted = q.method === "confirm" ? q.parentPolicy?.confirm === true : q.parentPolicy?.values?.includes(input.value!) === true;
+        const textAnswer = q.kind === "question" && q.method === "input" && q.parentPolicy?.text === true && q.humanOnly !== true;
+        const permitted = q.method === "confirm" ? q.parentPolicy?.confirm === true : textAnswer || q.parentPolicy?.values?.includes(input.value!) === true;
         if (!refusal && !permitted) throw new Error("This request requires human approval; the parent agent may only refuse it, not approve it");
       }
       // Record intent before sending: a failed log write must not silently approve an action.
       appendFileSync(path.join(runDir, "permissions.jsonl"), `${JSON.stringify({ time: Date.now(), runId, questionId: q.id,
         actor: input.actor ?? "human", decision: input.cancelled ? "cancelled" : q.method === "confirm" ? input.confirmed ? "approved" : "denied" : "answered",
-        delivery: "attempted", ...(input.reason ? { reason: input.reason.slice(0, 2000) } : {}),
+        delivery: "attempted", ...(q.kind ? { kind: q.kind } : {}), ...(input.reason ? { reason: input.reason.slice(0, 2000) } : {}),
         ...(q.method === "select" && input.value !== undefined ? { selectedOption: input.value } : {}),
       })}\n`, { mode: 0o600 });
       await rpc.reply(input);

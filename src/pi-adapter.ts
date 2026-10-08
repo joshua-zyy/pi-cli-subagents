@@ -2,7 +2,9 @@ import path from "node:path";
 import { mkdirSync } from "node:fs";
 import { open } from "node:fs/promises";
 import { StringDecoder } from "node:string_decoder";
+import { fileURLToPath } from "node:url";
 import { PiProcess, type WireRecord, type Exit } from "./pi-process.js";
+import { ASK_PARENT_TOOL, parentQuestionDialog, readParentQuestion, type ParentQuestion } from "./pi-question.js";
 import type { AdapterOptions, CliAdapter, InteractionReply } from "./cli-adapter.js";
 import type { Delivery, NativeSession, Question, SessionHandle } from "./types.js";
 
@@ -38,12 +40,12 @@ export async function inspectPiSession(session: SessionHandle): Promise<void> {
 }
 
 /**
- * The only Pi interaction contract this extension has audited: the option set of
+ * The external Pi permission contract this extension has audited: the option set of
  * @firstpick/pi-extension-safety-guard. "Block" and "Allow once" settle one command, while
  * "Allow for this session" and "Always allow in this cwd" write a wider grant (the last one
- * persists under the agent directory). A Pi UI request carries no source identifier, so this is
- * the only Pi case where the meaning of a response is known; every other Pi interaction stays
- * answerable by the human alone.
+ * persists under the agent directory). A Pi UI request carries no source identifier.
+ * Only this external contract and our explicitly loaded question tool have known response
+ * semantics. Every other Pi interaction stays answerable by the human alone.
  */
 const AUDITED_PI_OPTIONS = ["Block", "Allow once", "Allow for this session", "Always allow in this cwd"];
 const AUDITED_PI_PARENT_VALUES = ["Block", "Allow once"];
@@ -59,6 +61,7 @@ export class PiAdapter implements CliAdapter {
   readonly closed: Promise<Exit>;
   private assistant?: WireRecord;
   private readonly sessionDir: string;
+  private readonly parentCalls = new Map<string, { question: ParentQuestion; dialogs: Set<string> }>();
   get pid(): number | undefined { return this.rpc.child.pid; }
 
   constructor(private readonly options: AdapterOptions) {
@@ -66,7 +69,8 @@ export class PiAdapter implements CliAdapter {
     this.sessionDir = path.join(path.dirname(options.logFile), "..", "..", "sessions");
     mkdirSync(this.sessionDir, { recursive: true, mode: 0o700 });
     const { spec } = options;
-    const args = ["--mode", "rpc", "--session-dir", this.sessionDir, "--append-system-prompt", `# Delegated role: ${spec.roleName}\n${spec.role.instructions}`];
+    const args = ["--mode", "rpc", "--session-dir", this.sessionDir,
+      "--extension", fileURLToPath(new URL("./pi-question-tool.js", import.meta.url)), "--append-system-prompt", `# Delegated role: ${spec.roleName}\n${spec.role.instructions}`];
     if (options.session?.cli === "pi") args.push("--session", options.session.sessionFile);
     else args.push("--name", `${spec.roleName}:${spec.id}`);
     if (spec.role.provider) args.push("--provider", spec.role.provider);
@@ -77,6 +81,19 @@ export class PiAdapter implements CliAdapter {
   }
 
   private event(record: WireRecord): void {
+    // Tool/dialog correlation adapted from Paseo's rpiv-ask-user-question mapper (Apache-2.0).
+    // Copyright (c) 2025-present Mohamed Boudra; see README.md#credits.
+    // Modified: per-call tracking and exact, versioned dialogs instead of claiming the next UI.
+    if (record.toolName === ASK_PARENT_TOOL && typeof record.toolCallId === "string") {
+      if (record.type === "tool_execution_start") {
+        const question = readParentQuestion(record.args);
+        if (question) this.parentCalls.set(record.toolCallId, { question, dialogs: new Set() });
+      } else if (record.type === "tool_execution_end") {
+        const active = this.parentCalls.get(record.toolCallId);
+        this.parentCalls.delete(record.toolCallId);
+        for (const id of active?.dialogs ?? []) this.options.onEvent({ type: "resolved", id });
+      }
+    }
     if (record.type === "message_end" && typeof record.message === "object" && record.message?.role === "assistant") this.assistant = record.message;
     if (record.type === "agent_start" || record.type === "tool_execution_start" || record.type === "tool_execution_end")
       this.options.onEvent({ type: "activity", detail: record.type === "agent_start" ? "agent_start" : `${record.type}: ${record.toolName}` });
@@ -88,6 +105,21 @@ export class PiAdapter implements CliAdapter {
         ...auditedParentPolicy(record.method, record.options),
         ...(typeof record.timeout === "number" ? { expiresAt: Date.now() + record.timeout } : {}),
       };
+      if ((record.method === "select" || record.method === "input") && record.message === undefined && record.prefill === undefined) {
+        for (const [callId, active] of this.parentCalls) {
+          const expected = parentQuestionDialog(callId, active.question, record.method);
+          const matches = record.method === "select"
+            ? Array.isArray(record.options) && record.options.length === expected.options!.length && record.options.every((value, i) => value === expected.options![i])
+            : record.options === undefined && (record.placeholder === undefined || record.placeholder === expected.placeholder);
+          if (record.title !== expected.title || !matches) continue;
+          question.title = expected.displayTitle;
+          question.kind = "question";
+          question.humanOnly = false;
+          question.parentPolicy = record.method === "select" ? { values: expected.options } : { text: true };
+          active.dialogs.add(question.id);
+          break;
+        }
+      }
       this.options.onEvent({ type: "question", question });
     }
     if (record.type === "agent_settled") {
@@ -108,7 +140,10 @@ export class PiAdapter implements CliAdapter {
   }
   async start(message: string): Promise<void> { await this.rpc.request({ type: "prompt", message }); }
   async send(message: string, mode: Delivery): Promise<void> { await this.rpc.request({ type: "prompt", message, streamingBehavior: mode }); }
-  async reply(answer: InteractionReply): Promise<void> { await this.rpc.reply({ id: answer.id, value: answer.value, confirmed: answer.confirmed, cancelled: answer.cancelled }); }
+  async reply(answer: InteractionReply): Promise<void> {
+    await this.rpc.reply({ id: answer.id, value: answer.value, confirmed: answer.confirmed, cancelled: answer.cancelled });
+    for (const active of this.parentCalls.values()) active.dialogs.delete(answer.id);
+  }
   end(): Promise<{ exit: Exit; forced: boolean }> { return this.rpc.end(); }
   stop(): Promise<{ exit: Exit; forced: boolean }> { return this.rpc.stop(); }
 }

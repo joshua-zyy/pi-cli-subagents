@@ -21,7 +21,8 @@ const quoted = (values: readonly string[]): string =>
 /** A native human-only policy can still list refusal choices the parent may submit. */
 function needsHumanApproval(request: Report["request"]): boolean {
   return request?.humanOnly === true || !(request?.method === "confirm"
-    ? request.parentPolicy?.confirm === true : request?.parentPolicy?.values?.length);
+    ? request.parentPolicy?.confirm === true : request?.parentPolicy?.values?.length ||
+      request?.kind === "question" && request.method === "input" && request.parentPolicy?.text === true);
 }
 
 /**
@@ -38,6 +39,10 @@ function waitingAnswerLine(report: Report): string {
   const human = `/agent-reply ${report.agentId} ${id}`;
   const header = `\nQuestion ID: ${id} (${request.method}${offered}).`;
   const review = " Handle this request now with subagent_reply within the user's task authorization; do not wait for routine human approval.";
+  if (request.kind === "question" && !needsHumanApproval(request)) {
+    const answer = request.method === "input" ? "value as answer text" : quoted(request.parentPolicy?.values ?? []);
+    return `${header} This is a task question, not a permission request. You may submit ${answer}, or cancelled. Answer with subagent_reply using the authorized task context.`;
+  }
   if (request.method === "confirm") return !needsHumanApproval(request)
     ? `${header} You may submit confirmed: true or false, or cancelled.${review}`
     : `${header} You may only refuse it (confirmed: false or cancelled); the human answers it with ${human}.`;
