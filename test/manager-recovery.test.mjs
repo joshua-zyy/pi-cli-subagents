@@ -7,14 +7,14 @@ import { fileURLToPath } from 'node:url';
 import { AgentManager } from '../dist/manager.js';
 import { readJson, writeJson, waitUntil } from '../dist/storage.js';
 import { deliverReports } from '../dist/notifier.js';
+import { tempDir } from './helpers/tmp.mjs';
 const launch = { command: process.execPath, args: [fileURLToPath(new URL('./fixtures/pi.mjs', import.meta.url))] };
-fs.mkdirSync('.test-output', { recursive: true });
 const released = (m, id) => waitUntil('terminal owner release', () => {
   const s = m.get(id);
   return ['completed', 'failed', 'stopped'].includes(s.phase) && !fs.existsSync(path.join(m.root, id, 'owner.lock')) ? s : undefined;
 }, 10000);
 function setup(t) {
-  const cwd = fs.mkdtempSync(path.resolve('.test-output/manager-recovery-'));
+  const cwd = tempDir('manager-recovery');
   const m = new AgentManager(path.join(cwd, 'parent.jsonl'), launch);
   t.after(async () => {
     for (const s of m.list()) if (s.runId && fs.existsSync(path.join(m.root, s.id, 'owner.lock'))) await m.close(s.id);

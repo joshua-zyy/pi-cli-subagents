@@ -1,11 +1,8 @@
 // Local CLI discovery: what is installed, and which models each CLI publishes about itself.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import fs from 'node:fs';
-import path from 'node:path';
 import { EMPTY_CATALOG, detectClis, modelEfforts, parseCodexModels, parsePiModels } from '../dist/cli-discovery.js';
-
-const output = path.resolve('.test-output'); fs.mkdirSync(output, { recursive: true });
+import { tempDir } from './helpers/tmp.mjs';
 
 test('the Pi table and the Codex catalog are read from the CLIs’ own output', () => {
   const table = ['provider          model                         context  max-out  thinking  images',
@@ -42,7 +39,7 @@ test('availability follows PATH instead of a hardcoded list', () => {
   assert.equal(before.pi, true, 'Pi is the host process, so it is always available');
   const saved = process.env.PATH;
   try {
-    process.env.PATH = fs.mkdtempSync(path.join(output, 'empty-path-'));
+    process.env.PATH = tempDir('empty-path');
     assert.deepEqual(detectClis(), { pi: true, codex: false, claude: false }, 'an empty PATH installs nothing');
   } finally { process.env.PATH = saved; }
   assert.deepEqual(detectClis(), before, 'restoring PATH restores the answer');

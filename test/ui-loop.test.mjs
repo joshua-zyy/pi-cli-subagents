@@ -10,15 +10,15 @@ import extension from '../dist/index.js';
 import { waitUntil, processAlive } from '../dist/storage.js';
 import { AgentManager } from '../dist/manager.js';
 import { Editor } from '@earendil-works/pi-tui';
+import { tempDir } from './helpers/tmp.mjs';
 
 const fixture = fileURLToPath(new URL('./fixtures/pi.mjs', import.meta.url));
-const root = path.resolve('.test-output'); fs.mkdirSync(root, { recursive: true });
 const theme = { fg: (_color, text) => text, bold: (text) => text };
 const keys = { up: '\u001b[A', down: '\u001b[B', enter: '\r', escape: '\u001b' };
 const json = (text) => JSON.parse(text.slice(text.indexOf('{'), text.lastIndexOf('}') + 1));
 
 function harness(t) {
-  const cwd = fs.mkdtempSync(path.join(root, 'ui-loop-'));
+  const cwd = tempDir('ui-loop');
   const parent = path.join(cwd, 'parent.jsonl'); fs.writeFileSync(parent, '{}\n');
   const state = {
     cwd, parent, entries: [], messages: [], notices: [], widgetCalls: [], editors: [], confirms: [],

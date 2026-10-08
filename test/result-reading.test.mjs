@@ -8,12 +8,12 @@ import extension from '../dist/index.js';
 import { AgentManager } from '../dist/manager.js';
 import { deliverReports } from '../dist/notifier.js';
 import { readJson, writeJson } from '../dist/storage.js';
+import { tempDir } from './helpers/tmp.mjs';
 
-const output = path.resolve('.test-output'); fs.mkdirSync(output, { recursive: true });
 const evidence = 'VERDICT: BLOCK\nEVIDENCE: src/a.ts:12\nUNVERIFIED: real CLI';
 const longText = 'HEAD\n' + 'x'.repeat(13000) + '\nMIDDLE EVIDENCE\n' + '中文🙂\n'.repeat(1800) + '\n' + evidence;
 function harness() {
-  const cwd = fs.mkdtempSync(path.join(output, 'result-reading-')), parent = path.join(cwd, 'parent.jsonl');
+  const cwd = tempDir('result-reading'), parent = path.join(cwd, 'parent.jsonl');
   fs.writeFileSync(parent, '{}\n');
   const manager = new AgentManager(parent, { command: process.execPath, args: [] });
   const tools = new Map(), sent = [], entries = [];

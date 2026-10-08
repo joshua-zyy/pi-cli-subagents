@@ -7,10 +7,10 @@ import { randomBytes } from 'node:crypto';
 import { AgentManager } from '../dist/manager.js';
 import { defaultRoles } from '../dist/roles.js';
 import { processAlive, waitUntil } from '../dist/storage.js';
+import { tempDir } from './helpers/tmp.mjs';
 
 const cli = process.env.PI_CLI_PATH ?? path.join(path.dirname(fileURLToPath(import.meta.resolve('@earendil-works/pi-coding-agent'))), 'bundle', 'cli.js');
-const root = path.resolve('.test-output'); fs.mkdirSync(root, {recursive:true});
-const cwd = fs.mkdtempSync(path.join(root, 'real-'));
+const cwd = tempDir('real');
 const parent = path.join(cwd, 'parent.jsonl'); fs.writeFileSync(parent,'{}\n');
 const manager = new AgentManager(parent,{command:process.execPath,args:[cli]});
 const marker = `MARKER-${randomBytes(5).toString('hex')}`;

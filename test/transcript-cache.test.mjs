@@ -7,15 +7,15 @@ import path from 'node:path';
 import { syncBuiltinESMExports } from 'node:module';
 import { TranscriptCache } from '../dist/ui/transcript-cache.js';
 import { TranscriptWindow } from '../dist/ui/transcript-window.js';
+import { tempDir } from './helpers/tmp.mjs';
 
-const root = path.resolve('.test-output'); fs.mkdirSync(root, { recursive: true });
 const record = text => ({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text }], usage: { input: 1, output: 1, totalTokens: 2 } } });
 const line = value => JSON.stringify(value) + '\n';
 const append = (file, text) => fs.appendFileSync(file, line(record(text)));
 const identity = (over = {}) => ({ parentFile: 'C:/parent/session.jsonl', agentId: 'agent-1', cli: 'pi', nativeId: 'native-1', ...over });
 
 function workspace(t) {
-  const dir = fs.mkdtempSync(path.join(root, 'cache-'));
+  const dir = tempDir('cache');
   t.after(() => fs.rmSync(dir, { recursive: true, force: true, maxRetries: 4, retryDelay: 30 }));
   const file = path.join(dir, 'run-1', 'events.jsonl'); fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, '');
   return { dir, file, files: () => [file] };

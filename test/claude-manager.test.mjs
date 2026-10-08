@@ -7,11 +7,12 @@ import { AgentManager } from '../dist/manager.js';
 import { loadRoles } from '../dist/roles.js';
 import { claudeLaunch } from '../dist/claude-launch.js';
 import { waitUntil, processAlive } from '../dist/storage.js';
+import { tempDir } from './helpers/tmp.mjs';
 const fixture = fileURLToPath(new URL('./fixtures/claude.mjs', import.meta.url));
 const pi = fileURLToPath(new URL('./fixtures/pi.mjs', import.meta.url));
 const role = {cli:'claude',description:'fixture',instructions:'Only assigned work'};
 const setup = t => {
-  const cwd=fs.mkdtempSync(path.resolve('.test-output/claude-manager-')),home=path.join(cwd,'home'),parent=path.join(cwd,'parent.jsonl');
+  const cwd=tempDir('claude-manager'),home=path.join(cwd,'home'),parent=path.join(cwd,'parent.jsonl');
   fs.mkdirSync(home);fs.writeFileSync(path.join(home,'fixture-home'),'');fs.writeFileSync(parent,'{}\n');
   const launch={command:process.execPath,args:[pi]},options={launch:{command:process.execPath,args:[fixture]},home};
   const m=new AgentManager(parent,launch,undefined,options);

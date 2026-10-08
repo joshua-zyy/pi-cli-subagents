@@ -3,10 +3,10 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { TranscriptReader } from '../dist/ui/transcript.js';
+import { tempDir } from './helpers/tmp.mjs';
 
-const root = path.resolve('.test-output'); fs.mkdirSync(root, { recursive: true });
 function fixture(t) {
-  const dir = fs.mkdtempSync(path.join(root, 'transcript-'));
+  const dir = tempDir('transcript');
   const file = path.join(dir, 'events.jsonl'); fs.writeFileSync(file, '');
   const reader = new TranscriptReader();
   const append = (...records) => fs.appendFileSync(file, records.map(r => JSON.stringify(r) + '\n').join(''));

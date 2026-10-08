@@ -8,13 +8,13 @@ import { getAgentDir } from '@earendil-works/pi-coding-agent';
 import extension from '../dist/index.js';
 import { AgentManager } from '../dist/manager.js';
 import { readJson, writeJson, waitUntil } from '../dist/storage.js';
+import { tempDir } from './helpers/tmp.mjs';
 
 const fixture = fileURLToPath(new URL('./fixtures/pi.mjs', import.meta.url));
 const launch = { command: process.execPath, args: [fixture] };
-fs.mkdirSync('.test-output', { recursive: true });
 
 function setup(t) {
-  const cwd = fs.mkdtempSync(path.resolve('.test-output/tool-receipts-'));
+  const cwd = tempDir('tool-receipts');
   const home = path.join(cwd, 'agent-home'); fs.mkdirSync(home);
   const oldHome = process.env.PI_CODING_AGENT_DIR;
   process.env.PI_CODING_AGENT_DIR = home;

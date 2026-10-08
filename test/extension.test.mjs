@@ -7,9 +7,9 @@ import { execFileSync } from 'node:child_process';
 import extension, { inheritParentModel } from '../dist/index.js';
 import { waitUntil, processAlive } from '../dist/storage.js';
 import { AgentManager } from '../dist/manager.js';
+import { tempDir } from './helpers/tmp.mjs';
 
 const fixture = fileURLToPath(new URL('./fixtures/pi.mjs', import.meta.url));
-const root = path.resolve('.test-output'); fs.mkdirSync(root, { recursive: true });
 
 // Three two-second report windows plus multiple Git pipelines make 20 seconds
 // too small for this aggregate workflow under parallel Windows load. Transport
@@ -17,7 +17,7 @@ const root = path.resolve('.test-output'); fs.mkdirSync(root, { recursive: true 
 test('extension tools implement → separate review → resume same implementer; report only to original parent', { timeout: 45_000 }, async (t) => {
   const savedArgv = process.argv[1];
   process.argv[1] = fixture;
-  const cwd = fs.mkdtempSync(path.join(root, 'extension-'));
+  const cwd = tempDir('extension');
   const parent = path.join(cwd, 'parent.jsonl'); fs.writeFileSync(parent, '{}\n');
   const otherParent = path.join(cwd, 'other.jsonl'); fs.writeFileSync(otherParent, '{}\n');
   let currentFile = parent;

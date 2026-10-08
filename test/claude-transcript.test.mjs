@@ -1,6 +1,7 @@
 import test from 'node:test';import assert from 'node:assert/strict';import fs from 'node:fs';import path from 'node:path';
 import {TranscriptReader} from '../dist/ui/transcript.js';
-const session_id='native';const root=fs.mkdtempSync(path.resolve('.test-output/claude-transcript-'));
+import { tempDir } from './helpers/tmp.mjs';
+const session_id='native';const root=tempDir('claude-transcript');
 async function snapshot(records,more=[]){const files=[records,...more].map((rows,i)=>{const f=path.join(root,`${crypto.randomUUID()}-${i}.jsonl`);fs.writeFileSync(f,rows.map(JSON.stringify).join('\n')+'\n');return f;});const r=new TranscriptReader('claude',session_id);let s;do{s=await r.read(files);}while(s.loading);return s;}
 const result=(input,output,cost)=>({type:'result',subtype:'success',is_error:false,session_id,uuid:crypto.randomUUID(),modelUsage:{model:{inputTokens:input,outputTokens:output,cacheReadInputTokens:20,cacheCreationInputTokens:3}},total_cost_usd:cost});
 test('Claude transcript merges streaming text with final snapshots and tool results',async()=>{

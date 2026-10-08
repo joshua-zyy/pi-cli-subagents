@@ -6,11 +6,11 @@ import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { AgentManager } from '../dist/manager.js';
 import { readJson, writeJson, waitUntil } from '../dist/storage.js';
+import { tempDir } from './helpers/tmp.mjs';
 const pi = fileURLToPath(new URL('./fixtures/pi.mjs', import.meta.url));
 const codex = fileURLToPath(new URL('./fixtures/codex.mjs', import.meta.url));
-fs.mkdirSync('.test-output', { recursive: true });
 function setup(t) {
-  const cwd = fs.mkdtempSync(path.resolve('.test-output/workspace-history-')), base = path.join(cwd, 'base'); fs.mkdirSync(base);
+  const cwd = tempDir('workspace-history'), base = path.join(cwd, 'base'); fs.mkdirSync(base);
   const git = (...args) => execFileSync('git', ['-c', 'core.hooksPath=', '-C', base, ...args], { encoding: 'utf8', windowsHide: true });
   git('init', '-q'); git('config', 'user.name', 'Test'); git('config', 'user.email', 'test@invalid'); git('config', 'core.autocrlf', 'false');
   fs.writeFileSync(path.join(base, 'input.txt'), 'committed\n'); git('add', '.'); git('commit', '-qm', 'baseline');

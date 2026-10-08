@@ -5,13 +5,12 @@ import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { WorkspaceStore } from '../dist/workspace.js';
+import { tempDir } from './helpers/tmp.mjs';
 
-const output = path.resolve('.test-output');
-fs.mkdirSync(output, { recursive: true });
 const git = (cwd, ...args) => execFileSync('git', ['-C', cwd, ...args], { encoding: 'utf8', windowsHide: true });
 const put = (root, name, text) => { fs.mkdirSync(path.dirname(path.join(root, name)), { recursive: true }); fs.writeFileSync(path.join(root, name), text); };
 function setup() {
-  const root = fs.mkdtempSync(path.join(output, 'workspace-'));
+  const root = tempDir('workspace');
   const repo = path.join(root, 'repo'); fs.mkdirSync(repo);
   git(repo, 'init', '-q');
   git(repo, 'config', 'user.name', 'Workspace Test'); git(repo, 'config', 'user.email', 'workspace@example.invalid');
