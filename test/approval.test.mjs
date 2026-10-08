@@ -5,6 +5,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import extension from '../dist/index.js';
 import { AgentManager } from '../dist/manager.js';
+import { deliverReports } from '../dist/notifier.js';
 import { waitUntil, processAlive } from '../dist/storage.js';
 
 const fixture = fileURLToPath(new URL('./fixtures/pi.mjs', import.meta.url));
@@ -98,6 +99,15 @@ test('permission tools reject foreign parents, missing persistent sessions and i
   await waitUntil('guard waiting',()=>manager.get(guard.id).phase==='waiting');
   const guardQuestion=(await waiting()).find(entry=>entry.id===guard.id).questions[0];
   assert.deepEqual(guardQuestion.options,['Block','Allow once','Allow for this session','Always allow in this cwd']);
+  // The offering reaches the parent's notification, so it can answer without guessing.
+  const guardReport=manager.reports().find(report=>report.agentId===guard.id&&report.status==='waiting');
+  assert.deepEqual(guardReport.request,
+    {method:'select',options:['Block','Allow once','Allow for this session','Always allow in this cwd'],parentPolicy:{values:['Block','Allow once']}});
+  const sent=[];
+  deliverReports(manager,{sendMessage:message=>sent.push(message)},{sessionManager:{getEntries:()=>[]},ui:{notify(){},setStatus(){}}},new Set(),Date.now());
+  const guardContent=sent.find(message=>message.content.includes(guard.id)).content;
+  assert.match(guardContent,/offered: "Block", "Allow once", "Allow for this session", "Always allow in this cwd"/);
+  assert.match(guardContent,/The rest \("Allow for this session", "Always allow in this cwd"\) need the human: \/agent-reply \S+ permission-1/);
   for(const forbidden of ['Allow for this session','Always allow in this cwd']){
     await assert.rejects(invoke('subagent_reply',{id:guard.id,questionId:'permission-1',value:forbidden,reason:'standing grant'}),/parent|human/i);
     assert.equal(manager.get(guard.id).phase,'waiting','a refused standing grant must leave the request pending');
