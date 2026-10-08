@@ -313,9 +313,10 @@ export class AgentManager {
           if (!report || report.parentFile !== this.parentFile) continue;
           const pending = report.status === "waiting" ? state.questions.find((q) => q.id === report.questionId) : undefined;
           if (report.status === "waiting" && !pending) continue;
-          // Carry the request shape so the notification can say what the parent may submit; a
-          // question the worker could not resolve is reported without it and stays human-only.
-          reports.push(pending ? { ...report, request: { method: pending.method, options: pending.options, parentPolicy: pending.parentPolicy } } : { ...report });
+          // Carry the live policy, including native human-only restrictions, without rewriting
+          // stored reports. Resolved requests were filtered above and must not be re-announced.
+          reports.push(pending ? { ...report, request: { method: pending.method, options: pending.options,
+            parentPolicy: pending.parentPolicy, humanOnly: pending.humanOnly } } : { ...report });
         } catch (error) {
           console.error(`[pi-cli-subagents] Could not read report for subagent ${state.id}; inspect ${reportFile}:`, error);
         }

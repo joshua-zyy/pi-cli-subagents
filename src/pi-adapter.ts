@@ -51,7 +51,7 @@ const AUDITED_PI_PARENT_VALUES = ["Block", "Allow once"];
 function auditedParentPolicy(method: unknown, options: unknown): Pick<Question, "parentPolicy" | "humanOnly"> {
   const audited = method === "select" && Array.isArray(options)
     && options.length === AUDITED_PI_OPTIONS.length && AUDITED_PI_OPTIONS.every((value, index) => options[index] === value);
-  return { humanOnly: true, ...(audited ? { parentPolicy: { values: AUDITED_PI_PARENT_VALUES } } : {}) };
+  return audited ? { humanOnly: false, parentPolicy: { values: AUDITED_PI_PARENT_VALUES } } : { humanOnly: true };
 }
 
 export class PiAdapter implements CliAdapter {

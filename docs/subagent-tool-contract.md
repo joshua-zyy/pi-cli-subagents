@@ -105,7 +105,7 @@ Retain the parameters: `id`, `questionId` and `reason` are required; supply exac
 | select | The value of a currently valid option, or cancellation |
 | input/editor | Text in value, or cancellation |
 
-The request must belong to the current parent session and specified instance and must not be resolved or expired. The tool implementation sets the actor to parent; the model cannot supply `actor: human`. humanOnly approvals remain with the human entry point; denial/cancellation may still be handled where the request allows it.
+The request must belong to the current parent session and specified instance and must not be resolved or expired. The tool implementation sets the actor to parent; the model cannot supply `actor: human`. The parent should handle task-authorized one-action approvals and refusals itself, using the request’s stated `parentPolicy`. Escalate only missing authorization or native human-only approvals, with the specific decision needed; the presence of a wider offered option is not a reason to defer an available in-scope one-action choice. Unknown contracts remain human-only for approval, while refusal/cancellation stays available.
 
 Return the current state and actual response-receipt result, without claiming that the approved operation completed. Preserve existing local decision records. Ordinary send operations cannot bypass these checks.
 
@@ -153,7 +153,7 @@ Catalog generation must respect project trust and configuration precedence. The 
 
 Results and actionable blockers use the existing automatic notification channel; the child does not need a separate reporting tool. Notifications bind the original parent session, instance and run and provide the new result query entry point. Long originals use a preview plus full-text pagination, without deleting evidence.
 
-Notification semantics: an idle parent may be triggered to handle the event; a busy parent receives queued follow-ups, not steering messages. `deliverReports` now uses followUp; this is distinct from `subagent.send.mode`. The queue is not a persisted receipt. Resuming the original parent can redeliver unrecorded notifications, while recorded notifications are deduplicated by ID. This is not an exactly-once guarantee under every failure mode.
+Notification semantics: an idle parent may be triggered to handle the event. A batch containing a waiting request uses `steer`, reaching a busy parent before its next model request without aborting an in-flight tool; other batches use `followUp`. This differs from the original all-follow-up implementation and is independent of `subagent.send.mode`. The queue is not a persisted receipt. Resuming the original parent can redeliver unrecorded notifications, while recorded notifications are deduplicated by ID. This is not an exactly-once guarantee under every failure mode.
 
 The extension does not decide that the parent must implement, review or integrate after receiving a result. This phase adds no general-purpose proactive child-to-parent messaging tool.
 
@@ -169,7 +169,7 @@ Preserve original sessions, instance IDs, run IDs, role snapshots and workspace 
 | Lifecycle mapping | Start creates a new instance; send continues the original identity; unsupported modes fail explicitly; timeouts/rejections do not trigger automatic replacement |
 | Queries and replies | Queries have no execution side effects; full results can be reconstructed; reply ownership, expiration, type and humanOnly behavior do not regress |
 | Workspaces | Two instances use separate worktrees; one workspace supports sequential handoff; conflict rejection, incremental integration and baseline continuation remain correct |
-| Notifications and compatibility | Delivery to the original parent; busy follow-up queuing; recovery redelivery; old instances and runs remain readable; historical notifications are unchanged |
+| Notifications and compatibility | Delivery to the original parent; waiting-request steering and routine follow-up queuing; recovery redelivery; old instances and runs remain readable; historical notifications are unchanged |
 
 Issues such as roles being overridable but not currently removable, uncertain startup receipts, and corrupt reports affecting a notification batch are separate from merging tools. Verify them with counterexamples and separate increments rather than packing every reliability fix into a tool rename.
 

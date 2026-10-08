@@ -36,6 +36,7 @@ test('parent can explicitly review a child request while the human command remai
   assert.equal(pending.length,1); assert.equal(pending[0].id,id);
   assert.equal(pending[0].questions[0].id,'permission-1');
   assert.equal(pending[0].questions[0].message,'Requires a human answer');
+  assert.equal(pending[0].questions[0].humanOnly,true,'unknown Pi contracts must still require the human for approval');
   await assert.rejects(invoke('subagent_reply',{id,questionId:'other',confirmed:true,reason:'not the current request'}),/ended|exist/);
   await assert.rejects(invoke('subagent_reply',{id,questionId:'permission-1',value:'bad',reason:'wrong answer type'}),/type/);
   assert.equal(manager.get(id).phase,'waiting');
@@ -99,15 +100,17 @@ test('permission tools reject foreign parents, missing persistent sessions and i
   await waitUntil('guard waiting',()=>manager.get(guard.id).phase==='waiting');
   const guardQuestion=(await waiting()).find(entry=>entry.id===guard.id).questions[0];
   assert.deepEqual(guardQuestion.options,['Block','Allow once','Allow for this session','Always allow in this cwd']);
+  assert.equal(guardQuestion.humanOnly,false,'an audited one-action policy must not tell the parent to wait for a human');
   // The offering reaches the parent's notification, so it can answer without guessing.
   const guardReport=manager.reports().find(report=>report.agentId===guard.id&&report.status==='waiting');
   assert.deepEqual(guardReport.request,
-    {method:'select',options:['Block','Allow once','Allow for this session','Always allow in this cwd'],parentPolicy:{values:['Block','Allow once']}});
+    {method:'select',options:['Block','Allow once','Allow for this session','Always allow in this cwd'],humanOnly:false,parentPolicy:{values:['Block','Allow once']}});
   const sent=[];
   deliverReports(manager,{sendMessage:message=>sent.push(message)},{sessionManager:{getEntries:()=>[]},ui:{notify(){},setStatus(){}}},new Set(),Date.now());
   const guardContent=sent.find(message=>message.content.includes(guard.id)).content;
   assert.match(guardContent,/offered: "Block", "Allow once", "Allow for this session", "Always allow in this cwd"/);
-  assert.match(guardContent,/The rest \("Allow for this session", "Always allow in this cwd"\) need the human: \/agent-reply \S+ permission-1/);
+  assert.match(guardContent,/Handle this request now with subagent_reply within the user's task authorization/);
+  assert.match(guardContent,/The other options \("Allow for this session", "Always allow in this cwd"\) require a wider grant; involve the human only if that grant is needed: \/agent-reply \S+ permission-1/);
   for(const forbidden of ['Allow for this session','Always allow in this cwd']){
     await assert.rejects(invoke('subagent_reply',{id:guard.id,questionId:'permission-1',value:forbidden,reason:'standing grant'}),/parent|human/i);
     assert.equal(manager.get(guard.id).phase,'waiting','a refused standing grant must leave the request pending');

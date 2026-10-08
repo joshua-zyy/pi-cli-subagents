@@ -11,9 +11,9 @@ no fixed role sequence or report format is required.
 
 ## Notifications and results
 
-Reports return automatically to the original parent session. Busy parents receive them as follow-ups
-after their current execution; idle parents can start a new turn. Continue other work or end the turn
-while waiting rather than polling or sleeping for completion.
+Reports return automatically to the original parent session. Waiting requests steer a busy parent
+before its next model request; other batches follow up after its current execution. Idle parents can
+start a new turn. Continue other work or end the turn rather than polling or sleeping for completion.
 
 A notification or `subagent_query({ action: "get", id })` may contain only a preview. If it is truncated,
 read the missing text with `result` before claiming a complete review. Receiving a completed report is
@@ -24,9 +24,10 @@ replays unrecorded reports with their original run IDs; recorded reports are not
 
 ## Pending requests
 
-Inspect the current request with `subagent_query({ action: "get", id })` before answering: use its
-request type and exact offered options, not guesses from the notification. Send the answer through
-`subagent_reply`, not `subagent` send. See [references/approvals.md](references/approvals.md) for
+Handle task-scoped requests yourself; do not pass routine approvals to the human. Inspect the current
+request with `subagent_query({ action: "get", id })` when its content or policy is missing, truncated or
+stale. Use its type and exact permitted options, not guesses. Send the answer through `subagent_reply`,
+not `subagent` send. See [references/approvals.md](references/approvals.md) for
 single-action authorization and human-only requests.
 
 ## Managed worktrees
