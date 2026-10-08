@@ -17,7 +17,7 @@ function harness() {
   fs.writeFileSync(parent, '{}\n');
   const manager = new AgentManager(parent, { command: process.execPath, args: [] });
   const tools = new Map(), sent = [], entries = [];
-  const ctx = { cwd, isProjectTrusted: () => false, sessionManager: { getSessionFile: () => parent, getEntries: () => entries } };
+  const ctx = { cwd, isProjectTrusted: () => false, sessionManager: { getSessionFile: () => parent, getEntries: () => entries }, ui: { notify() {}, setStatus() {} } };
   const pi = { on() {}, registerTool: tool => tools.set(tool.name, tool), registerCommand() {}, registerShortcut() {}, registerMessageRenderer() {},
     sendMessage(message, options) { sent.push({ message, options }); } };
   extension(pi);

@@ -1,6 +1,6 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { AgentManager } from "./manager.js";
-import type { AgentView } from "./types.js";
+import type { AgentView, Report } from "./types.js";
 
 export const customType = "cli-subagents-report";
 
@@ -11,6 +11,55 @@ export const customType = "cli-subagents-report";
 const REPORT_HEAD = 2000;
 const REPORT_TAIL = 3600;
 const REPORT_LIMIT = REPORT_HEAD + REPORT_TAIL;
+const WAITING_STATUS_KEY = "subagent-waiting";
+
+/** A request may offer many values, so the rendered list stays bounded. */
+const OFFERED_LIMIT = 12;
+const quoted = (values: readonly string[]): string =>
+  `${values.slice(0, OFFERED_LIMIT).map((value) => JSON.stringify(value)).join(", ")}${values.length > OFFERED_LIMIT ? ", …" : ""}`;
+
+/**
+ * What the parent needs in order to answer on the first attempt: the request kind, the values it
+ * offers, and which of them this extension has established the parent may submit. Values outside
+ * that set are named rather than summarised, because a standing grant is exactly what the parent
+ * must not choose by accident.
+ */
+function waitingAnswerLine(report: Report): string {
+  const id = report.questionId ?? "inspect the instance with subagent_query";
+  const request = report.request;
+  if (!request) return `\nQuestion ID: ${id}; inspect the request with subagent_query before answering, then use subagent_reply or /agent-reply.`;
+  const offered = request.options?.length ? `; offered: ${quoted(request.options)}` : "";
+  const human = `/agent-reply ${report.agentId} ${id}`;
+  const header = `\nQuestion ID: ${id} (${request.method}${offered}).`;
+  if (request.method === "confirm") return request.parentPolicy?.confirm === true
+    ? `${header} You may submit confirmed: true or false, or cancelled.`
+    : `${header} You may only refuse it (confirmed: false or cancelled); the human answers it with ${human}.`;
+  const allowed = request.parentPolicy?.values ?? [];
+  if (!allowed.length) return `${header} You may only refuse it (cancelled); the human answers it with ${human}.`;
+  const rest = (request.options ?? []).filter((value) => !allowed.includes(value));
+  return `${header} You may submit ${quoted(allowed)}, or cancelled.${rest.length ? ` The rest (${quoted(rest)}) need the human: ${human}.` : ` Anything else needs the human: ${human}.`}`;
+}
+
+/**
+ * The human-facing half of a waiting request. The notification only asks the parent agent, so a
+ * parent that cannot approve — or that stays silent — would otherwise leave the child waiting
+ * unseen. The status line follows the instances' pending questions and therefore clears itself
+ * once the request is answered.
+ */
+function surfaceWaitingForHuman(
+  ui: Pick<ExtensionContext["ui"], "setStatus" | "notify">,
+  states: readonly AgentView[] | undefined,
+  reports: readonly Report[],
+): void {
+  const waiting = (states ?? []).filter((state) => state.questions.length);
+  ui.setStatus(WAITING_STATUS_KEY, waiting.length
+    ? `${waiting.length} subagent${waiting.length === 1 ? "" : "s"} waiting for your answer: /agent-reply ${waiting[0].id} ${waiting[0].questions[0].id}`
+    : undefined);
+  for (const report of reports) {
+    if (report.status !== "waiting") continue;
+    ui.notify(`Subagent ${report.agentId} is waiting for an answer: /agent-reply ${report.agentId} ${report.questionId ?? "<questionId>"}`, "warning");
+  }
+}
 
 export function deliveredIds(ctx: Pick<ExtensionContext, "sessionManager">): Set<string> {
   const ids = new Set<string>();
@@ -26,7 +75,7 @@ export function deliveredIds(ctx: Pick<ExtensionContext, "sessionManager">): Set
 export function deliverReports(
   manager: Pick<AgentManager, "reports" | "getResult">,
   pi: Pick<ExtensionAPI, "sendMessage">,
-  ctx: Pick<ExtensionContext, "sessionManager">,
+  ctx: Pick<ExtensionContext, "sessionManager" | "ui">,
   pending: Set<string>,
   now = Date.now(),
   states?: readonly AgentView[],
@@ -34,6 +83,9 @@ export function deliverReports(
   const delivered = deliveredIds(ctx);
   for (const id of pending) if (delivered.has(id)) pending.delete(id);
   const reports = manager.reports(now, states).filter((report) => !delivered.has(report.notificationId) && !pending.has(report.notificationId));
+  // Runs even when nothing new is delivered, so the status clears once a request is answered. The
+  // caller already guards report delivery, so a UI failure cannot lose a report.
+  surfaceWaitingForHuman(ctx.ui, states, reports);
   if (!reports.length) return;
   // Old reports (including those found on reconnect) are ready immediately. New
   // successful runs share a short window; attention events flush the window.
@@ -54,7 +106,7 @@ export function deliverReports(
       const clipped = raw.length > REPORT_LIMIT;
       const summary = clipped ? `${raw.slice(0, REPORT_HEAD)}\n… ${raw.length - REPORT_LIMIT} characters omitted …\n${raw.slice(-REPORT_TAIL)}\n(truncated preview)` : raw;
       const resultHint = final ? `\nRead result: subagent_query(${JSON.stringify({ action: "result", id: report.agentId, runId: report.runId })})` : "";
-      const replyHint = report.status === "waiting" ? `\nQuestion ID: ${report.questionId ?? "inspect the instance with subagent_query"}; answer it with subagent_reply, or /agent-reply.` : "";
+      const replyHint = report.status === "waiting" ? waitingAnswerLine(report) : "";
       return [{ report, content: `[Subagent ${report.agentId} · ${report.status}]\n${summary}${resultHint}${replyHint}` }];
     } catch (error) {
       console.error(`[pi-cli-subagents] Could not prepare report ${report.notificationId} (subagent ${report.agentId}, run ${report.runId}); left undelivered:`, error);
