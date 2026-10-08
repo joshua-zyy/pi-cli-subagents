@@ -311,8 +311,11 @@ export class AgentManager {
         try {
           const report = this.report(reportFile);
           if (!report || report.parentFile !== this.parentFile) continue;
-          if (report.status === "waiting" && !state.questions.some((q) => q.id === report.questionId)) continue;
-          reports.push({ ...report });
+          const pending = report.status === "waiting" ? state.questions.find((q) => q.id === report.questionId) : undefined;
+          if (report.status === "waiting" && !pending) continue;
+          // Carry the request shape so the notification can say what the parent may submit; a
+          // question the worker could not resolve is reported without it and stays human-only.
+          reports.push(pending ? { ...report, request: { method: pending.method, options: pending.options, parentPolicy: pending.parentPolicy } } : { ...report });
         } catch (error) {
           console.error(`[pi-cli-subagents] Could not read report for subagent ${state.id}; inspect ${reportFile}:`, error);
         }

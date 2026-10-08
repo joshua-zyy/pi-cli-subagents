@@ -4,11 +4,12 @@ import { deliverReports, deliveredIds } from '../dist/notifier.js';
 import { AgentSession } from '@earendil-works/pi-coding-agent';
 
 function harness(reports) {
-  const sent = [], entries = [];
+  const sent = [], entries = [], notifications = [], statuses = [];
   const pi = { sendMessage(message, options) { sent.push({ message, options }); } };
-  const ctx = { sessionManager: { getEntries: () => entries } };
+  const ui = { notify: (message, type) => notifications.push([message, type]), setStatus: (key, text) => statuses.push([key, text]) };
+  const ctx = { sessionManager: { getEntries: () => entries }, ui };
   const manager = { reports: () => reports, getResult: (id, runId) => reports.find(r => r.agentId === id && r.runId === runId) };
-  return { sent, entries, pi, ctx, manager };
+  return { sent, entries, notifications, statuses, ui, pi, ctx, manager };
 }
 const report = (id) => ({ notificationId: id, agentId: 'agent', runId: id, status: 'completed', time: 1, text: 'DONE', logFile: 'trace' });
 
@@ -41,6 +42,40 @@ test('error and waiting messages keep actionable details without embedding file 
   assert.match(content, /Question ID: q.*subagent_reply/s);
   assert.doesNotMatch(content,/C:\\long|Full event log|Result file/);
   assert.deepEqual(h.sent[0].message.details.ids,['failed','waiting']);
+});
+
+test('a waiting notification states the request type, its offered values and exactly what the parent may submit', () => {
+  const audited = { method: 'select', options: ['Block', 'Allow once', 'Allow for this session', 'Always allow in this cwd'], parentPolicy: { values: ['Block', 'Allow once'] } };
+  const h = harness([
+    { ...report('guard'), status: 'waiting', text: 'Dangerous bash command', questionId: 'q1', request: audited },
+    { ...report('plain'), status: 'waiting', text: 'Allow fixture operation?', questionId: 'q2', request: { method: 'confirm' } },
+    { ...report('huge'), status: 'waiting', text: 'Y'.repeat(9000), questionId: 'q3', request: audited },
+  ]);
+  deliverReports(h.manager, h.pi, h.ctx, new Set());
+  const content = h.sent[0].message.content;
+  assert.match(content, /Question ID: q1 \(select; offered: "Block", "Allow once", "Allow for this session", "Always allow in this cwd"\)\. You may submit "Block", "Allow once", or cancelled\. The rest \("Allow for this session", "Always allow in this cwd"\) need the human: \/agent-reply agent q1\./);
+  assert.match(content, /Question ID: q2 \(confirm\)\. You may only refuse it \(confirmed: false or cancelled\); the human answers it with \/agent-reply agent q2\./);
+  // A clipped request body must not hide what the parent needs in order to answer at all.
+  assert.match(content, /characters omitted/);
+  assert.match(content, /Question ID: q3 \(select; offered: "Block"/);
+});
+
+test('a waiting request reaches the human even when the parent agent stays silent', () => {
+  const request = { method: 'select', options: ['Block', 'Allow once'], parentPolicy: { values: ['Block', 'Allow once'] } };
+  const h = harness([{ ...report('guard'), status: 'waiting', text: 'Dangerous bash command', questionId: 'q1', request }]);
+  const states = [{ id: 'agent', runId: 'guard', questions: [{ id: 'q1', method: 'select' }] }];
+  const pending = new Set();
+  deliverReports(h.manager, h.pi, h.ctx, pending, Date.now(), states);
+  const warned = h.notifications.find(([, level]) => level === 'warning');
+  assert.ok(warned, 'the human is told about an unanswered request, not only the parent');
+  assert.match(warned[0], /agent/);
+  assert.match(warned[0], /\/agent-reply agent q1/);
+  const [, status] = h.statuses.at(-1);
+  assert.match(status, /1 subagent waiting for your answer: \/agent-reply agent q1/);
+  // Answering it clears the status without another waiting report.
+  deliverReports(h.manager, h.pi, h.ctx, pending, Date.now(), []);
+  assert.equal(h.statuses.at(-1)[1], undefined, 'the status clears when nothing waits');
+  assert.equal(h.notifications.length, 1, 'an already-delivered request is not announced twice');
 });
 
 test('a crashed delivery before append retries; after append does not', () => {

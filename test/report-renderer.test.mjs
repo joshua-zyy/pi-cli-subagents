@@ -24,7 +24,7 @@ function publish(reports = [report()]) {
   const messages = [], entries = [], pending = new Set();
   const manager = { reports: () => reports, getResult: (agentId, run) => reports.find(r => r.agentId === agentId && r.runId === run) };
   const pi = { sendMessage(message, options) { messages.push({ message, options }); } };
-  const ctx = { sessionManager: { getEntries: () => entries } };
+  const ctx = { sessionManager: { getEntries: () => entries }, ui: { notify() {}, setStatus() {} } };
   deliverReports(manager, pi, ctx, pending, 10000);
   return { message: { role: 'custom', timestamp: 1, ...messages[0].message }, manager, pi, ctx, messages, entries, pending };
 }

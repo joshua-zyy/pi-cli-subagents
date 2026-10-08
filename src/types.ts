@@ -105,6 +105,8 @@ export interface AgentState extends Partial<SessionHandle> {
 }
 export interface StartRequest { runId: string; message: string; session?: NativeSession | SessionHandle; createdAt?: number }
 export interface Endpoint { port: number; token: string; runId: string }
+/** The interaction a waiting report is about, so the notifier can state it without re-reading state. */
+export type PendingRequest = Pick<Question, "method" | "options" | "parentPolicy">;
 export interface Report {
   notificationId: string;
   agentId: string;
@@ -115,6 +117,8 @@ export interface Report {
   text: string;
   error?: string;
   questionId?: string;
+  /** Set for a waiting report while its request is still pending. */
+  request?: PendingRequest;
   resultFile?: string;
   logFile: string;
 }

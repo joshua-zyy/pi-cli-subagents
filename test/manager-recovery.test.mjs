@@ -46,7 +46,7 @@ test('incomplete or unreadable registrations stay visible without blocking healt
   }
   const reports = m.reports(); assert.equal(reports.length, 1); assert.equal(reports[0].agentId, good.id);
   const messages = [];
-  deliverReports(m, { sendMessage: message => messages.push(message) }, { sessionManager: { getEntries: () => [] } }, new Set(), Date.now() + 3000, states);
+  deliverReports(m, { sendMessage: message => messages.push(message) }, { sessionManager: { getEntries: () => [] }, ui: { notify() {}, setStatus() {} } }, new Set(), Date.now() + 3000, states);
   assert.equal(messages.length, 1); assert.match(messages[0].content, /HEALTHY/);
   assert(!messages[0].content.includes('-unreachable'), 'no fabricated failed run for an incomplete registration');
 });
