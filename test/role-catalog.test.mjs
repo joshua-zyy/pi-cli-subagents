@@ -42,6 +42,22 @@ test('dispatch exposes delegation guidance and effective roles without model set
   assert.equal(h.tools.size, 4);
 });
 
+test('the parent sees the delegation guidance exactly once, whichever carrier holds it', async t => {
+  const guidance = 'Delegate outcomes, not implementation recipes. Give the goal, essential context (relevant paths and confirmed facts), authorized scope, and acceptance or return needs. A new instance has not seen this conversation. Let the child investigate, choose an approach and verify its work; prescribe implementation details only when the user, compatibility or shared-work constraints require them.';
+  const copies = h => [...h.tools.values()].reduce((total, tool) => {
+    const texts = [tool.description ?? '', ...(tool.promptGuidelines ?? [])];
+    return total + texts.reduce((sum, text) => sum + text.split(guidance).length - 1, 0);
+  }, 0);
+  const h = harness(t);
+  // A second copy would spend context and imply the child owns less than it does.
+  assert.equal(copies(h), 1, 'the guidance must reach the parent once after registration');
+  await h.events.get('session_start')({}, h.ctx);
+  assert.equal(copies(h), 1, 'catalog refresh must not add another copy');
+  h.trust(true);
+  await h.events.get('before_agent_start')({}, h.ctx);
+  assert.equal(copies(h), 1, 'turn-start refresh must not add another copy');
+});
+
 test('catalog refresh removes stale roles and respects trust revocation and invalid configuration', async t => {
   const h = harness(t);
   h.trust(true); h.write('project', { temporary: role('Temporary description') });
