@@ -45,13 +45,13 @@ Launcher tests use independent miniature repositories to verify real process bou
 
 ## Cost measurements
 
-These measurements were collected in independent runs on Windows / Node 22.21.0; each entry point includes one build. All passed with skipped=0; real CLI/model acceptance was NOT_RUN throughout.
+These measurements were collected in one run per entry point on 2026-10-08 at `8b958b6` (Windows / Node 22.21.0); each entry point includes one build. All passed with skipped=0; real CLI/model acceptance was NOT_RUN throughout. The counts are the current suite, which is larger than the historical `bf85d3e` baseline in the tables above.
 
 | Entry point | Passed / total | Wall time including build | Node runner time |
 |---|---:|---:|---:|
-| `npm run test:fast` | 239 / 239 | 15.62 s | 11.96 s |
-| `npm run test:domain` | 62 / 62 | 59.13 s | 55.36 s |
-| `npm run test:acceptance:local` | 89 / 89 | 153.27 s | 149.60 s |
-| `npm test` | 390 / 390 | 220.77 s | 217.09 s |
+| `npm run test:fast` | 262 / 262 | 20.17 s | 16.09 s |
+| `npm run test:domain` | 65 / 65 | 70.72 s | 66.55 s |
+| `npm run test:acceptance:local` | 90 / 90 | 179.71 s | 175.25 s |
+| `npm test` | 417 / 417 | 248.29 s | 243.99 s |
 
-Tiering reduces the cost of selecting tests for everyday changes; it does not claim to accelerate the full suite. The full-suite 220.77 seconds came from an independent run, not the sum of the three tier times. Local logs are in the ignored `.test-output/tiers-*.log` and `tiers-timings.json`. Remeasure after environment or test changes; this table is not a continuing performance guarantee.
+Tiering reduces the cost of selecting tests for everyday changes; it does not claim to accelerate the full suite. The full-suite 248.29 seconds came from an independent run, not the sum of the three tier times. The fast tier now carries 29 files and 262 tests (the baseline above had 26 and 239), which is why its 20.17 seconds including build sits at the review threshold in rule 5. Local logs are in the ignored `.test-output/tiers-*.log` and `tiers-timings.json`. Remeasure after environment or test changes; this table is not a continuing performance guarantee.
