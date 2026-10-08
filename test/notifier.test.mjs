@@ -2,6 +2,13 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { deliverReports, deliveredIds } from '../dist/notifier.js';
 import { AgentSession } from '@earendil-works/pi-coding-agent';
+import { createRequire } from 'node:module';
+import { pathToFileURL } from 'node:url';
+
+// Exercise the same agent loop the installed host uses, without a model or a new dependency.
+const hostRequire = createRequire(import.meta.resolve('@earendil-works/pi-coding-agent'));
+const corePackage = pathToFileURL(hostRequire.resolve('@earendil-works/pi-agent-core/package.json'));
+const { Agent } = await import(new URL('./dist/index.js', corePackage).href);
 
 function harness(reports) {
   const sent = [], entries = [], notifications = [], statuses = [];
@@ -53,29 +60,93 @@ test('a waiting notification states the request type, its offered values and exa
   ]);
   deliverReports(h.manager, h.pi, h.ctx, new Set());
   const content = h.sent[0].message.content;
-  assert.match(content, /Question ID: q1 \(select; offered: "Block", "Allow once", "Allow for this session", "Always allow in this cwd"\)\. You may submit "Block", "Allow once", or cancelled\. The rest \("Allow for this session", "Always allow in this cwd"\) need the human: \/agent-reply agent q1\./);
+  assert.match(content, /Question ID: q1 \(select; offered: "Block", "Allow once", "Allow for this session", "Always allow in this cwd"\)\. You may submit "Block", "Allow once", or cancelled\./);
+  assert.match(content, /Handle this request now with subagent_reply within the user's task authorization; do not wait for routine human approval\./);
+  assert.match(content, /The other options \("Allow for this session", "Always allow in this cwd"\) require a wider grant; involve the human only if that grant is needed: \/agent-reply agent q1\./);
   assert.match(content, /Question ID: q2 \(confirm\)\. You may only refuse it \(confirmed: false or cancelled\); the human answers it with \/agent-reply agent q2\./);
   // A clipped request body must not hide what the parent needs in order to answer at all.
   assert.match(content, /characters omitted/);
   assert.match(content, /Question ID: q3 \(select; offered: "Block"/);
 });
 
-test('a waiting request reaches the human even when the parent agent stays silent', () => {
+test('routine approvals stay with the parent without asking the human to take over', () => {
   const request = { method: 'select', options: ['Block', 'Allow once'], parentPolicy: { values: ['Block', 'Allow once'] } };
   const h = harness([{ ...report('guard'), status: 'waiting', text: 'Dangerous bash command', questionId: 'q1', request }]);
-  const states = [{ id: 'agent', runId: 'guard', questions: [{ id: 'q1', method: 'select' }] }];
+  const states = [{ id: 'agent', runId: 'guard', questions: [{ id: 'q1', ...request }] }];
   const pending = new Set();
   deliverReports(h.manager, h.pi, h.ctx, pending, Date.now(), states);
-  const warned = h.notifications.find(([, level]) => level === 'warning');
-  assert.ok(warned, 'the human is told about an unanswered request, not only the parent');
-  assert.match(warned[0], /agent/);
-  assert.match(warned[0], /\/agent-reply agent q1/);
-  const [, status] = h.statuses.at(-1);
-  assert.match(status, /1 subagent waiting for your answer: \/agent-reply agent q1/);
-  // Answering it clears the status without another waiting report.
+  assert.equal(h.notifications.length, 0, 'an answerable request must not ask the human to act');
+  assert.match(h.statuses.at(-1)[1], /1 subagent waiting for parent review; \/agents to inspect or intervene/);
   deliverReports(h.manager, h.pi, h.ctx, pending, Date.now(), []);
-  assert.equal(h.statuses.at(-1)[1], undefined, 'the status clears when nothing waits');
-  assert.equal(h.notifications.length, 1, 'an already-delivered request is not announced twice');
+  assert.equal(h.statuses.at(-1)[1], undefined, 'the status clears even with no new reports');
+});
+
+test('human-required requests remain visible even when the parent stays silent', () => {
+  // A native human-only policy may still let the parent decline or cancel.
+  const request = { method: 'select', options: ['Deny once', 'Approve once', 'Cancel turn'],
+    humanOnly: true, parentPolicy: { values: ['Deny once', 'Cancel turn'] } };
+  const h = harness([{ ...report('human'), status: 'waiting', text: 'Native approval', questionId: 'q2', request }]);
+  const states = [
+    { id: 'routine', questions: [{ id: 'q1', method: 'confirm', parentPolicy: { confirm: true } }] },
+    { id: 'agent', questions: [{ id: 'q2', ...request }] },
+  ], pending = new Set();
+  deliverReports(h.manager, h.pi, h.ctx, pending, Date.now(), states);
+  assert.equal(h.notifications.length, 1, 'native human-only restrictions must not be mistaken for routine parent review');
+  assert.match(h.notifications[0][0], /\/agent-reply agent q2/);
+  assert.equal(h.notifications[0][1], 'warning');
+  assert.match(h.statuses.at(-1)[1], /1 child request needs your decision: \/agent-reply agent q2/);
+  h.entries.push({ type: 'custom_message', ...h.sent[0].message });
+  deliverReports(h.manager, h.pi, h.ctx, pending, Date.now(), states);
+  assert.equal(h.notifications.length, 1, 'persisted delivery must not prompt the human twice');
+  assert.match(h.statuses.at(-1)[1], /needs your decision/, 'receipt is not resolution');
+  deliverReports(h.manager, h.pi, h.ctx, pending, Date.now(), []);
+  assert.equal(h.statuses.at(-1)[1], undefined);
+});
+
+test('waiting reaches the next model request while the parent keeps using tools', async () => {
+  const h = harness([report('finished'), { ...report('approval'), status: 'waiting', text: 'Inspect this command', questionId: 'q1',
+    request: { method: 'confirm', parentPolicy: { confirm: true } } }]);
+  const pending = new Set(), requests = [];
+  let toolRuns = 0, finishedInFlightTool = false, abortedInFlightTool = false;
+  const model = { id: 'offline', name: 'Offline', provider: 'offline', api: 'offline', reasoning: false,
+    input: ['text'], contextWindow: 8192, maxTokens: 1024, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } };
+  const agent = new Agent({
+    initialState: { model, tools: [{ name: 'parent_work', label: 'Parent work', description: 'Continue local work',
+      parameters: { type: 'object', properties: {} }, async execute(_id, _args, signal) {
+        if (++toolRuns === 1) {
+          deliverReports(h.manager, h.pi, h.ctx, pending);
+          await Promise.resolve();
+          abortedInFlightTool = signal.aborted;
+          finishedInFlightTool = true;
+        }
+        return { content: [{ type: 'text', text: 'checked' }], details: {} };
+      } }] },
+    convertToLlm: messages => messages.map(message => message.role === 'custom'
+      ? { role: 'user', content: message.content, timestamp: message.timestamp } : message),
+    streamFn(_model, context) {
+      requests.push([...context.messages]);
+      const done = requests.length >= 3;
+      const message = { role: 'assistant', api: 'offline', provider: 'offline', model: 'offline', timestamp: 1,
+        usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+        stopReason: done ? 'stop' : 'toolUse', content: done ? [{ type: 'text', text: 'done' }]
+          : [{ type: 'toolCall', id: `work-${requests.length}`, name: 'parent_work', arguments: {} }] };
+      return { async *[Symbol.asyncIterator]() { yield { type: 'done', reason: message.stopReason, message }; },
+        result: async () => message };
+    },
+  });
+  const host = { agent, get isStreaming() { return agent.state.isStreaming; }, _runAgentPrompt: message => agent.prompt(message) };
+  h.pi.sendMessage = (message, options) => { void AgentSession.prototype.sendCustomMessage.call(host, message, options); };
+  await agent.prompt('Keep working until the task is done.');
+  assert.equal(finishedInFlightTool, true);
+  assert.equal(abortedInFlightTool, false, 'steering must not kill the tool already running');
+  assert.ok(requests[1].some(message => typeof message.content === 'string' && message.content.includes('Question ID: q1')),
+    'a blocked child must be visible before the parent makes another model request, not after it stops');
+  assert.ok(requests[1].some(message => typeof message.content === 'string' && message.content.includes('· completed')),
+    'a completion sharing the waiting batch must not be lost');
+  assert.ok(requests[1].some(message => message.role === 'toolResult' && message.toolCallId === 'work-1'),
+    'the in-flight tool result must precede the next model request');
+  assert.equal(toolRuns, 2);
+  assert.equal(agent.state.messages.filter(message => message.customType === 'cli-subagents-report').length, 1);
 });
 
 test('a crashed delivery before append retries; after append does not', () => {
@@ -129,16 +200,20 @@ test('long output previews the original tail and points to the exact result', ()
   assert.match(content, /truncated.*subagent_query.*agent/is);
 });
 
-test('busy-host delivery uses follow-up and abandoned queues replay the same run without duplicate receipts', async () => {
-  const r = { ...report('original-run'), notificationId: 'original-run-result' }, h = harness([r]);
-  const queued = [], calls = [], pending = new Set();
-  const host = { isStreaming: true, agent: { followUp: message => queued.push(message), steer: () => { throw Error('report interrupted current execution'); } },
+for (const status of ['completed', 'waiting']) test(`${status} delivery uses the right queue and replays only lost receipts`, async () => {
+  const r = { ...report('original-run'), notificationId: `original-run-${status === 'waiting' ? 'q1' : 'result'}`, status,
+    ...(status === 'waiting' ? { questionId: 'q1', request: { method: 'confirm', parentPolicy: { confirm: true } } } : {}) };
+  const h = harness([r]), queued = [], calls = [], pending = new Set();
+  const mode = status === 'waiting' ? 'steer' : 'followUp';
+  const wrong = () => { throw Error(`expected ${mode}`); };
+  const host = { isStreaming: true, agent: { followUp: wrong, steer: wrong, [mode]: message => queued.push(message) },
     _runAgentPrompt: async message => queued.push(message) };
   h.pi.sendMessage = (message, options) => { calls.push(AgentSession.prototype.sendCustomMessage.call(host, message, options)); };
   deliverReports(h.manager, h.pi, h.ctx, pending);
   await Promise.all(calls);
   assert.equal(queued.length, 1); assert.equal(h.entries.length, 0, 'queued is not a persisted receipt');
-  assert.match(queued[0].content, /"runId":"original-run"/);
+  assert.deepEqual(queued[0].details.ids, [r.notificationId]);
+  const original = queued[0].content;
   deliverReports(h.manager, h.pi, h.ctx, pending);
   assert.equal(queued.length, 1);
   // A lost host queue has no receipt. Reopening the parent uses a fresh pending set.
@@ -146,7 +221,8 @@ test('busy-host delivery uses follow-up and abandoned queues replay the same run
   const resumed = new Set();
   deliverReports(h.manager, h.pi, h.ctx, resumed);
   await Promise.all(calls);
-  assert.equal(queued.length, 1); assert.match(queued[0].content, /"runId":"original-run"/);
+  assert.equal(queued.length, 1); assert.equal(queued[0].content, original);
+  assert.deepEqual(queued[0].details.ids, [r.notificationId]);
   h.entries.push({ type: 'custom_message', ...queued[0] });
   deliverReports(h.manager, h.pi, h.ctx, resumed);
   assert.equal(resumed.size, 0);

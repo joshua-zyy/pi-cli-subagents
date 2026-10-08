@@ -6,12 +6,13 @@ Read this when a child is `waiting` on a permission or approval request. The wor
 
 ## Decide
 
-Inspect the full request and compare it with the user's original authorization for this task. Approve
-only what that authorization covers; otherwise deny or cancel, or leave it for the human with
-`/agent-reply <agentId> <questionId>`. Supply a concrete `reason`: every decision is recorded locally
-with the actor who made it.
+Inspect the full request and compare it with the user's original authorization. Make the in-scope
+one-action decision yourself using `subagent_reply`; the presence of a permission prompt is not a
+reason to ask the user again. Otherwise deny or cancel, or explain the specific missing authorization
+and give `/agent-reply <agentId> <questionId>` when a human decision is needed. Supply a concrete
+`reason`: every decision is recorded locally with the actor who made it.
 
-An approval is always a single action. It is never a blanket permission, never a session-wide or
+A parent-agent approval is always a single action. It is never a blanket permission, never a session-wide or
 permanent grant, and never a reason to disable a safety extension.
 
 ## What the parent may submit
@@ -24,8 +25,8 @@ version — is answered by the human: refusing from the parent still works, appr
 
 ## Boundaries the parent cannot cross
 
-- A response outside the request's stated policy cannot be approved by the parent. Ask the human, or
-  refuse.
+- A response outside the request's stated policy cannot be approved by the parent. Prefer the offered
+  one-action choice when it covers the authorized work; ask for a wider grant only if actually needed.
 - Dedicated native dialogs and unscoped requests fail closed. A refusal is not something to work around
   with a raw `cwd`, a replacement instance or a hand-edited record.
 - Pi, Codex and Claude Code each offer their own choice values, including `Deny once`, `Approve once`

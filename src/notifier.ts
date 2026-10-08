@@ -18,6 +18,12 @@ const OFFERED_LIMIT = 12;
 const quoted = (values: readonly string[]): string =>
   `${values.slice(0, OFFERED_LIMIT).map((value) => JSON.stringify(value)).join(", ")}${values.length > OFFERED_LIMIT ? ", …" : ""}`;
 
+/** A native human-only policy can still list refusal choices the parent may submit. */
+function needsHumanApproval(request: Report["request"]): boolean {
+  return request?.humanOnly === true || !(request?.method === "confirm"
+    ? request.parentPolicy?.confirm === true : request?.parentPolicy?.values?.length);
+}
+
 /**
  * What the parent needs in order to answer on the first attempt: the request kind, the values it
  * offers, and which of them this extension has established the parent may submit. Values outside
@@ -31,20 +37,22 @@ function waitingAnswerLine(report: Report): string {
   const offered = request.options?.length ? `; offered: ${quoted(request.options)}` : "";
   const human = `/agent-reply ${report.agentId} ${id}`;
   const header = `\nQuestion ID: ${id} (${request.method}${offered}).`;
-  if (request.method === "confirm") return request.parentPolicy?.confirm === true
-    ? `${header} You may submit confirmed: true or false, or cancelled.`
+  const review = " Handle this request now with subagent_reply within the user's task authorization; do not wait for routine human approval.";
+  if (request.method === "confirm") return !needsHumanApproval(request)
+    ? `${header} You may submit confirmed: true or false, or cancelled.${review}`
     : `${header} You may only refuse it (confirmed: false or cancelled); the human answers it with ${human}.`;
   const allowed = request.parentPolicy?.values ?? [];
   if (!allowed.length) return `${header} You may only refuse it (cancelled); the human answers it with ${human}.`;
+  const permitted = `${header} You may submit ${quoted(allowed)}, or cancelled.`;
+  if (needsHumanApproval(request)) return `${permitted} Approval requires the human: ${human}.`;
   const rest = (request.options ?? []).filter((value) => !allowed.includes(value));
-  return `${header} You may submit ${quoted(allowed)}, or cancelled.${rest.length ? ` The rest (${quoted(rest)}) need the human: ${human}.` : ` Anything else needs the human: ${human}.`}`;
+  return `${permitted}${review}${rest.length ? ` The other options (${quoted(rest)}) require a wider grant; involve the human only if that grant is needed: ${human}.` : ""}`;
 }
 
 /**
- * The human-facing half of a waiting request. The notification only asks the parent agent, so a
- * parent that cannot approve — or that stays silent — would otherwise leave the child waiting
- * unseen. The status line follows the instances' pending questions and therefore clears itself
- * once the request is answered.
+ * Keep pending requests visible without asking the human to take over routine parent decisions.
+ * Only requests that require human approval raise a warning. The status follows live questions,
+ * not notification receipts: receiving a request does not mean it has been answered.
  */
 function surfaceWaitingForHuman(
   ui: Pick<ExtensionContext["ui"], "setStatus" | "notify">,
@@ -52,11 +60,14 @@ function surfaceWaitingForHuman(
   reports: readonly Report[],
 ): void {
   const waiting = (states ?? []).filter((state) => state.questions.length);
-  ui.setStatus(WAITING_STATUS_KEY, waiting.length
-    ? `${waiting.length} subagent${waiting.length === 1 ? "" : "s"} waiting for your answer: /agent-reply ${waiting[0].id} ${waiting[0].questions[0].id}`
-    : undefined);
+  const human = waiting.flatMap((state) => state.questions.flatMap((question) =>
+    needsHumanApproval(question) ? [{ id: state.id, questionId: question.id }] : []));
+  let status: string | undefined;
+  if (human.length) status = `${human.length} child request${human.length === 1 ? " needs" : "s need"} your decision: /agent-reply ${human[0].id} ${human[0].questionId}`;
+  else if (waiting.length) status = `${waiting.length} subagent${waiting.length === 1 ? "" : "s"} waiting for parent review; /agents to inspect or intervene`;
+  ui.setStatus(WAITING_STATUS_KEY, status);
   for (const report of reports) {
-    if (report.status !== "waiting") continue;
+    if (report.status !== "waiting" || !needsHumanApproval(report.request)) continue;
     ui.notify(`Subagent ${report.agentId} is waiting for an answer: /agent-reply ${report.agentId} ${report.questionId ?? "<questionId>"}`, "warning");
   }
 }
@@ -120,8 +131,10 @@ export function deliverReports(
   try {
     // Display metadata is separate from model-facing content and the receipt IDs.
     const displayReports = prepared.map(({ report: { agentId, status } }) => ({ agentId, status }));
-    // Busy parents consume these after their current execution, not between its tool calls.
-    pi.sendMessage({ customType, content, display: true, details: { ids, reports: displayReports } }, { triggerTurn: true, deliverAs: "followUp" });
+    // A blocked child needs a decision before the parent's next model request, not after it
+    // finishes all work. Other batches remain follow-ups; neither mode aborts a running tool.
+    const deliverAs = prepared.some(({ report }) => report.status === "waiting") ? "steer" : "followUp";
+    pi.sendMessage({ customType, content, display: true, details: { ids, reports: displayReports } }, { triggerTurn: true, deliverAs });
   } catch (error) {
     for (const id of ids) pending.delete(id);
     throw error;

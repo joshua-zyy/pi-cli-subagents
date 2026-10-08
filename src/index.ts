@@ -242,7 +242,7 @@ export default function extension(pi: ExtensionAPI): void {
   });
   pi.registerTool({
     name: "subagent_reply", label: "Answer child interaction",
-    description: "Answer one current request from this parent's child. Requires id, questionId, reason and exactly one of confirmed/value/cancelled matching the request. Read the request first: its parent policy lists the responses this agent may submit, and anything outside it needs the human UI (/agent-reply) while refusing stays allowed. Only authorize what the user's task covers. Does not change persistent permissions. Every decision is recorded locally; a reply is not proof of successful execution.",
+    description: "Review and answer this parent's child request yourself within the user's task authorization; do not defer routine approvals to the human. Requires id, questionId, reason and exactly one of confirmed/value/cancelled matching the request. Read the request first and use its parent policy for a one-action approval or refusal. Escalate only when the required authorization exceeds the task or the request needs the human UI (/agent-reply); explain what decision is needed. Never grant session-wide or persistent permissions. Every decision is recorded locally; delivery is not proof of successful execution.",
     parameters: Type.Object({
       id: Type.String({ description: "Existing instance ID" }),
       questionId: Type.String({ description: "Exact current interaction ID" }),
