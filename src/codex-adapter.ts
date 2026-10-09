@@ -8,7 +8,7 @@ import { childEnvironment, type Exit } from "./pi-process.js";
 import { CODEX_MODE_PRESETS } from "./roles.js";
 import type { CodexMode, NativeSession, Delivery, QuestionField } from "./types.js";
 import { readCodexQuestionFields, validateQuestionAnswers } from "./codex-question.js";
-import { readCodexMcpApproval } from "./codex-mcp-approval.js";
+import { readCodexMcpApproval, readCodexMcpElicitation } from "./codex-mcp-approval.js";
 
 // Legacy RPC envelope; a typed decoder migration is separate from the role capability gate.
 // pi-lens-ignore: no-unsafe-dictionary-any
@@ -18,7 +18,7 @@ const textInput = (text: string) => [{ type: "text", text }];
 const requestKey = (id: string | number): string => `${typeof id}:${id}`;
 type Approval = { id: string; rpcId: string | number; threadId: string; turnId: string;
   attempted: boolean; allowed?: Set<string>; fields?: QuestionField[];
-  mcp?: { questionId: string; item: RecordValue }; resolved?: () => void; rejected?: (error: Error) => void };
+  mcp?: { questionId?: string; item: RecordValue }; resolved?: () => void; rejected?: (error: Error) => void };
 
 /** One worker owns one app-server process and one thread at a time. */
 export class CodexAdapter implements CliAdapter {
@@ -198,10 +198,27 @@ export class CodexAdapter implements CliAdapter {
     const file = record.method === "item/fileChange/requestApproval";
     const p = record.params;
     const item = object(p) ? this.approvalItems.get(p.itemId) : undefined;
-    const scope = this.activeTurn?.trim() && this.thread && object(p) && p.threadId === this.thread.threadId && p.turnId === this.activeTurn && typeof p.itemId === "string";
+    const turnScope = this.activeTurn?.trim() && this.thread && object(p) && p.threadId === this.thread.threadId && p.turnId === this.activeTurn;
+    const scope = turnScope && typeof p.itemId === "string";
+    const openRequest = !this.failed && !this.ending && (typeof rpcId === "string" || Number.isSafeInteger(rpcId)) && !this.approvalByRpcId.has(requestKey(rpcId));
+    // Form elicitation has no itemId. Only one live call on the named server may match;
+    // never pick the first/last call when concurrent calls make attribution ambiguous.
+    if (record.method === "mcpServer/elicitation/request" && turnScope && openRequest) {
+      const candidates = [...this.approvalItems.values()].filter(candidate => candidate.type === "mcpToolCall" &&
+        candidate.status === "inProgress" && candidate.server === p.serverName);
+      const candidate = candidates.length === 1 ? candidates[0] : undefined;
+      const elicitation = readCodexMcpElicitation(p, candidate);
+      if (elicitation && candidate) {
+        const id = randomUUID();
+        const pending: Approval = { id, rpcId, threadId: p.threadId, turnId: p.turnId, attempted: false, mcp: { item: candidate } };
+        this.approvals.set(id, pending); this.approvalByRpcId.set(requestKey(rpcId), pending);
+        this.options.onEvent({ type: "question", question: { id, method: "confirm", title: "Approve one Codex MCP tool call?",
+          message: elicitation.message, parentPolicy: { confirm: true } } });
+        return;
+      }
+    }
     const question = record.method === "item/tool/requestUserInput" || record.method === "tool/requestUserInput";
-    if (question && scope && p.itemId.trim() && typeof p.isBlocking === "boolean" && !this.failed && !this.ending &&
-      (typeof rpcId === "string" || Number.isSafeInteger(rpcId)) && !this.approvalByRpcId.has(requestKey(rpcId))) {
+    if (question && scope && p.itemId.trim() && typeof p.isBlocking === "boolean" && openRequest) {
       // Native MCP approval is an action, never an agent-answerable task form.
       const mcp = p.isBlocking ? readCodexMcpApproval(p.questions, item) : undefined;
       if (mcp && item) {
@@ -323,11 +340,18 @@ export class CodexAdapter implements CliAdapter {
     if (approval.mcp) {
       if (this.approvalItems.get(approval.mcp.item.id) !== approval.mcp.item || approval.mcp.item.status !== "inProgress")
         throw new Error("Codex MCP action is no longer pending or its details changed; inspect before replying");
-      if (answer.answers !== undefined || answer.confirmed !== undefined ||
-        Number(answer.cancelled === true) + Number(typeof answer.value === "string") !== 1 ||
-        answer.value !== undefined && !["Allow", "Cancel"].includes(answer.value))
-        throw new Error("Codex MCP approvals require an explicit Allow/Cancel choice or cancellation; persistent grants are not supported");
-      result = { answers: { [approval.mcp.questionId]: { answers: [answer.cancelled ? "Cancel" : answer.value] } } };
+      if (approval.mcp.questionId !== undefined) {
+        if (answer.answers !== undefined || answer.confirmed !== undefined ||
+          Number(answer.cancelled === true) + Number(typeof answer.value === "string") !== 1 ||
+          answer.value !== undefined && !["Allow", "Cancel"].includes(answer.value))
+          throw new Error("Codex MCP approvals require an explicit Allow/Cancel choice or cancellation; persistent grants are not supported");
+        result = { answers: { [approval.mcp.questionId]: { answers: [answer.cancelled ? "Cancel" : answer.value] } } };
+      } else {
+        if (answer.answers !== undefined || answer.value !== undefined ||
+          Number(answer.cancelled === true) + Number(typeof answer.confirmed === "boolean") !== 1)
+          throw new Error("Codex MCP elicitation requires one confirmed decision or cancellation, not form content");
+        result = { action: answer.cancelled ? "cancel" : answer.confirmed ? "accept" : "decline", content: null, _meta: null };
+      }
     } else if (approval.fields) {
       if (Number(answer.cancelled === true) + Number(answer.answers !== undefined) !== 1 || answer.confirmed !== undefined || answer.value !== undefined)
         throw new Error("Codex task forms require answers or cancellation, not an approval");

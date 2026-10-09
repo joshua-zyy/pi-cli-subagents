@@ -462,6 +462,63 @@ test('Codex MCP prefix expiry and uncertain delivery never replay an approval', 
   await c.stop();
 });
 
+test('Codex MCP elicitation approves or refuses only one scoped action without persistent metadata', async t => {
+  const { client, requests, home } = setup(t);
+  for (const [task, answer, action] of [
+    ['MCP_ELICIT', { confirmed: true }, 'accept'], ['MCP_ELICIT_STRING_ID', { confirmed: false }, 'decline'],
+    ['MCP_ELICIT_LEGACY', { cancelled: true }, 'cancel'], ['MCP_ELICIT_OTHER_DONE', { confirmed: true }, 'accept'],
+    ['MCP_ELICIT_OTHER_SERVER', { confirmed: false }, 'decline'],
+  ]) {
+    const { c, events } = client(); await c.ready(); await c.start(task);
+    const q = events.find(e => e.type === 'question')?.question;
+    assert(q, 'explicit message-only MCP elicitation must be reviewable');
+    assert.equal(q.method, 'confirm'); assert.notEqual(q.kind, 'question'); assert.equal(q.fields, undefined);
+    assert.deepEqual(q.parentPolicy, { confirm: true }); assert.match(q.message, /elicitation-only\.txt/);
+    const before = requests().filter(r => !r.method).length;
+    for (const invalid of [{ value: 'Allow' }, { answers: {} }, { confirmed: 'yes' }, { confirmed: true, cancelled: true }])
+      await assert.rejects(c.reply({ type: 'reply', id: q.id, ...invalid }), /MCP|confirm|decision/i);
+    assert.equal(requests().filter(r => !r.method).length, before);
+    await c.reply({ type: 'reply', id: q.id, ...answer });
+    assert.equal((await settled(events)).text, `ELICITATION:${action}`);
+    assert.deepEqual(requests().filter(r => !r.method).slice(before).map(({ id, result }) => ({ id, result })),
+      [{ id: task.includes('STRING_ID') ? '37' : 37, result: { action, content: null, _meta: null } }]);
+    await assert.rejects(c.reply({ type: 'reply', id: q.id, ...answer }), /pending|answered/);
+    await c.end();
+  }
+  assert.equal(fs.readFileSync(path.join(home, 'elicitation-effect.txt'), 'utf8'), '2');
+  assert.equal(fs.existsSync(path.join(home, 'elicitation-grants.jsonl')), false);
+});
+
+test('Codex MCP elicitation refuses ambiguous scope, other kinds, data forms and URLs', async t => {
+  const { client, requests } = setup(t);
+  for (const suffix of ['WRONG_THREAD', 'WRONG_TURN', 'NULL_TURN', 'WRONG_SERVER', 'MISSING_ITEM', 'COMPLETED_ITEM', 'AMBIGUOUS', 'NO_META', 'SUGGESTION', 'DATA_FORM', 'URL']) {
+    const { c, events } = client(); await c.ready(); await c.start(`MCP_ELICIT_${suffix}`);
+    assert.equal(events.some(e => e.type === 'question'), false, suffix);
+    assert.equal((await settled(events)).status, 'failed', suffix); await c.stop();
+  }
+  assert.ok(requests().filter(r => !r.method).every(r => r.error && !r.result));
+});
+
+test('Codex MCP elicitation rechecks the action and never replays expired or uncertain replies', async t => {
+  const { client, requests, home } = setup(t);
+  for (const task of ['MCP_ELICIT_AUTO_RESOLVE', 'MCP_ELICIT_TURN_END']) {
+    const { c, events } = client(); await c.ready(); await c.start(task);
+    const q = events.find(e => e.type === 'question')?.question; assert(q); await settled(events);
+    await assert.rejects(c.reply({ type: 'reply', id: q.id, confirmed: true }), /pending|answered/); await c.end();
+  }
+  const stale = client(); await stale.c.ready(); await stale.c.start('MCP_ELICIT');
+  const q = stale.events.find(e => e.type === 'question')?.question; assert(q); const before = stale.events.length;
+  stale.c.child.stdin.write(JSON.stringify({ method: 'fixture/mcpItemUpdate' }) + '\n');
+  await waitUntil('action completed', () => stale.events.slice(before).some(e => e.type === 'activity'));
+  await assert.rejects(stale.c.reply({ type: 'reply', id: q.id, confirmed: true }), /no longer pending|details changed/); await stale.c.stop();
+  const uncertain = client(undefined, ['--no-resolved']); await uncertain.c.ready(); await uncertain.c.start('MCP_ELICIT');
+  const last = uncertain.events.find(e => e.type === 'question')?.question; assert(last);
+  await assert.rejects(uncertain.c.reply({ type: 'reply', id: last.id, confirmed: true }), /uncertain|timed out/);
+  await assert.rejects(uncertain.c.reply({ type: 'reply', id: last.id, confirmed: true }), /pending|answered/);
+  assert.equal(requests().filter(r => !r.method && r.result?.action === 'accept').length, 1);
+  assert.equal(fs.readFileSync(path.join(home, 'elicitation-effect.txt'), 'utf8'), '1'); await uncertain.c.stop();
+});
+
 test('Codex task form ends with its turn even without a request-resolved event', async t => {
   const { client, requests } = setup(t); const { c, events } = client();
   await c.ready(); await c.start('QUESTION_NONBLOCKING_TURN_END');

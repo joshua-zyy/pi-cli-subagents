@@ -177,7 +177,7 @@ test('Codex forms reach the public parent reply tool with scoped answers, notifi
   assert.equal(records.filter(r => r.method === 'turn/start').length, 3); assert.equal(records.filter(r => r.method === 'turn/steer').length, 1);
 });
 
-test('Codex MCP prefix approval reaches public tools, parent notification, audit and the original run result', { timeout: 25_000 }, async t => {
+test('Codex MCP approvals reach public tools, parent notification, audit and the original run result', { timeout: 25_000 }, async t => {
   const { cwd, home, manager, done, parent } = setup(t);
   const tools = new Map(), messages = [], notices = [];
   const api = { registerTool: tool => tools.set(tool.name, tool), registerCommand() {}, registerShortcut() {}, registerMessageRenderer() {}, on() {},
@@ -186,10 +186,14 @@ test('Codex MCP prefix approval reaches public tools, parent notification, audit
   const ctx = { cwd, sessionManager: { getSessionFile: () => parent, getEntries: () => [] },
     ui: { notify: (...args) => notices.push(args), setStatus() {} } };
   const invoke = (name, args) => tools.get(name).execute('fixture-parent', args, new AbortController().signal, () => {}, ctx);
-  for (const value of ['Allow', 'Cancel']) {
-    const started = await manager.spawn('codex-worker', role, cwd, 'MCP_APPROVAL');
+  for (const [task, answer] of [['MCP_APPROVAL', { value: 'Allow' }], ['MCP_APPROVAL', { value: 'Cancel' }],
+    ['MCP_ELICIT', { confirmed: true }], ['MCP_ELICIT', { confirmed: false }], ['MCP_ELICIT', { cancelled: true }]]) {
+    const prefix = task === 'MCP_APPROVAL';
+    const action = prefix ? answer.value : answer.cancelled ? 'cancel' : answer.confirmed ? 'accept' : 'decline';
+    const started = await manager.spawn('codex-worker', role, cwd, task);
     const pending = manager.get(started.id), q = pending.questions[0];
     assert.equal(pending.phase, 'waiting'); assert(q); assert.equal(q.fields, undefined); assert.notEqual(q.kind, 'question');
+    assert.equal(q.method, prefix ? 'select' : 'confirm');
     const query = JSON.parse((await invoke('subagent_query', { action: 'get', id: started.id })).content[0].text);
     assert.deepEqual(query.agents[0].questions, pending.questions);
     const report = manager.reports().find(r => r.agentId === started.id && r.status === 'waiting'); assert(report);
@@ -199,29 +203,35 @@ test('Codex MCP prefix approval reaches public tools, parent notification, audit
     assert.equal(notices.length, 0, 'single-call permission defaults to parent review, even when native persistent options exist');
     await assert.rejects(invoke('subagent', { action: 'send', id: started.id, message: 'Allow' }), /unresolved interaction/);
     const base = { id: started.id, questionId: q.id, reason: 'Only the user-authorized fixture write' };
-    for (const bad of [{ value: 'Allow for this session' }, { value: "Allow and don't ask me again" }, { confirmed: true },
-      { answers: { 'mcp_tool_call_approval_mcp-call': ['Allow'] } }, { value: 'Allow', reason: '' }])
+    for (const bad of [{ value: 'Allow for this session' }, { value: "Allow and don't ask me again" },
+      prefix ? { confirmed: true } : { value: 'Allow' }, { answers: {} }, { ...answer, reason: '' }])
       await assert.rejects(invoke('subagent_reply', { ...base, ...bad }), /option|type|reason|response/i);
     const auditFile = path.join(manager.root, started.id, 'runs', started.runId, 'permissions.jsonl');
     assert.equal(fs.existsSync(auditFile), false, 'invalid requests are rejected before the intent audit');
-    await invoke('subagent_reply', { ...base, value });
-    const final = await done(started.id, value === 'Allow' ? 'completed' : 'stopped');
+    await invoke('subagent_reply', { ...base, ...answer });
+    const final = await done(started.id, answer.value === 'Cancel' || answer.cancelled ? 'stopped' : 'completed');
     assert.equal(final.runId, started.runId); assert.deepEqual(final.session, started.session);
-    assert.equal(final.text, `MCP:${value}`); assert.equal(final.questions.length, 0);
+    assert.equal(final.text, `${prefix ? 'MCP' : 'ELICITATION'}:${action}`); assert.equal(final.questions.length, 0);
     const audit = fs.readFileSync(auditFile, 'utf8').trim().split('\n').map(JSON.parse);
-    assert.equal(audit.length, 1); assert.equal(audit[0].actor, 'parent'); assert.equal(audit[0].selectedOption, value);
+    assert.equal(audit.length, 1); assert.equal(audit[0].actor, 'parent'); assert.equal(audit[0].selectedOption, answer.value);
+    assert.equal(audit[0].decision, answer.cancelled ? 'cancelled' : prefix ? 'answered' : answer.confirmed ? 'approved' : 'denied');
     assert.equal(audit[0].reason, base.reason); assert.equal(audit[0].kind, undefined, 'not audited as a task question');
-    assert.ok(!JSON.stringify(audit).includes('fixture-only.txt'), 'action arguments are not copied to the decision audit');
+    assert.ok(!JSON.stringify(audit).includes('-only.txt'), 'action arguments are not copied to the decision audit');
     const result = JSON.parse((await invoke('subagent_query', { action: 'result', id: started.id, runId: started.runId })).content[0].text);
     assert.equal(result.text, final.text);
-    await assert.rejects(invoke('subagent_reply', { ...base, value }), /exited|ended|pending/);
+    await assert.rejects(invoke('subagent_reply', { ...base, ...answer }), /exited|ended|pending/);
     assert.ok(!manager.reports().some(r => r.agentId === started.id && r.status === 'waiting'));
   }
   const native = fs.readFileSync(path.join(home, 'requests.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
-  assert.equal(native.filter(r => r.method === 'turn/start').length, 2, 'reply is not another prompt');
+  assert.equal(native.filter(r => r.method === 'turn/start').length, 5, 'reply is not another prompt');
   assert.equal(native.filter(r => !r.method && r.result?.answers).length, 2);
-  assert.equal(fs.readFileSync(path.join(home, 'mcp-effect.txt'), 'utf8'), '1');
-  assert.equal(fs.existsSync(path.join(home, 'mcp-grants.jsonl')), false);
+  const elicitations = native.filter(r => !r.method && r.result?.action);
+  assert.equal(elicitations.length, 3);
+  assert.ok(elicitations.every(r => r.result.content === null && r.result._meta === null));
+  for (const kind of ['mcp', 'elicitation']) {
+    assert.equal(fs.readFileSync(path.join(home, `${kind}-effect.txt`), 'utf8'), '1');
+    assert.equal(fs.existsSync(path.join(home, `${kind}-grants.jsonl`)), false);
+  }
 });
 
 test('Codex accept/cancel-only choices route through the worker and record the exact selection', { timeout: 20_000 }, async t => {

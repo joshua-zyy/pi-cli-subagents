@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readCodexMcpApproval } from '../dist/codex-mcp-approval.js';
+import { readCodexMcpApproval, readCodexMcpElicitation } from '../dist/codex-mcp-approval.js';
 
 const item = { type: 'mcpToolCall', id: 'call-1', status: 'inProgress', server: 'fixture', tool: 'write', arguments: { file: 'sample.txt' } };
 const options = ['Allow', 'Allow for this session', "Allow and don't ask me again", 'Cancel'].map(label => ({ label, description: label }));
@@ -29,6 +29,33 @@ test('MCP decoder rejects ordinary, mixed, ambiguous and custom-answer forms', (
       { options: [{ label: 'Allow' }, options[3]] }, { question: 'x'.repeat(12_000) },
     ].map(patch => [{ ...question, ...patch }]),
   ]) assert.equal(readCodexMcpApproval(input, item), undefined);
+});
+
+const elicitation = { mode: 'form', serverName: 'fixture', message: 'Allow the MCP tool?',
+  _meta: { codex_approval_kind: 'mcp_tool_call', persist: ['session', 'always'] }, requestedSchema: { type: 'object', properties: {} } };
+
+test('MCP elicitation recognizes only marked message-only forms and native optional schema defaults', () => {
+  for (const mode of ['form', 'openai/form', 'openaiForm'])
+    for (const requestedSchema of [null, elicitation.requestedSchema, { ...elicitation.requestedSchema, required: null, $schema: null },
+      { ...elicitation.requestedSchema, required: [], $schema: 'https://json-schema.org/draft-07/schema#' }]) {
+      const result = readCodexMcpElicitation({ ...elicitation, mode, requestedSchema }, item);
+      assert.ok(result); assert.match(result.message, /sample\.txt/); assert.match(result.message, /persistent grants are not supported/);
+    }
+});
+
+test('MCP elicitation rejects other meta kinds, data, URL, ambiguous schema and action shapes', () => {
+  for (const input of [null, [], {}, ...[{ _meta: undefined }, { _meta: { codex_approval_kind: 'tool_suggestion' } },
+    { _meta: { codex_approval_kind: 'other' } }, { mode: 'url' }, { mode: 'openai/url' }, { mode: 'openai/userVerification' }, { mode: 'unknown' },
+    { serverName: 'foreign' }, { message: '' }, { message: 'x'.repeat(12_000) }, { requestedSchema: undefined },
+    ...[{}, [], { type: 'object' }, { type: 'object', properties: [] },
+      { ...elicitation.requestedSchema, properties: { field: { type: 'string' } } },
+      { ...elicitation.requestedSchema, required: ['hidden'] }, { ...elicitation.requestedSchema, required: false },
+      { ...elicitation.requestedSchema, $schema: 42 }, { ...elicitation.requestedSchema, anyOf: [] },
+    ].map(requestedSchema => ({ requestedSchema })),
+  ].map(patch => ({ ...elicitation, ...patch }))]) assert.equal(readCodexMcpElicitation(input, item), undefined);
+  for (const action of [null, [], {}, ...[{ status: 'completed' }, { server: '' }, { tool: '' }, { id: '' },
+    { arguments: undefined }, { type: 'commandExecution' }].map(patch => ({ ...item, ...patch }))])
+    assert.equal(readCodexMcpElicitation(elicitation, action), undefined);
 });
 
 test('MCP decoder rejects missing, foreign-kind, ended or unreviewable action items', () => {

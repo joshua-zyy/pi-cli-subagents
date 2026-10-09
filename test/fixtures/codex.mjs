@@ -11,6 +11,7 @@ const notify = (method, params) => emit({ method, params });
 let initialized = false, acknowledged = false, thread, turn, buffer = '';
 const approvals = new Map();
 const questions = new Map();
+const elicitations = new Map();
 const file = id => path.join(home, `${id}.json`);
 const save = () => fs.writeFileSync(file(thread.id), JSON.stringify(thread));
 function item(text, id = 'answer') {
@@ -47,6 +48,32 @@ function execute(message) {
   if (message === 'DEFAULT_QUESTION') {
     const setting = process.argv.filter(arg => arg.startsWith('features.default_mode_request_user_input=')).at(-1);
     return setting === 'features.default_mode_request_user_input=true' ? execute('QUESTION') : finish('DEFAULT_QUESTIONS_DISABLED');
+  }
+  if (message.startsWith('MCP_ELICIT')) {
+    const id = message.includes('STRING_ID') ? '37' : 37;
+    const nativeItem = { type: 'mcpToolCall', id: 'mcp-call', server: 'fixture', tool: 'write', arguments: { file: 'elicitation-only.txt' }, status: 'inProgress' };
+    if (!message.includes('MISSING_ITEM')) notify('item/started', { threadId: thread.id, turnId: turn.id, item: nativeItem });
+    if (message.includes('COMPLETED_ITEM')) notify('item/completed', { threadId: thread.id, turnId: turn.id, item: { ...nativeItem, status: 'completed' } });
+    if (message.includes('AMBIGUOUS') || message.includes('OTHER_DONE') || message.includes('OTHER_SERVER')) {
+      const other = { ...nativeItem, id: 'other', server: message.includes('OTHER_SERVER') ? 'other-server' : 'fixture' };
+      notify('item/started', { threadId: thread.id, turnId: turn.id, item: other });
+      if (message.includes('OTHER_DONE')) notify('item/completed', { threadId: thread.id, turnId: turn.id, item: { ...other, status: 'completed' } });
+    }
+    elicitations.set(`${typeof id}:${id}`, { id });
+    emit({ id, method: 'mcpServer/elicitation/request', params: {
+      threadId: message.includes('WRONG_THREAD') ? 'foreign' : thread.id,
+      turnId: message.includes('NULL_TURN') ? null : message.includes('WRONG_TURN') ? 'old' : turn.id,
+      serverName: message.includes('WRONG_SERVER') ? 'foreign' : 'fixture',
+      mode: message.includes('URL') ? 'url' : message.includes('LEGACY') ? 'openai/form' : 'form',
+      message: 'Allow the fixture MCP action?',
+      _meta: message.includes('NO_META') ? null : { codex_approval_kind: message.includes('SUGGESTION') ? 'tool_suggestion' : 'mcp_tool_call', persist: ['session', 'always'] },
+      requestedSchema: message.includes('DATA_FORM') ? { type: 'object', properties: { name: { type: 'string' } } } : { type: 'object', properties: {} },
+    } });
+    if (message.includes('AUTO_RESOLVE')) setTimeout(() => {
+      notify('serverRequest/resolved', { threadId: thread.id, requestId: id }); elicitations.delete(`${typeof id}:${id}`); finish('AUTO-RESOLVED');
+    }, 80);
+    if (message.includes('TURN_END')) finish('TURN-ENDED');
+    return;
   }
   if (message.startsWith('MCP_APPROVAL')) {
     const id = message.includes('STRING_ID') ? '17' : 17, itemId = 'mcp-call';
@@ -161,7 +188,22 @@ function execute(message) {
 function handle(cmd) {
   fs.appendFileSync(path.join(home, 'requests.jsonl'), JSON.stringify({ ...cmd, pid: process.pid, cwd: process.cwd(), ...(cmd.method === 'initialize' ? { launchArgs: process.argv.slice(2) } : {}) }) + '\n');
   if (!cmd.method) {
-    const key = `${typeof cmd.id}:${cmd.id}`, question = questions.get(key);
+    const key = `${typeof cmd.id}:${cmd.id}`, question = questions.get(key), elicitation = elicitations.get(key);
+    if (elicitation) {
+      if (cmd.error) { elicitations.delete(key); return; }
+      const result = cmd.result;
+      if (!result || !['accept', 'decline', 'cancel'].includes(result.action)) throw Error('Malformed native MCP elicitation response');
+      if (result.action === 'accept') {
+        const effect = path.join(home, 'elicitation-effect.txt');
+        fs.writeFileSync(effect, String((fs.existsSync(effect) ? Number(fs.readFileSync(effect, 'utf8')) : 0) + 1));
+        if (result._meta?.persist) fs.appendFileSync(path.join(home, 'elicitation-grants.jsonl'), JSON.stringify(result._meta) + '\n');
+      }
+      if (!process.argv.includes('--no-resolved')) {
+        notify('serverRequest/resolved', { threadId: thread.id, requestId: elicitation.id }); elicitations.delete(key);
+        finish(`ELICITATION:${result.action}`, result.action === 'cancel' ? 'interrupted' : 'completed');
+      }
+      return;
+    }
     if (question) {
       if (cmd.error) { questions.delete(key); return; }
       const answers = cmd.result?.answers;

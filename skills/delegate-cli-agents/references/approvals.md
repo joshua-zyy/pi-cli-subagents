@@ -32,8 +32,11 @@ Codex treats answers as trusted user input: provide only the user’s already-au
 new authorization. A recognized `mcp_tool_call_approval_<callId>` tied to a live MCP action is a
 permission, not a task question: inspect the server/tool/arguments, then use the offered `value`
 ("Allow" or "Cancel") or cancellation with a reason. Never submit `answers` or a persistent grant.
-Uncorrelated forms and the separate MCP elicitation channel remain unsupported; do not work around
-the refusal. The reserved IDs belong to the host. Sensitive fields
+The separate MCP elicitation entry uses `confirm` only when explicit approval metadata, a message-only
+form and one live same-server call are unambiguously bound. Submit `confirmed: true` to accept, false
+to decline, or `cancelled: true` to cancel. Do not submit form content or persistence metadata.
+Uncorrelated/ambiguous requests, data or URL forms and unknown approval kinds remain refused; do not
+work around the refusal. The reserved IDs belong to the host. Sensitive fields
 are marked, not masked or guaranteed absent from native logs; do not invent or expose secrets.
 
 Claude `AskUserQuestion` field IDs are the full question text, not short headers. Respect explicit
