@@ -51,22 +51,25 @@ test('error and waiting messages keep actionable details without embedding file 
   assert.deepEqual(h.sent[0].message.details.ids,['failed','waiting']);
 });
 
-test('a waiting notification states the request type, its offered values and exactly what the parent may submit', () => {
-  const audited = { method: 'select', options: ['Block', 'Allow once', 'Allow for this session', 'Always allow in this cwd'], parentPolicy: { values: ['Block', 'Allow once'] } };
+test('waiting notifications describe native response shapes without guessing authorization from labels', () => {
+  const options = ['Allow for this session', 'Skip this check', 'Continue once'];
+  const request = { method: 'select', options, parentPolicy: { values: options } };
   const h = harness([
-    { ...report('guard'), status: 'waiting', text: 'Dangerous bash command', questionId: 'q1', request: audited },
-    { ...report('plain'), status: 'waiting', text: 'Allow fixture operation?', questionId: 'q2', request: { method: 'confirm' } },
-    { ...report('huge'), status: 'waiting', text: 'Y'.repeat(9000), questionId: 'q3', request: audited },
+    { ...report('select'), status: 'waiting', text: 'Review this action', questionId: 'q1', request },
+    { ...report('legacy'), status: 'waiting', text: 'Old unknown request', questionId: 'q2', request: { method: 'confirm' } },
+    { ...report('huge'), status: 'waiting', text: 'Y'.repeat(9000), questionId: 'q3', request },
+    ...['input','editor'].map(method=>({...report(method),status:'waiting',text:'Provide context',questionId:method,request:{method,parentPolicy:{text:true}}})),
   ]);
   deliverReports(h.manager, h.pi, h.ctx, new Set());
   const content = h.sent[0].message.content;
-  assert.match(content, /Question ID: q1 \(select; offered: "Block", "Allow once", "Allow for this session", "Always allow in this cwd"\)\. You may submit "Block", "Allow once", or cancelled\./);
-  assert.match(content, /Handle this request now with subagent_reply within the user's task authorization; do not wait for routine human approval\./);
-  assert.match(content, /The other options \("Allow for this session", "Always allow in this cwd"\) require a wider grant; involve the human only if that grant is needed: \/agent-reply agent q1\./);
+  assert.match(content, /offered: "Allow for this session", "Skip this check", "Continue once"/);
+  assert.match(content, /You may submit "Allow for this session", "Skip this check", "Continue once", or cancelled/);
+  assert.match(content, /not proof.*authoriz/i);
+  assert.match(content, /user.*requires.*confirmation/i);
   assert.match(content, /Question ID: q2 \(confirm\)\. You may only refuse it \(confirmed: false or cancelled\); the human answers it with \/agent-reply agent q2\./);
-  // A clipped request body must not hide what the parent needs in order to answer at all.
-  assert.match(content, /characters omitted/);
-  assert.match(content, /Question ID: q3 \(select; offered: "Block"/);
+  for(const method of ['input','editor'])assert.match(content,new RegExp(`Question ID: ${method}.*value as response text`));
+  assert.match(content, /characters omitted/);assert.match(content, /Question ID: q3/);
+  assert.equal(h.notifications.length,1,'only the policy-less legacy request needs the human');
 });
 
 test('routine approvals stay with the parent without asking the human to take over', () => {

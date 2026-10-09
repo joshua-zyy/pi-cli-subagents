@@ -39,23 +39,6 @@ export async function inspectPiSession(session: SessionHandle): Promise<void> {
   } finally { await file.close(); }
 }
 
-/**
- * The external Pi permission contract this extension has audited: the option set of
- * @firstpick/pi-extension-safety-guard. "Block" and "Allow once" settle one command, while
- * "Allow for this session" and "Always allow in this cwd" write a wider grant (the last one
- * persists under the agent directory). A Pi UI request carries no source identifier.
- * Only this external contract and our explicitly loaded question tool have known response
- * semantics. Every other Pi interaction stays answerable by the human alone.
- */
-const AUDITED_PI_OPTIONS = ["Block", "Allow once", "Allow for this session", "Always allow in this cwd"];
-const AUDITED_PI_PARENT_VALUES = ["Block", "Allow once"];
-
-function auditedParentPolicy(method: unknown, options: unknown): Pick<Question, "parentPolicy" | "humanOnly"> {
-  const audited = method === "select" && Array.isArray(options)
-    && options.length === AUDITED_PI_OPTIONS.length && AUDITED_PI_OPTIONS.every((value, index) => options[index] === value);
-  return audited ? { humanOnly: false, parentPolicy: { values: AUDITED_PI_PARENT_VALUES } } : { humanOnly: true };
-}
-
 export class PiAdapter implements CliAdapter {
   readonly rpc: PiProcess;
   readonly closed: Promise<Exit>;
@@ -132,7 +115,11 @@ export class PiAdapter implements CliAdapter {
         id: String(record.id), method: record.method as Question["method"], title: String(record.title ?? "Subagent needs a response"),
         message: typeof record.message === "string" ? record.message : undefined,
         options: record.options, placeholder: record.placeholder, prefill: record.prefill,
-        ...auditedParentPolicy(record.method, record.options),
+        // Pi RPC supplies dialog shapes, not approval provenance. Forward native choices;
+        // the parent must judge their meaning against the user's authorization (as in Paseo).
+        humanOnly: false,
+        parentPolicy: record.method === "confirm" ? { confirm: true } :
+          record.method === "select" ? { values: record.options } : { text: true },
         ...(typeof record.timeout === "number" ? { expiresAt: Date.now() + record.timeout } : {}),
       };
       this.options.onEvent({ type: "question", question });

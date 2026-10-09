@@ -35,29 +35,43 @@ test('parent can explicitly review a child request while the human command remai
   const pending=await waiting();
   assert.equal(pending.length,1); assert.equal(pending[0].id,id);
   assert.equal(pending[0].questions[0].id,'permission-1');
-  assert.equal(pending[0].questions[0].message,'Requires a human answer');
-  assert.equal(pending[0].questions[0].humanOnly,true,'unknown Pi contracts must still require the human for approval');
+  assert.equal(pending[0].questions[0].message,'Confirm this fixture-only action');
+  assert.equal(pending[0].questions[0].humanOnly,false);
+  assert.deepEqual(pending[0].questions[0].parentPolicy,{confirm:true});
   await assert.rejects(invoke('subagent_reply',{id,questionId:'other',confirmed:true,reason:'not the current request'}),/ended|exist/);
   await assert.rejects(invoke('subagent_reply',{id,questionId:'permission-1',value:'bad',reason:'wrong answer type'}),/type/);
   assert.equal(manager.get(id).phase,'waiting');
-  // A Pi confirm can mean "remember this", so the parent agent may refuse but never approve it.
-  await assert.rejects(invoke('subagent_reply',{id,questionId:'permission-1',confirmed:true,reason:'Within the parent-assigned task'}),/parent|human/i);
-  assert.equal(manager.get(id).phase,'waiting','a refused approval must leave the request pending');
-  await invoke('subagent_reply',{id,questionId:'permission-1',confirmed:false,reason:'Not authorized for this task'});
+  // A native Pi confirm is delivered to the parent, not classified by button wording.
+  await invoke('subagent_reply',{id,questionId:'permission-1',confirmed:true,reason:'Confirm the authorized fixture-only action'});
   await waitUntil('complete',()=>manager.get(id).phase==='completed'&&!processAlive(manager.get(id).workerPid));
   assert.equal(confirmations,0);
-  assert.equal(manager.get(id).text,'DENY');
+  assert.equal(manager.get(id).text,'ALLOW');
   assert.deepEqual(await waiting(),[]);
   await assert.rejects(invoke('subagent_reply',{id,questionId:'permission-1',confirmed:true,reason:'duplicate'}),/ended|exist|exited/);
   const audit=fs.readFileSync(path.join(manager.root,id,'runs',manager.get(id).runId,'permissions.jsonl'),'utf8').trim().split('\n').map(JSON.parse);
-  assert.equal(audit.length,1,'a refused approval must not be recorded as a decision'); assert.equal(audit[0].actor,'parent'); assert.equal(audit[0].reason,'Not authorized for this task');
-  assert.equal(audit[0].decision,'denied');
+  assert.equal(audit.length,1,'only the valid parent response is recorded'); assert.equal(audit[0].actor,'parent'); assert.equal(audit[0].reason,'Confirm the authorized fixture-only action');
+  assert.equal(audit[0].decision,'approved');
   const second=JSON.parse((await invoke('subagent',{ action: 'start',role:'worker',task:'WAIT',cwd})).match(/\{.+\}/)[0]);
   await waitUntil('human waiting',()=>manager.get(second.id).phase==='waiting');
   await commands.get('agent-reply').handler(`${second.id} permission-1`,ctx);
   await waitUntil('human complete',()=>manager.get(second.id).phase==='completed'&&!processAlive(manager.get(second.id).workerPid));
   assert.equal(confirmations,1);assert.equal(manager.get(second.id).text,'DENY');
   assert.ok(notices.some(message=>message.includes('Human response accepted for subagent')));
+});
+
+test('parent refusal of a Pi confirmation reaches the child and records denial', {timeout:8000}, async t=>{
+  const cwd=tempDir('pi-refusal'),parent=path.join(cwd,'parent.jsonl');fs.writeFileSync(parent,'{}\n');
+  const manager=new AgentManager(parent,{command:process.execPath,args:[fixture]});
+  t.after(async()=>{for(const state of manager.list())if(processAlive(state.workerPid))await manager.close(state.id);});
+  const started=await manager.spawn('worker',{description:'fixture',instructions:'Only fixture interactions'},cwd,'WAIT');
+  const q=await waitUntil('confirmation',()=>manager.get(started.id).questions[0]);
+  await manager.reply(started.id,q.id,{confirmed:false},{actor:'parent',reason:'Not authorized'});
+  const final=await waitUntil('refusal completed',()=>{
+    const state=manager.get(started.id);return state.phase==='completed'&&!processAlive(state.workerPid)?state:undefined;
+  });
+  assert.equal(final.text,'DENY');
+  const audit=fs.readFileSync(path.join(manager.root,started.id,'runs',started.runId,'permissions.jsonl'),'utf8').trim().split('\n').map(JSON.parse);
+  assert.equal(audit.length,1);assert.equal(audit[0].actor,'parent');assert.equal(audit[0].decision,'denied');
 });
 
 test('permission tools reject foreign parents, missing persistent sessions and invalid decisions', {timeout:12000}, async t=>{
@@ -89,35 +103,71 @@ test('permission tools reject foreign parents, missing persistent sessions and i
   assert.deepEqual(options,['Allow once','Deny']);
   await assert.rejects(invoke('subagent_reply',{id:select.id,questionId:'permission-1',confirmed:true,reason:'wrong method'}),/type/);
   await assert.rejects(invoke('subagent_reply',{id:select.id,questionId:'permission-1',value:'Allow forever',reason:'not offered'}),/available options/);
-  // An unrecognized option set carries no audited meaning, so no value from it may be approved.
-  await assert.rejects(invoke('subagent_reply',{id:select.id,questionId:'permission-1',value:'Deny',reason:'Not authorized'}),/parent|human/i);
-  assert.equal(manager.get(select.id).phase,'waiting');
-  await invoke('subagent_reply',{id:select.id,questionId:'permission-1',cancelled:true,reason:'Not authorized'});
+  await invoke('subagent_reply',{id:select.id,questionId:'permission-1',value:'Deny',reason:'Not authorized'});
   await waitUntil('select complete',()=>manager.get(select.id).phase==='completed'&&!processAlive(manager.get(select.id).workerPid));
-  assert.equal(manager.get(select.id).text,'CANCELLED');
-  // The audited safety-guard contract: the parent may refuse or allow one action, never a standing grant.
+  assert.equal(manager.get(select.id).text,'Deny');
+  // All native labels remain visible; the parent's authorization judgment chooses the narrow action.
   const guard=JSON.parse((await invoke('subagent',{ action: 'start',role:'worker',task:'WAIT_SAFETY',cwd})).match(/\{.+\}/)[0]);
   await waitUntil('guard waiting',()=>manager.get(guard.id).phase==='waiting');
   const guardQuestion=(await waiting()).find(entry=>entry.id===guard.id).questions[0];
   assert.deepEqual(guardQuestion.options,['Block','Allow once','Allow for this session','Always allow in this cwd']);
-  assert.equal(guardQuestion.humanOnly,false,'an audited one-action policy must not tell the parent to wait for a human');
-  // The offering reaches the parent's notification, so it can answer without guessing.
+  assert.equal(guardQuestion.humanOnly,false);
   const guardReport=manager.reports().find(report=>report.agentId===guard.id&&report.status==='waiting');
-  assert.deepEqual(guardReport.request,
-    {method:'select',options:['Block','Allow once','Allow for this session','Always allow in this cwd'],humanOnly:false,parentPolicy:{values:['Block','Allow once']}});
-  const sent=[];
-  deliverReports(manager,{sendMessage:message=>sent.push(message)},{sessionManager:{getEntries:()=>[]},ui:{notify(){},setStatus(){}}},new Set(),Date.now());
+  assert.deepEqual(guardReport.request.parentPolicy,{values:guardQuestion.options});
+  const sent=[],warnings=[];
+  deliverReports(manager,{sendMessage:message=>sent.push(message)},{sessionManager:{getEntries:()=>[]},ui:{notify:message=>warnings.push(message),setStatus(){}}},new Set(),Date.now());
   const guardContent=sent.find(message=>message.content.includes(guard.id)).content;
   assert.match(guardContent,/offered: "Block", "Allow once", "Allow for this session", "Always allow in this cwd"/);
   assert.match(guardContent,/Handle this request now with subagent_reply within the user's task authorization/);
-  assert.match(guardContent,/The other options \("Allow for this session", "Always allow in this cwd"\) require a wider grant; involve the human only if that grant is needed: \/agent-reply \S+ permission-1/);
-  for(const forbidden of ['Allow for this session','Always allow in this cwd']){
-    await assert.rejects(invoke('subagent_reply',{id:guard.id,questionId:'permission-1',value:forbidden,reason:'standing grant'}),/parent|human/i);
-    assert.equal(manager.get(guard.id).phase,'waiting','a refused standing grant must leave the request pending');
-  }
+  assert.match(guardContent,/not proof.*authoriz/i);
+  assert.match(guardContent,/user.*requires.*confirmation/i);
+  assert.deepEqual(warnings,[]);
   await invoke('subagent_reply',{id:guard.id,questionId:'permission-1',value:'Allow once',reason:'One-off read-only grep inside the assigned scope'});
   await waitUntil('guard complete',()=>manager.get(guard.id).phase==='completed'&&!processAlive(manager.get(guard.id).workerPid));
-  assert.equal(manager.get(guard.id).text,'Allow once','the standing grant must never reach the child');
+  assert.equal(manager.get(guard.id).text,'Allow once');
+});
+
+test('parent replies to native Pi text dialogs once while cancellations and expiration stay scoped', {timeout:15000}, async t=>{
+  const cwd=tempDir('pi-dialog'),parent=path.join(cwd,'parent.jsonl');fs.writeFileSync(parent,'{}\n');
+  const tools=new Map();extension({on(){},registerTool:tool=>tools.set(tool.name,tool),registerCommand(){},registerShortcut(){},registerMessageRenderer(){}});
+  const manager=new AgentManager(parent,{command:process.execPath,args:[fixture]});
+  t.after(async()=>{for(const state of manager.list())if(processAlive(state.workerPid))await manager.close(state.id);});
+  const warnings=[],sent=[],ctx={cwd,sessionManager:{getSessionFile:()=>parent,getEntries:()=>[]},ui:{notify:message=>warnings.push(message),setStatus(){}}};
+  const invoke=args=>tools.get('subagent_reply').execute('test',args,undefined,undefined,ctx);
+  for(const [task,answer,expected] of [
+    ['WAIT_INPUT',{value:'literal, 雪'},'literal, 雪'],['WAIT_EDITOR',{value:'two\nlines'},'two\nlines'],
+    ['WAIT_INPUT',{cancelled:true},'CANCELLED'],['WAIT_EXPIRED',null,'EXPIRED'],
+  ]) {
+    const started=await manager.spawn('worker',{description:'fixture',instructions:'Only fixture interactions'},cwd,task);
+    const q=await waitUntil('native dialog',()=>manager.get(started.id).questions[0]);
+    assert.equal(q.kind,undefined,'a generic dialog is not authenticated as a task question');
+    assert.deepEqual(q.parentPolicy,{text:true});assert.equal(q.humanOnly,false);
+    assert.equal(q.method,task==='WAIT_EDITOR'?'editor':'input');
+    if(q.method==='editor')assert.equal(q.prefill,'original\ncontext');else assert.equal(q.placeholder,'exact text');
+    deliverReports(manager,{sendMessage:(message,options)=>sent.push({message,options})},ctx,new Set(),Date.now(),manager.list());
+    const notice=sent.find(row=>row.message.content.includes(started.id));assert.equal(notice.options.deliverAs,'steer');
+    assert.match(notice.message.content,/value as response text/);assert.doesNotMatch(notice.message.content,/not a permission request/);
+    const args={id:started.id,questionId:q.id,reason:'Authorized fixture context'};
+    if(answer) {
+      await assert.rejects(invoke({...args,confirmed:true}),/type/);
+      await assert.rejects(invoke({...args,answers:{field:['wrong contract']}}),/type/);
+      await invoke({...args,...answer});
+    }
+    const final=await waitUntil('original run completed',()=>{
+      const state=manager.get(started.id);return state.phase==='completed'&&!processAlive(state.workerPid)?state:undefined;
+    });
+    assert.equal(final.runId,started.runId);assert.equal(final.sessionId,started.sessionId);assert.equal(final.text,expected);
+    assert.deepEqual(final.questions,[]);
+    await assert.rejects(invoke({...args,value:'late reply'}),/ended|exited|exist/);
+    const auditFile=path.join(manager.root,started.id,'runs',started.runId,'permissions.jsonl');
+    if(answer) {
+      const audit=fs.readFileSync(auditFile,'utf8').trim().split('\n').map(JSON.parse);
+      assert.equal(audit.length,1);assert.equal(audit[0].actor,'parent');
+      assert.equal(audit[0].decision,answer.cancelled?'cancelled':'answered');
+      assert.equal(JSON.parse(fs.readFileSync(final.sessionFile,'utf8')).messages.filter(m=>m.role==='user').length,1);
+    } else assert.equal(fs.existsSync(auditFile),false,'an expired unanswered dialog produces no attempted-answer audit');
+  }
+  assert.deepEqual(warnings,[]);
 });
 
 test('owned Pi questions accept parent choices, custom text and cancellation in the original run', {timeout:15000}, async t=>{

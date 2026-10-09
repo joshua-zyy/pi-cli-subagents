@@ -74,13 +74,20 @@ function handle(cmd) {
     }, 1500);
     return;
   }
+  if (cmd.message === 'WAIT_INPUT' || cmd.message === 'WAIT_EDITOR' || cmd.message === 'WAIT_EXPIRED') {
+    question = true;
+    const editor = cmd.message === 'WAIT_EDITOR', expires = cmd.message === 'WAIT_EXPIRED';
+    emit({ type: 'extension_ui_request', id: 'permission-1', method: editor ? 'editor' : 'input', title: 'Provide fixture context',
+      ...(editor ? { prefill: 'original\ncontext' } : { placeholder: 'exact text' }), ...(expires ? { timeout: 1500 } : {}) });
+    if (expires) setTimeout(() => { question = false; finish('EXPIRED'); }, 1500);
+    return;
+  }
   if (cmd.message === 'WAIT' || cmd.message === 'WAIT_SELECT' || cmd.message === 'WAIT_SAFETY') {
     question = true;
     emit(cmd.message === 'WAIT' ?
-      { type: 'extension_ui_request', id: 'permission-1', method: 'confirm', title: 'Allow fixture operation?', message: 'Requires a human answer' } :
+      { type: 'extension_ui_request', id: 'permission-1', method: 'confirm', title: 'Allow fixture operation?', message: 'Confirm this fixture-only action' } :
       cmd.message === 'WAIT_SAFETY' ?
-      // The audited option set of @firstpick/pi-extension-safety-guard; two of these grant more
-      // than one action, so the parent agent must not be able to submit them.
+      // Typical safety-guard labels are just one native dialog, not a special protocol identity.
       { type: 'extension_ui_request', id: 'permission-1', method: 'select', title: 'Dangerous bash command', message: 'Reason: possible secret file access',
         options: ['Block', 'Allow once', 'Allow for this session', 'Always allow in this cwd'] } :
       { type: 'extension_ui_request', id: 'permission-1', method: 'select', title: 'Select fixture response', options: ['Allow once', 'Deny'] });

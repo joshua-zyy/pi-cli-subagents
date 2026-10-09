@@ -75,13 +75,12 @@ export interface Question {
   /** Native policy requires a human for approval; parent denial/cancellation remains safe. */
   humanOnly?: boolean;
   /**
-   * Which responses the parent agent may submit. Absent means the parent may only refuse
-   * (`cancelled`, or `confirmed: false`), because this extension never lets an agent produce an
-   * authorization whose scope it cannot establish. Records written by earlier versions carry no
-   * policy and therefore stay unanswerable by the parent. `text` permits custom answers only for
-   * the recognized task-question contract, including its logical selection request. `answers`
-   * permits a scoped Codex task form, not its native MCP approval forms. Codex treats answers as
-   * trusted user input (like delegated prompts), so the parent must not invent new authorization.
+   * Supported parent response shapes, not proof of user authorization or single-action effects.
+   * Pi dialogs expose their native choices; the parent judges scope and user-required escalation.
+   * Absent policy preserves legacy refusal-only behavior (`cancelled`, or `confirmed: false`).
+   * `text` permits input/editor text and custom answers for recognized logical question selects.
+   * `answers` permits a scoped Codex task form, not its native MCP approval forms. Explicit native
+   * human-only restrictions remain; the parent must not invent or broaden authorization.
    */
   parentPolicy?: { values?: string[]; confirm?: boolean; text?: true; answers?: true };
 }

@@ -235,7 +235,7 @@ test('direct human actions are recorded for the parent without interrupting it',
   await reply.press(keys.down); await reply.press('i'); await reply.press('r');
   await reply.press(keys.escape); await reply.running;
   await waitUntil('decision recorded', () => human().length === 2);
-  assert.match(human()[1].message.content, new RegExp(`${asking.id}.*worker\\] Answered pending request permission-1: approved once`, 's'));
+  assert.match(human()[1].message.content, new RegExp(`${asking.id}.*worker\\] Answered pending request permission-1: confirmed`, 's'));
 
   // Stopping a child changes the plan the parent is coordinating.
   const stop = await h.openAgents();

@@ -11,7 +11,7 @@ For a recognized `kind: "question"` with `parentPolicy.text: true`, submit an of
 actual custom answer once in `value`. The adapter handles the native selection/input sequence; do not
 choose a custom-entry menu item or wait for a second question. Answer from the authorized task
 context; escalate if the missing decision belongs to the user. An answer does not authorize new
-actions or change permissions. This does not make unknown Pi dialogs answerable.
+actions or change permissions. Other Pi dialogs are separate generic requests; do not reuse a cached task answer for them.
 
 For a Codex `form` with `parentPolicy.answers: true`, read the full `fields` with `subagent_query get`.
 Submit one `answers` object mapping every exact field ID to a string array, respecting offered labels
@@ -29,25 +29,27 @@ are marked, not masked or guaranteed absent from native logs; do not invent or e
 
 Inspect the full request and compare it with the user's original authorization. Make the in-scope
 one-action decision yourself using `subagent_reply`; the presence of a permission prompt is not a
-reason to ask the user again. Otherwise deny or cancel, or explain the specific missing authorization
+reason to ask the user again. Escalate if context, effects or authorization are unclear, or the user
+explicitly requires their confirmation. Otherwise deny or cancel, or explain the specific missing authorization
 and give `/agent-reply <agentId> <questionId>` when a human decision is needed. Supply a concrete
 `reason`: every decision is recorded locally with the actor who made it.
 
-A parent-agent approval is always a single action. It is never a blanket permission, never a session-wide or
-permanent grant, and never a reason to disable a safety extension.
+Approve only the authorized action. Do not grant blanket, session-wide or permanent permissions, or
+disable a safety extension. A generic Pi confirmation or option does not by itself prove a single-action effect.
 
 ## What the parent may submit
 
-Each request states the responses this parent may submit. Use one of them, or refuse it
-(`cancelled`, or `confirmed: false`). Claude and Codex requests carry their own one-action choices;
-an audited Pi safety-guard request may be refused or allowed once, never "for this session" or
-"always in this cwd". A request without a stated policy — including a record written by an earlier
-version — is answered by the human: refusing from the parent still works, approving does not.
+Treat `parentPolicy` as the supported response shape, not an authorization verdict. Pi `select`
+requires an exact native option in `value`; `confirm` uses `confirmed`; `input`/`editor` use text in
+`value`. Cancellation is available for all four. Read the complete request and decide within scope;
+there is no special safety-guard button whitelist and no automatic approval. Claude and Codex retain
+their native one-action mappings and human-only restrictions. A request without a stated policy,
+including a legacy record, remains refusal-only for the parent; the human can use `/agent-reply`.
 
 ## Boundaries the parent cannot cross
 
 - A response outside the request's stated policy cannot be approved by the parent. Prefer the offered
-  one-action choice when it covers the authorized work; ask for a wider grant only if actually needed.
+  one-action choice when it covers the authorized work; missing authorization must be resolved by the user.
 - Dedicated native dialogs and unscoped requests fail closed. A refusal is not something to work around
   with a raw `cwd`, a replacement instance or a hand-edited record.
 - Native permission requests from Pi, Codex and Claude Code offer their own choice values, including

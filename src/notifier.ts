@@ -23,14 +23,13 @@ function needsHumanApproval(request: Report["request"]): boolean {
   if (request?.method === "form") return request.kind !== "question" || request.parentPolicy?.answers !== true || request.humanOnly === true;
   return request?.humanOnly === true || !(request?.method === "confirm"
     ? request.parentPolicy?.confirm === true : request?.parentPolicy?.values?.length ||
-      request?.kind === "question" && (request.method === "select" || request.method === "input") && request.parentPolicy?.text === true);
+      request?.parentPolicy?.text === true && (request.method === "input" || request.method === "editor" ||
+        request.kind === "question" && request.method === "select"));
 }
 
 /**
- * What the parent needs in order to answer on the first attempt: the request kind, the values it
- * offers, and which of them this extension has established the parent may submit. Values outside
- * that set are named rather than summarised, because a standing grant is exactly what the parent
- * must not choose by accident.
+ * State the native response shape and any backend restrictions, without inferring authorization
+ * from option labels. The parent reviews both task questions and permissions against user scope.
  */
 function waitingAnswerLine(report: Report): string {
   const id = report.questionId ?? "inspect the instance with subagent_query";
@@ -42,7 +41,9 @@ function waitingAnswerLine(report: Report): string {
   if (request.method === "form") return needsHumanApproval(request)
     ? `${header} You may only cancel; the human answers it with ${human}.`
     : `${header} Submit one answers object mapping every field ID to an array of exact answer strings, or cancelled to dismiss without answers. Empty arrays skip individual fields. Follow each field's options/allowOther. Read the full fields with subagent_query get if needed. Answer only from the user's authorized task context; do not invent or expand authorization. Use subagent_reply, not a new task prompt.`;
-  const review = " Handle this request now with subagent_reply within the user's task authorization; do not wait for routine human approval.";
+  const review = " Handle this request now with subagent_reply within the user's task authorization; do not wait for routine human approval. An available response is not proof of user authorization; interpret its effect from the full request, not its label. Do not grant session-wide or persistent permissions. Escalate if the effect or authorization is unclear, or the user explicitly requires their confirmation.";
+  if ((request.method === "input" || request.method === "editor") && !needsHumanApproval(request))
+    return `${header} You may submit value as response text, or cancelled.${review}`;
   if (request.kind === "question" && !needsHumanApproval(request)) {
     const answer = request.parentPolicy?.text === true ? "value as answer text (an offered label or your custom answer)" : quoted(request.parentPolicy?.values ?? []);
     return `${header} This is a task question, not a permission request. You may submit ${answer}, or cancelled. Answer with subagent_reply using the authorized task context.`;
@@ -54,8 +55,7 @@ function waitingAnswerLine(report: Report): string {
   if (!allowed.length) return `${header} You may only refuse it (cancelled); the human answers it with ${human}.`;
   const permitted = `${header} You may submit ${quoted(allowed)}, or cancelled.`;
   if (needsHumanApproval(request)) return `${permitted} Approval requires the human: ${human}.`;
-  const rest = (request.options ?? []).filter((value) => !allowed.includes(value));
-  return `${permitted}${review}${rest.length ? ` The other options (${quoted(rest)}) require a wider grant; involve the human only if that grant is needed: ${human}.` : ""}`;
+  return `${permitted}${review}`;
 }
 
 /**

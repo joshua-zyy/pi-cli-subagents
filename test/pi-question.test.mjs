@@ -36,7 +36,7 @@ test('Pi publishes logical choices once and withdraws only the ended call and it
   end('call/A');
   assert(events.some(e=>e.type==='resolved'&&e.id===a.id));
   assert(!events.some(e=>e.type==='resolved'&&e.id===b.id));
-  dialog('late-A','call/A');assert.equal(questions().at(-1).humanOnly,true);
+  dialog('late-A','call/A');assert.equal(questions().at(-1).id,'late-A');assert.equal(questions().at(-1).kind,undefined);
   assert.deepEqual(writes,[]);
 });
 
@@ -82,18 +82,19 @@ test('cached answers never consume unknown, mismatched, permission or out-of-sta
   input('too-early','call/A');
   start('invalid',{questions:[{header:'Tests',question:'x',options:[]}]});dialog('invalid-args','invalid');
   for(const q of questions().filter(q=>q!==logical)){
-    assert.equal(q.humanOnly,true,q.id);assert.equal(q.kind,undefined,q.id);assert.equal(q.parentPolicy,undefined,q.id);
+    assert.equal(q.humanOnly,false,q.id);assert.equal(q.kind,undefined,q.id);
+    assert.deepEqual(q.parentPolicy,q.method==='confirm'?{confirm:true}:q.method==='select'?{values:q.options}:{text:true},q.id);
   }
-  dialog('audited-permission','call/A',{options:['Block','Allow once','Allow for this session','Always allow in this cwd']});
+  dialog('ordinary-permission','call/A',{options:['Block','Allow once','Allow for this session','Always allow in this cwd']});
   assert.equal(questions().at(-1).kind,undefined);
-  assert.deepEqual(questions().at(-1).parentPolicy,{values:['Block','Allow once']});
+  assert.deepEqual(questions().at(-1).parentPolicy,{values:['Block','Allow once','Allow for this session','Always allow in this cwd']});
   assert.deepEqual(writes,[]);
   dialog('own-select','call/A');
   input('foreign-input','call/A',{title:'Type your answer:'});
   input('modified-input','call/A',{placeholder:'another contract'});
-  assert.equal(questions().at(-1).humanOnly,true);assert.equal(writes.length,1);
+  assert.equal(questions().at(-1).id,'modified-input');assert.equal(writes.length,1);
   input('own-input','call/A');assert.deepEqual(writes[1],{id:'own-input',value:'private task context'});
-  input('extra-input','call/A');assert.equal(questions().at(-1).humanOnly,true);
+  input('extra-input','call/A');assert.equal(questions().at(-1).id,'extra-input');assert.equal(questions().at(-1).kind,undefined);
   assert.equal(writes.length,2,'a completed answer cannot be replayed into another input');
 });
 
@@ -102,7 +103,7 @@ test('closing the adapter discards answers before late UI events can replay them
     const {adapter,writes,start,dialog,questions}=setup();start('call/A');const q=questions()[0];assert(q);
     await adapter.reply({type:'reply',id:q.id,value:'pending context'});
     await adapter[method]();dialog('late','call/A');
-    assert.deepEqual(writes,[]);assert.equal(questions().at(-1).humanOnly,true);
+    assert.deepEqual(writes,[]);assert.equal(questions().at(-1).id,'late');assert.equal(questions().at(-1).kind,undefined);
   }
 });
 

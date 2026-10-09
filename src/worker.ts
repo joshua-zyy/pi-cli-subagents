@@ -120,7 +120,8 @@ async function run(dir: string, runId: string): Promise<void> {
       const choices = Number(input.cancelled === true) + Number(typeof input.confirmed === "boolean") + Number(typeof input.value === "string") + Number(input.answers !== undefined);
       if (choices !== 1) throw new Error("Provide exactly one response: confirmed, value, answers, or cancelled");
       const form = q.kind === "question" && q.method === "form" && q.fields;
-      const textAnswer = q.kind === "question" && (q.method === "select" || q.method === "input") && q.parentPolicy?.text === true && q.humanOnly !== true;
+      const textAnswer = q.parentPolicy?.text === true && q.humanOnly !== true &&
+        (q.method === "input" || q.method === "editor" || q.kind === "question" && q.method === "select");
       if (!input.cancelled) {
         if (form) input.answers = validateQuestionAnswers(form, input.answers);
         else {
@@ -131,8 +132,8 @@ async function run(dir: string, runId: string): Promise<void> {
       if (input.actor === "parent" && (typeof input.reason !== "string" || !input.reason.trim())) throw new Error("A parent decision requires a reason");
       if (input.actor !== undefined && input.actor !== "parent" && input.actor !== "human") throw new Error("Unknown decision actor");
       if (input.actor === "parent" && !input.cancelled) {
-        // A refusal is always safe. Producing an authorization is not: without a policy that states
-        // what a response means, the parent may only refuse and the human answers the request.
+        // The policy describes supported responses, not proof of user authorization. Keep
+        // native human-only and legacy restrictions; the parent judges the authorized scope.
         const refusal = q.method === "confirm" && input.confirmed === false;
         const permitted = form ? q.parentPolicy?.answers === true && q.humanOnly !== true :
           q.method === "confirm" ? q.parentPolicy?.confirm === true : textAnswer || q.parentPolicy?.values?.includes(input.value!) === true;
