@@ -91,6 +91,35 @@ test('human task answers collect custom text locally and submit one logical repl
   }
 });
 
+test('human Codex forms collect fields once, warn about visible sensitive input, and cancel atomically', async t => {
+  for (const [value, custom] of [['literal context', false], ['custom context', true], [undefined, false], [undefined, true]]) {
+    const h = harness(t, 'waiting'), replies = [];
+    h.before.questions = [{ id: 'native-form', method: 'form', kind: 'question', parentPolicy: { answers: true }, fields: [
+      { id: 'checks', header: 'Tests', question: 'Which checks?', options: [{ label: 'Unit', description: 'Focused checks' }], allowOther: custom, isSecret: false },
+      { id: 'context', header: 'Context', question: 'Supply context', options: [], allowOther: true, isSecret: true },
+    ] }];
+    const reply = t.mock.method(AgentManager.prototype, 'reply', async (id, questionId, answer) => {
+      replies.push({ id, questionId, answer }); return h.before;
+    });
+    try {
+      h.ctx.hasUI = true;
+      h.ctx.ui.select = async (title, options) => {
+        assert.match(title, /Which checks/); assert.match(options[0], /Unit.*Focused checks/);
+        if (custom) { assert.match(options.at(-1), /Type something/); return options.at(-1); }
+        assert.equal(options.length, 1); return options[0];
+      };
+      h.ctx.ui.input = async title => {
+        if (custom && title.includes('Which checks')) return value === undefined ? undefined : 'Custom checks';
+        assert.match(title, /sensitive|secret/i); assert.match(title, /visible|not masked/i); return value;
+      };
+      await h.commands.get('agent-reply').handler(h.before.id + ' native-form', h.ctx);
+      assert.deepEqual(replies, [{ id: h.before.id, questionId: 'native-form', answer: value === undefined ? { cancelled: true } : { answers: { checks: [custom ? 'Custom checks' : 'Unit'], context: [value] } } }]);
+      const action = h.messages.find(m => m.message.customType === 'cli-subagents-human-action'); assert(action);
+      if (value) assert(!action.message.content.includes(value), 'the human-action summary need not repeat answer contents');
+    } finally { reply.mock.restore(); await h.close(); }
+  }
+});
+
 test('inline input surfaces failed state instead of an accepted notice and records the human attempt', async t => {
   for(const phase of ['completed','running']) {
     const h = harness(t,phase);

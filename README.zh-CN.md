@@ -90,6 +90,10 @@ TUI 报告跟随 Pi 的展开/折叠状态（默认 **Ctrl+O**，支持自定义
 
 Pi 子代理每次启动或恢复时会显式加载随包提供的 `subagent_ask_parent`，不要求全局安装问答插件。已识别的调用形成一个逻辑问题，提供 2–4 个选项并允许自定义文本。父代理只需一次通过 `subagent_reply.value` 提交选项标签或实际答案；适配器沿用 Paseo 的流程，缓存答案并自动完成对应的原生选择、输入，不再让父代理操作第二个 UI 步骤或发送新任务。请求标记为 `kind: "question"`、`parentPolicy.text: true`，回答只是任务上下文，不扩大权限。只有调用、版本化标题、预期 UI 阶段和形状均匹配的原生弹窗才会消耗该答案；未知弹窗仍须由人工批准。
 
+Codex 的任务表单（`requestUserInput`，按 CLI 0.159.2 核对）可以包含多道问题。对 `method: "form"`、`parentPolicy.answers: true` 的请求，通过 `subagent_query get` 读取 `fields`，一次提交 `subagent_reply.answers`：每个字段 ID 对应一个字符串数组，如 `{ "<字段ID>": ["原样答案"] }`。遵守选项及 `allowOther`；`[]` 明确跳过该题，`cancelled: true` 取消整张表单。缺少字段会被拒绝，绝不猜选第一项。非阻塞问题不会让子代理进入等待状态，但答案仍绑定原请求和原 turn；已解决、已结束或投递不确定的答复不得重放。
+
+Codex 将这些回答视为可信用户输入，因此只能提供用户已经授权的任务上下文，不能创造新授权。原生 MCP 审批表单及关联已知操作项的输入仍不支持，会令本轮失败，不会被当成普通问题；普通问题不得使用主机保留的 `mcp_tool_call_approval*` ID。人工可用 `/agent-reply` 逐题作答；敏感字段会提示输入可见且可能留在日志中，并非掩码输入。
+
 Pi 和 Codex 支持运行中的 `steer` 消息；运行中的 `followUp` 仅 Pi 支持。Claude 必须等当前任务结束后再续聊。面板仅限 TUI，工具也可用于 RPC/非交互模式。
 
 ## 隔离并行改动
@@ -129,7 +133,7 @@ npm run test:list # 只列本地选集，不构建或执行测试
 
 ## 致谢
 
-- [Paseo](https://github.com/getpaseo/paseo)：生命周期设计参考；Pi 工具调用与对话的关联逻辑改编自其[固定版本的映射器](https://github.com/getpaseo/paseo/blob/99fc204c55c8c1666477282eeba562ba87a3135f/packages/server/src/server/agent/providers/pi/extensions/rpiv-ask-user-question/index.ts)（Apache-2.0）。
+- [Paseo](https://github.com/getpaseo/paseo)：生命周期设计参考；Pi 工具调用与对话的关联逻辑改编自其[固定版本的映射器](https://github.com/getpaseo/paseo/blob/99fc204c55c8c1666477282eeba562ba87a3135f/packages/server/src/server/agent/providers/pi/extensions/rpiv-ask-user-question/index.ts)（Apache-2.0）。Codex 问题归一化与答案映射也改编自其[固定版本的 Codex 适配器](https://github.com/getpaseo/paseo/blob/06fe97c9019c1db4a5264dfb9b369b93e5e2fba4/packages/server/src/server/agent/providers/codex-app-server-agent.ts)，改为按 ID 回答、严格校验，并去掉缺失答案默认选第一项的行为。
 - [@juicesharp/rpiv-ask-user-question 2.12.0](https://www.npmjs.com/package/@juicesharp/rpiv-ask-user-question/v/2.12.0)：子 Pi 内置工具的单问题 RPC 选项／自定义回答流程来源（MIT）。
 - [pi-subagents](https://github.com/tintinweb/pi-subagents)：状态区与对话界面的设计参考。
 

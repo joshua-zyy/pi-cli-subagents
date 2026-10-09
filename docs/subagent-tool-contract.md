@@ -38,7 +38,7 @@ The following is a logical parameter contract, not the final TypeBox/JSON Schema
 | Running Pi | Deliver using the selected steer/followUp mode; receipt does not imply execution |
 | Running Codex | Use the supported steer path; explicitly reject followUp |
 | Running Claude | Running delivery is currently unsupported and explicitly rejected; wait for the run to end before continuing |
-| Unresolved interaction request | Direct the caller to `subagent_reply` or the user interaction entry point; ordinary messages are not approvals |
+| Unresolved blocking interaction request | Direct the caller to `subagent_reply` or the user interaction entry point; ordinary messages are not approvals |
 | Finished, with a recoverable original session | Wait for the old execution to release resources, then start a new run in the same instance |
 | Missing session, unclear occupation or uncertain state | Reject with diagnostic guidance; do not silently create a replacement |
 
@@ -97,12 +97,13 @@ Reject missing, corrupt, cross-instance or cross-parent-session results. A missi
 
 ## 4. `subagent_reply`: answer a specific request
 
-Retain the parameters: `id`, `questionId` and `reason` are required; supply exactly one of `confirmed`, `value` or `cancelled: true`, matching the request type.
+Retain the parameters: `id`, `questionId` and `reason` are required; supply exactly one of `confirmed`, `value`, `answers` or `cancelled: true`, matching the request type.
 
 | Request type | Answer |
 |---|---|
 | confirm | A confirmed boolean, or cancellation |
 | Task question with `parentPolicy.text: true` | An offered label or custom text in `value`, submitted once, or cancellation |
+| Codex task form with `parentPolicy.answers: true` | One `answers` object mapping every `fields[].id` to a string array, or cancellation |
 | Other select | The value of a currently valid option, or cancellation |
 | input/editor | Text in value, or cancellation |
 
@@ -113,6 +114,12 @@ Return the current state and actual response-receipt result. Acceptance can prec
 Keep this tool separate so approval responses remain distinguishable from ordinary lifecycle operations; do not turn it into an automatic approval policy.
 
 Pi additionally receives a bundled, child-only `subagent_ask_parent` resource at launch and resume. Its recognized tool call creates one logical request with option labels, `kind: "question"` and `parentPolicy.text: true`. Following Paseo, the adapter caches one answer and defers native UI until the answer is available. An option label maps to its original menu entry; custom text selects the custom-answer entry and automatically fills the subsequent input. Every consumed dialog must match its active call, versioned title, expected stage and full shape. Tool completion and shutdown discard cached answers. A failed UI write fails the run instead of silently losing or replaying the answer. Replies stay in the same native turn; no extra parent reply or user prompt is needed. Unknown dialogs and native permission restrictions are unchanged. This is not a general-purpose messaging channel or a permission grant. Protocol/mapping and local lifecycle checks do not establish real-model collaboration acceptance.
+
+Codex `item/tool/requestUserInput` is normalized into `method: "form"`, `kind: "question"`, `fields` and `isBlocking`. Each field retains its native ID, header, question, option labels/descriptions, `allowOther` and `isSecret`; duplicate headers do not merge distinct IDs. Answers preserve exact strings and map to native `{ "answers": { "<field-id>": { "answers": ["text"] } } }`. Supply all current field IDs, using an empty array to skip a field; cancel the entire request with `cancelled: true` (native empty answers map). Missing/extra IDs, wrong types and unoffered choices without `allowOther` are rejected before audit or delivery. No answer is guessed.
+
+A non-blocking form does not set phase to waiting or prevent running steer, but a steer is never a form answer. Requests expire on native resolution or turn completion, not on deprecated `autoResolutionMs`; late answers are not rerouted to another turn. Delivery is attempted only once and waits for native request resolution, not proof of execution. An uncertain response must be inspected, never resent. Human entry collects all fields before one reply; cancelling any entry cancels the entire form. `isSecret` is metadata and a visibility warning, not secret storage or masked input.
+
+The supported native shape is checked against Codex 0.159.2; requests declaring `multiSelect: true` and malformed/unscoped payloads fail closed rather than being silently narrowed. Native MCP approvals also use this channel: [the pinned upstream code](https://github.com/openai/codex/blob/rust-v0.159.2/codex-rs/core/src/mcp_tool_call.rs) maps answers to session/persistent grants. The host-owned `mcp_tool_call_approval*` namespace and input tied to known command/file/MCP action items are therefore excluded from task forms and retain the existing unsupported-run failure. The action-item guard follows native event order; the reserved-ID guard does not depend on it. New native approval conventions require another contract audit. Codex treats task answers as trusted user input, just like delegated prompts: the parent must stay within the user’s original authorization, not invent authorization because it received a question. Local fixtures/schema checks do not establish real-model Codex acceptance.
 
 ## 5. `subagent_workspace`: managed worktrees
 

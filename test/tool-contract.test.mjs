@@ -43,6 +43,17 @@ test('action validation refuses missing, irrelevant and unknown fields before ru
   ]) await assert.rejects(invoke(tool, args), pattern, JSON.stringify({tool, args}));
 });
 
+test('the reply tool exposes one structured answer map without changing the parent actor', async t => {
+  const { tools, invoke } = harness(), calls = [];
+  const args = { id: 'agent', questionId: 'form', answers: { checks: ['Unit'], context: ['literal, context'] }, reason: 'Authorized task context' };
+  const parsed = validateToolArguments(tools.get('subagent_reply'), { id: 'call', name: 'subagent_reply', arguments: args });
+  assert.deepEqual(parsed, args);
+  t.mock.method(AgentManager.prototype, 'reply', async (...args) => { calls.push(args); return { id: 'agent', phase: 'running' }; });
+  await invoke('subagent_reply', args);
+  assert.deepEqual(calls, [['agent', 'form', { confirmed: undefined, value: undefined, answers: args.answers, cancelled: undefined },
+    { actor: 'parent', reason: args.reason }]]);
+});
+
 test('the stop and workspace actions retain the existing runtime operation and target', async t => {
   const { invoke } = harness(), calls = [];
   t.mock.method(AgentManager.prototype, 'close', async id => { calls.push(['stop', id]); return { id, phase: 'stopped' }; });

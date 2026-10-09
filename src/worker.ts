@@ -4,6 +4,7 @@ import { randomBytes, randomUUID } from "node:crypto";
 import path from "node:path";
 import { PiAdapter } from "./pi-adapter.js";
 import { CodexAdapter } from "./codex-adapter.js";
+import { validateQuestionAnswers } from "./codex-question.js";
 import { ClaudeAdapter } from "./claude-adapter.js";
 import { nativeSession, type CliAdapter, type AdapterEvent } from "./cli-adapter.js";
 import { readJson, writeJson } from "./storage.js";
@@ -79,24 +80,24 @@ async function run(dir: string, runId: string): Promise<void> {
     if (ending) return;
     if (record.type === "activity") {
       state.lastActivity = record.detail;
-      state.phase = state.questions.length ? "waiting" : "running"; save();
+      state.phase = state.questions.some(q => q.isBlocking !== false) ? "waiting" : "running"; save();
     }
     if (record.type === "question") {
       const question: Question = record.question;
       report("waiting", `${question.title}\n${question.message ?? ""}`, undefined, question.id);
-      state.questions.push(question); state.phase = "waiting"; save();
+      state.questions.push(question); state.phase = state.questions.some(q => q.isBlocking !== false) ? "waiting" : "running"; save();
       if (question.expiresAt !== undefined) {
         const timer = setTimeout(() => {
           timers.delete(timer);
           state.questions = state.questions.filter((q) => q !== question);
-          if (!ending) { state.phase = state.questions.length ? "waiting" : state.accepted ? "running" : "starting"; save(); }
+          if (!ending) { state.phase = state.questions.some(q => q.isBlocking !== false) ? "waiting" : state.accepted ? "running" : "starting"; save(); }
         }, Math.max(0, question.expiresAt - Date.now()));
         timers.add(timer);
       }
     }
     if (record.type === "resolved") {
       state.questions = state.questions.filter(q => q.id !== record.id);
-      state.phase = state.questions.length ? "waiting" : state.accepted ? "running" : "starting"; save();
+      state.phase = state.questions.some(q => q.isBlocking !== false) ? "waiting" : state.accepted ? "running" : "starting"; save();
     }
     if (record.type === "settled") {
       finalText = record.text;
@@ -110,18 +111,22 @@ async function run(dir: string, runId: string): Promise<void> {
     if (ending || !rpc) throw new Error("Not accepted: worker is starting or shutting down; inspect its state first.");
     if (input.type === "send") {
       if (!state.accepted) throw new Error("Initial task has not been accepted; resolve any startup interaction first.");
-      if (state.questions.length) throw new Error("The child has an unresolved interaction. Use subagent_reply or /agent-reply; a message is not an approval.");
+      if (state.questions.some(q => q.isBlocking !== false)) throw new Error("The child has an unresolved interaction. Use subagent_reply or /agent-reply; a message is not an approval.");
       if (typeof input.message !== "string" || !input.message.trim() || !["steer", "followUp"].includes(input.mode)) throw new Error("Invalid message or delivery mode");
       await rpc.send(input.message, input.mode);
     } else if (input.type === "reply") {
       const q = state.questions.find((q) => q.id === input.id);
       if (!q || (q.expiresAt !== undefined && q.expiresAt <= Date.now())) throw new Error("The interaction has ended or does not exist");
-      const choices = Number(input.cancelled === true) + Number(typeof input.confirmed === "boolean") + Number(typeof input.value === "string");
-      if (choices !== 1) throw new Error("Provide exactly one response: confirmed, value, or cancelled");
+      const choices = Number(input.cancelled === true) + Number(typeof input.confirmed === "boolean") + Number(typeof input.value === "string") + Number(input.answers !== undefined);
+      if (choices !== 1) throw new Error("Provide exactly one response: confirmed, value, answers, or cancelled");
+      const form = q.kind === "question" && q.method === "form" && q.fields;
       const textAnswer = q.kind === "question" && (q.method === "select" || q.method === "input") && q.parentPolicy?.text === true && q.humanOnly !== true;
       if (!input.cancelled) {
-        if (q.method === "confirm" ? typeof input.confirmed !== "boolean" : typeof input.value !== "string") throw new Error("Response type does not match the question");
-        if (q.method === "select" && !textAnswer && !q.options?.includes(input.value!)) throw new Error("Response is not one of the available options");
+        if (form) input.answers = validateQuestionAnswers(form, input.answers);
+        else {
+          if (input.answers !== undefined || (q.method === "confirm" ? typeof input.confirmed !== "boolean" : typeof input.value !== "string")) throw new Error("Response type does not match the question");
+          if (q.method === "select" && !textAnswer && !q.options?.includes(input.value!)) throw new Error("Response is not one of the available options");
+        }
       }
       if (input.actor === "parent" && (typeof input.reason !== "string" || !input.reason.trim())) throw new Error("A parent decision requires a reason");
       if (input.actor !== undefined && input.actor !== "parent" && input.actor !== "human") throw new Error("Unknown decision actor");
@@ -129,7 +134,8 @@ async function run(dir: string, runId: string): Promise<void> {
         // A refusal is always safe. Producing an authorization is not: without a policy that states
         // what a response means, the parent may only refuse and the human answers the request.
         const refusal = q.method === "confirm" && input.confirmed === false;
-        const permitted = q.method === "confirm" ? q.parentPolicy?.confirm === true : textAnswer || q.parentPolicy?.values?.includes(input.value!) === true;
+        const permitted = form ? q.parentPolicy?.answers === true && q.humanOnly !== true :
+          q.method === "confirm" ? q.parentPolicy?.confirm === true : textAnswer || q.parentPolicy?.values?.includes(input.value!) === true;
         if (!refusal && !permitted) throw new Error("This request requires human approval; the parent agent may only refuse it, not approve it");
       }
       // Record intent before sending: a failed log write must not silently approve an action.
@@ -140,7 +146,7 @@ async function run(dir: string, runId: string): Promise<void> {
       })}\n`, { mode: 0o600 });
       await rpc.reply(input);
       state.questions = state.questions.filter((item) => item !== q);
-      if (!ending) { state.phase = state.questions.length ? "waiting" : state.accepted ? "running" : "starting"; save(); }
+      if (!ending) { state.phase = state.questions.some(q => q.isBlocking !== false) ? "waiting" : state.accepted ? "running" : "starting"; save(); }
     } else throw new Error("Unknown control operation");
     return state;
   }
@@ -183,7 +189,7 @@ async function run(dir: string, runId: string): Promise<void> {
     save();
     if (!ending) {
       await rpc.start(start.message);
-      state.accepted = true; if (!ending && !state.questions.length) state.phase = "running"; save();
+      state.accepted = true; if (!ending && !state.questions.some(q => q.isBlocking !== false)) state.phase = "running"; save();
     }
     await finished;
   } catch (error) {

@@ -1,6 +1,6 @@
 # Answering a child's request
 
-Read this when a child is `waiting` on a permission request or task question. The workflow itself is in
+Read this when a child has a pending permission request or task question, including non-blocking forms while `running`. The workflow itself is in
 [../SKILL.md](../SKILL.md); `subagent_query({ action: "get", id })` returns the unresolved request, and
 `subagent_reply` answers one of them.
 
@@ -12,6 +12,18 @@ actual custom answer once in `value`. The adapter handles the native selection/i
 choose a custom-entry menu item or wait for a second question. Answer from the authorized task
 context; escalate if the missing decision belongs to the user. An answer does not authorize new
 actions or change permissions. This does not make unknown Pi dialogs answerable.
+
+For a Codex `form` with `parentPolicy.answers: true`, read the full `fields` with `subagent_query get`.
+Submit one `answers` object mapping every exact field ID to a string array, respecting offered labels
+and `allowOther`. Use `[]` to skip a field, or `cancelled: true` to dismiss the whole form; never
+guess a first choice or replace an ID with its display header. Do not mix `answers` with `value` or
+`confirmed`. Non-blocking questions permit continued work, but answers still expire with their
+original request/turn. Never retry an uncertain delivery or send the answer as a new prompt.
+
+Codex treats answers as trusted user input: provide only the user’s already-authorized context, not
+new authorization. Native MCP approval forms are not task questions and remain unsupported; their
+`mcp_tool_call_approval*` IDs belong to the host. Do not work around this refusal. Sensitive fields
+are marked, not masked or guaranteed absent from native logs; do not invent or expose secrets.
 
 ## Decide
 

@@ -90,6 +90,10 @@ A waiting request reaches a busy parent through `steer`, before its next model r
 
 Pi children explicitly load the bundled `subagent_ask_parent` tool on each start or resume; no global plugin installation is needed. Its recognized call becomes one logical task question with 2–4 choices and custom text. Submit an offered label or your custom answer once as `subagent_reply.value`. Following Paseo’s flow, the adapter caches the answer and automatically replies to the matching native selection and input; the parent does not handle a second UI step or send another prompt. These requests carry `kind: "question"` and `parentPolicy.text: true`; answers are context, not permission grants. Native dialogs are consumed only when their call, versioned title and expected UI stage/shape match. Unknown dialogs retain their human-only approval boundary.
 
+Codex task forms (`requestUserInput`, checked against CLI 0.159.2) can contain multiple questions. For `method: "form"` with `parentPolicy.answers: true`, read `fields` via `subagent_query get` and submit one `subagent_reply.answers` object: `{ "<field-id>": ["exact answer"] }` for every field. Respect choices and `allowOther`; `[]` explicitly skips a field, while `cancelled: true` dismisses the whole form. Missing fields are rejected, never filled with a guessed first option. Non-blocking forms keep the child running, but answers remain bound to the original request and turn; resolved, ended or uncertain deliveries must not be replayed.
+
+Codex treats these answers as trusted user input, so provide only already-authorized task context, never new authorization. Its native MCP approval forms and input associated with known action items remain unsupported and fail the run; they are not ordinary questions. The host-reserved `mcp_tool_call_approval*` IDs must not be used for task questions. Human form entry is available through `/agent-reply`; sensitive fields warn that input is visible and may be retained in logs, not masked.
+
 Pi and Codex accept running `steer` messages; running `followUp` is Pi-only. Wait for Claude to finish before sending more instructions. Panels are TUI-only; the tools also work in RPC/non-interactive modes.
 
 ## Isolate parallel edits
@@ -129,7 +133,7 @@ After code changes, rebuild and run `/reload` in Pi. Automated tests are not ful
 
 ## Credits
 
-- [Paseo](https://github.com/getpaseo/paseo): lifecycle design, plus Pi logical-question normalization, tool-call/dialog correlation and cached answer replay adapted from its [pinned mapper](https://github.com/getpaseo/paseo/blob/99fc204c55c8c1666477282eeba562ba87a3135f/packages/server/src/server/agent/providers/pi/extensions/rpiv-ask-user-question/index.ts) (Apache-2.0).
+- [Paseo](https://github.com/getpaseo/paseo): lifecycle design, plus Pi logical-question normalization, tool-call/dialog correlation and cached answer replay adapted from its [pinned mapper](https://github.com/getpaseo/paseo/blob/99fc204c55c8c1666477282eeba562ba87a3135f/packages/server/src/server/agent/providers/pi/extensions/rpiv-ask-user-question/index.ts) (Apache-2.0). Codex question normalization and answer mapping are also adapted from its [pinned Codex adapter](https://github.com/getpaseo/paseo/blob/06fe97c9019c1db4a5264dfb9b369b93e5e2fba4/packages/server/src/server/agent/providers/codex-app-server-agent.ts), with ID-keyed answers, stricter validation and no default-choice fallback.
 - [@juicesharp/rpiv-ask-user-question 2.12.0](https://www.npmjs.com/package/@juicesharp/rpiv-ask-user-question/v/2.12.0): the single-question RPC choice/custom-answer flow used by the bundled child tool (MIT).
 - [pi-subagents](https://github.com/tintinweb/pi-subagents): inspiration for the status and conversation UI.
 

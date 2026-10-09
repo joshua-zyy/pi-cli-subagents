@@ -10,6 +10,7 @@ const error = (cmd, message) => emit({ id: cmd.id, error: { code: -32000, messag
 const notify = (method, params) => emit({ method, params });
 let initialized = false, acknowledged = false, thread, turn, buffer = '';
 const approvals = new Map();
+const questions = new Map();
 const file = id => path.join(home, `${id}.json`);
 const save = () => fs.writeFileSync(file(thread.id), JSON.stringify(thread));
 function item(text, id = 'answer') {
@@ -43,6 +44,35 @@ function execute(message) {
   if (message === 'CRASH') return process.exit(2);
   if (message === 'NOISE') return process.stdout.write('not-json\n');
   if (message === 'EARLY_EXIT') return process.exit(0);
+  if (message.startsWith('QUESTION')) {
+    const id = message.includes('STRING_ID') ? '17' : 17;
+    const request = { id, itemId: 'ask', turnId: turn.id };
+    questions.set(`${typeof id}:${id}`, request);
+    if (message.includes('MCP_ITEM')) notify('item/started', { threadId: thread.id, turnId: turn.id,
+      item: { type: 'mcpToolCall', id: 'ask', server: 'fixture', tool: 'write', arguments: {}, status: 'inProgress' } });
+    emit({ id, method: 'item/tool/requestUserInput', params: {
+      threadId: thread.id, turnId: turn.id, itemId: 'ask', isBlocking: !message.includes('NONBLOCKING'), autoResolutionMs: 0,
+      questions: message.includes('MCP_APPROVAL') ? [
+        { id: 'mcp_tool_call_approval_ask', header: 'Approve app tool call?', question: 'Allow this MCP action?', isOther: false, isSecret: false,
+          options: [
+            { label: 'Allow', description: 'Run once' },
+            { label: 'Allow for this session', description: 'Remember this session' },
+            { label: "Allow and don't ask me again", description: 'Persist a policy amendment' },
+            { label: 'Cancel', description: 'Cancel this action' },
+          ] },
+      ] : [
+        { id: 'checks', header: 'Tests', question: 'Which checks should run?', isOther: false, isSecret: false,
+          options: [{ label: 'Unit', description: 'Focused checks' }, { label: 'Integration', description: 'Local scenario' }] },
+        { id: 'context', header: 'Context', question: 'What task context is missing?', options: null, isOther: true, isSecret: false },
+      ],
+    } });
+    if (message.includes('AUTO_RESOLVE')) setTimeout(() => {
+      notify('serverRequest/resolved', { threadId: thread.id, requestId: id }); questions.delete(`${typeof id}:${id}`);
+      finish('AUTO-RESOLVED');
+    }, 80);
+    if (message.includes('TURN_END')) finish('TURN-ENDED');
+    return;
+  }
   if (message.startsWith('APPROVAL')) {
     const fileChange = message.includes('FILE');
     const kind = fileChange ? 'fileChange' : 'commandExecution';
@@ -103,7 +133,21 @@ function execute(message) {
 function handle(cmd) {
   fs.appendFileSync(path.join(home, 'requests.jsonl'), JSON.stringify({ ...cmd, pid: process.pid, cwd: process.cwd() }) + '\n');
   if (!cmd.method) {
-    const key = `${typeof cmd.id}:${cmd.id}`, approval = approvals.get(key);
+    const key = `${typeof cmd.id}:${cmd.id}`, question = questions.get(key);
+    if (question) {
+      if (cmd.error) { questions.delete(key); return; }
+      const answers = cmd.result?.answers;
+      if (!answers || typeof answers !== 'object' || Array.isArray(answers) ||
+        Object.entries(answers).some(([id, value]) => !['checks','context'].includes(id) ||
+          !Array.isArray(value?.answers) || value.answers.some(answer => typeof answer !== 'string')) ||
+        Object.keys(cmd.result).some(key => key !== 'answers')) throw Error('Malformed native question answer');
+      if (!process.argv.includes('--no-resolved')) {
+        notify('serverRequest/resolved', { threadId: thread.id, requestId: question.id }); questions.delete(key);
+        finish(JSON.stringify(answers));
+      }
+      return;
+    }
+    const approval = approvals.get(key);
     if (!approval) return;
     if (cmd.result?.decision) {
       approval.decision = cmd.result.decision;
@@ -120,7 +164,7 @@ function handle(cmd) {
     }
     return;
   }
-  if (cmd.method === 'initialize') { initialized = true; return response(cmd, { userAgent: 'fixture/0.154.0' }); }
+  if (cmd.method === 'initialize') { initialized = true; return response(cmd, { userAgent: 'fixture/0.159.2' }); }
   if (cmd.method === 'initialized') { if (!initialized) throw Error('missing initialize'); acknowledged = true; return; }
   if (!acknowledged) return error(cmd, 'Not initialized');
   if (cmd.method === 'thread/start') {

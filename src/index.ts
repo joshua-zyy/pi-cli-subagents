@@ -16,7 +16,7 @@ import { FleetView } from "./ui/fleet.js";
 import { TranscriptWindow } from "./ui/transcript-window.js";
 import { TranscriptCache, type TranscriptIdentity } from "./ui/transcript-cache.js";
 import { ConversationViewer } from "./ui/conversation.js";
-import type { AgentView, Delivery, Launch, Question, Role, Thinking } from "./types.js";
+import type { AgentView, Delivery, Launch, Question, QuestionAnswers, Role, Thinking } from "./types.js";
 
 export function parentManager(ctx: Pick<ExtensionContext, "sessionManager">, launch: Launch): AgentManager {
   const parentFile = ctx.sessionManager.getSessionFile();
@@ -242,26 +242,28 @@ export default function extension(pi: ExtensionAPI): void {
   });
   pi.registerTool({
     name: "subagent_reply", label: "Answer child interaction",
-    description: "Answer this parent's task question or review its child permission request within the user's authorization; do not defer routine decisions to the human. Requires id, questionId, reason and exactly one of confirmed/value/cancelled matching the request. Read the request first and use its parent policy for a task-context answer, one-action approval or refusal. A task answer does not grant permissions. Escalate only when the required authorization exceeds the task or the request needs the human UI (/agent-reply); explain what decision is needed. Never grant session-wide or persistent permissions. Every decision is recorded locally; delivery is not proof of successful execution.",
+    description: "Answer this parent's task question or review its child permission request within the user's authorization; do not defer routine decisions to the human. Requires id, questionId, reason and exactly one of confirmed/value/answers/cancelled matching the request. Read the request first and use its parent policy for a task-context answer, one-action approval or refusal. Task answers must not introduce new authorization; Codex treats them as trusted user input. Escalate only when the required authorization exceeds the task or the request needs the human UI (/agent-reply); explain what decision is needed. Never grant session-wide or persistent permissions. Every decision is recorded locally; delivery is not proof of successful execution.",
     parameters: Type.Object({
       id: Type.String({ description: "Existing instance ID" }),
       questionId: Type.String({ description: "Exact current interaction ID" }),
       confirmed: Type.Optional(Type.Boolean({ description: "confirm only: true approves once, false denies" })),
       value: Type.Optional(Type.String({ description: "task question: an offered label or custom answer text, submitted once; other select: exact offered option; input/editor: response text" })),
+      answers: Type.Optional(Type.Record(Type.String(), Type.Array(Type.String()), { description: "form only: map every field ID to its answer strings; empty arrays skip individual fields. Preserve exact text and respect offered choices/allowOther. Never invent authorization." })),
       cancelled: Type.Optional(Type.Literal(true, { description: "Cancel instead of answering" })),
       reason: Type.String({ minLength: 1, description: "Why the decision is within the user's authorization, or why it is denied/cancelled" }),
     }, { additionalProperties: false }),
     async execute(_id, args, _signal, _update, ctx) {
-      checkFields(args, ["id", "questionId", "reason"], ["confirmed", "value", "cancelled"]);
+      checkFields(args, ["id", "questionId", "reason"], ["confirmed", "value", "answers", "cancelled"]);
       const state = await parentManager(ctx, launch).reply(args.id, args.questionId,
-        { confirmed: args.confirmed, value: args.value, cancelled: args.cancelled }, { actor: "parent", reason: args.reason });
+        { confirmed: args.confirmed, value: args.value, answers: args.answers, cancelled: args.cancelled }, { actor: "parent", reason: args.reason });
       return content(`Response accepted for the child's current interaction; delivery is not proof the action completed: ${view(state)}`);
     },
   });
 
   // The human entry point remains available when the parent cannot decide safely.
-  const describeAnswer = (answer: { value?: string; confirmed?: boolean; cancelled?: boolean }): string => {
+  const describeAnswer = (answer: { value?: string; answers?: QuestionAnswers; confirmed?: boolean; cancelled?: boolean }): string => {
     if (answer.cancelled) return "cancelled";
+    if (answer.answers) return "answered task form";
     if (typeof answer.confirmed === "boolean") return answer.confirmed ? "approved once" : "denied";
     return `replied "${oneLine(answer.value, 200)}"`;
   };
@@ -269,8 +271,26 @@ export default function extension(pi: ExtensionAPI): void {
     if (!ctx.hasUI) throw new Error("Interaction requires a TUI or an RPC client with dialogs");
     const q: Question | undefined = manager.get(id).questions.find((entry) => entry.id === questionId);
     if (!q) throw new Error("This request has ended or does not belong to this session");
-    let answer: { value?: string; confirmed?: boolean; cancelled?: boolean };
-    if (q.method === "confirm") answer = { confirmed: await ctx.ui.confirm(q.title, q.message ?? "") };
+    let answer: { value?: string; answers?: QuestionAnswers; confirmed?: boolean; cancelled?: boolean };
+    if (q.method === "form") {
+      if (!q.fields?.length) throw new Error("The task form has no fields");
+      const entries: [string, string[]][] = [];
+      let cancelled = false;
+      for (const field of q.fields) {
+        const title = `${field.isSecret ? "Sensitive question: input is visible in Pi and saved history.\n" : ""}[${field.header}] ${field.question}`;
+        let value: string | undefined;
+        if (field.options.length) {
+          const choices = field.options.map((option, index) => `${index + 1}. ${option.label} — ${option.description}`);
+          const custom = `${choices.length + 1}. Type something.`;
+          const selected = await ctx.ui.select(title, field.allowOther ? [...choices, custom] : choices);
+          value = selected === custom && field.allowOther ? await ctx.ui.input(title, "") :
+            field.options[choices.indexOf(selected ?? "")]?.label;
+        } else value = await ctx.ui.input(title, "");
+        if (value === undefined) { cancelled = true; break; }
+        entries.push([field.id, [value]]);
+      }
+      answer = cancelled ? { cancelled: true } : { answers: Object.fromEntries(entries) };
+    } else if (q.method === "confirm") answer = { confirmed: await ctx.ui.confirm(q.title, q.message ?? "") };
     else if (q.method === "select") {
       const freeText = q.kind === "question" && q.parentPolicy?.text === true && q.humanOnly !== true;
       const options = q.options ?? [];

@@ -90,7 +90,7 @@ export class AgentManager {
     if (!state) throw new Error(`Subagent ${id} has no runtime state yet; inspect ${dir}`);
     if (state.id !== id || !idPattern.test(state.runId) || !["starting", "running", "waiting", "stopping", "completed", "failed", "stopped", "unreachable"].includes(state.phase)
       || !Number.isInteger(state.workerPid) || state.workerPid < 0 || !Number.isFinite(state.updatedAt) || typeof state.accepted !== "boolean"
-      || typeof state.logFile !== "string" || !Array.isArray(state.questions) || state.questions.some(q => !q || typeof q.id !== "string" || typeof q.title !== "string" || !["select", "confirm", "input", "editor"].includes(q.method)))
+      || typeof state.logFile !== "string" || !Array.isArray(state.questions) || state.questions.some(q => !q || typeof q.id !== "string" || typeof q.title !== "string" || !["select", "confirm", "input", "editor", "form"].includes(q.method)))
       throw new Error(`Invalid runtime state for subagent ${id}; inspect ${dir}`);
     if (["starting", "running", "waiting", "stopping"].includes(state.phase) && !processAlive(state.workerPid)) {
       state = { ...state, phase: "unreachable", error: "The worker exited and task status is uncertain. Do not start duplicate work; inspect the logs and owner.lock." };
@@ -289,7 +289,7 @@ export class AgentManager {
     return this.get(id);
   }
 
-  async reply(id: string, questionId: string, answer: { value?: string; confirmed?: boolean; cancelled?: boolean }, decision: { actor: "human" | "parent"; reason?: string } = { actor: "human" }): Promise<AgentView> {
+  async reply(id: string, questionId: string, answer: Pick<Extract<Control, { type: "reply" }>, "value" | "answers" | "confirmed" | "cancelled">, decision: { actor: "human" | "parent"; reason?: string } = { actor: "human" }): Promise<AgentView> {
     await this.request(id, { type: "reply", id: questionId, ...answer, ...decision });
     return this.get(id);
   }
@@ -316,7 +316,8 @@ export class AgentManager {
           // Carry the live policy, including native human-only restrictions, without rewriting
           // stored reports. Resolved requests were filtered above and must not be re-announced.
           reports.push(pending ? { ...report, request: { method: pending.method, options: pending.options,
-            parentPolicy: pending.parentPolicy, humanOnly: pending.humanOnly, ...(pending.kind ? { kind: pending.kind } : {}) } } : { ...report });
+            parentPolicy: pending.parentPolicy, humanOnly: pending.humanOnly, ...(pending.kind ? { kind: pending.kind } : {}),
+            ...(pending.fields ? { fields: pending.fields } : {}), ...(pending.isBlocking !== undefined ? { isBlocking: pending.isBlocking } : {}) } } : { ...report });
         } catch (error) {
           console.error(`[pi-cli-subagents] Could not read report for subagent ${state.id}; inspect ${reportFile}:`, error);
         }

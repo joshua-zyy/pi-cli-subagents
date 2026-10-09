@@ -2,6 +2,7 @@
   "fast": [
     "claude-transcript.test.mjs",
     "cli-discovery.test.mjs",
+    "codex-question.test.mjs",
     "codex-transcript.test.mjs",
     "conversation-history.test.mjs",
     "conversation-loading.test.mjs",

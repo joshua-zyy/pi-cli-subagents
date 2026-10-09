@@ -6,7 +6,8 @@ import path from "node:path";
 import type { AdapterOptions, CliAdapter, InteractionReply } from "./cli-adapter.js";
 import { childEnvironment, type Exit } from "./pi-process.js";
 import { CODEX_MODE_PRESETS } from "./roles.js";
-import type { CodexMode, NativeSession, Delivery } from "./types.js";
+import type { CodexMode, NativeSession, Delivery, QuestionField } from "./types.js";
+import { readCodexQuestionFields, validateQuestionAnswers } from "./codex-question.js";
 
 // pi-lens-ignore: no-unsafe-dictionary-type
 type RecordValue = Record<string, any>;
@@ -14,7 +15,7 @@ const object = (value: unknown): value is RecordValue => value !== null && typeo
 const textInput = (text: string) => [{ type: "text", text }];
 const requestKey = (id: string | number): string => `${typeof id}:${id}`;
 type Approval = { id: string; rpcId: string | number; threadId: string; turnId: string;
-  attempted: boolean; allowed?: Set<string>; resolved?: () => void; rejected?: (error: Error) => void }; 
+  attempted: boolean; allowed?: Set<string>; fields?: QuestionField[]; resolved?: () => void; rejected?: (error: Error) => void };
 
 /** One worker owns one app-server process and one thread at a time. */
 export class CodexAdapter implements CliAdapter {
@@ -134,7 +135,7 @@ export class CodexAdapter implements CliAdapter {
       this.options.onEvent({ type: "activity", detail: "turn/started" });
     }
     if (params.threadId !== this.thread?.threadId || !this.activeTurn || params.turnId !== this.activeTurn && params.turn?.id !== this.activeTurn) return;
-    if (record.method === "item/started" && typeof params.item?.id === "string" && ["commandExecution", "fileChange"].includes(params.item.type)) {
+    if (record.method === "item/started" && typeof params.item?.id === "string" && ["commandExecution", "fileChange", "mcpToolCall"].includes(params.item.type)) {
       this.approvalItems.set(params.item.id, params.item);
     }
     if (record.method === "item/agentMessage/delta" && typeof params.itemId === "string" && typeof params.delta === "string") {
@@ -146,7 +147,7 @@ export class CodexAdapter implements CliAdapter {
     } else if (record.method === "turn/completed") {
       const turn = params.turn;
       this.lastCompletedTurn = turn.id;
-      for (const approval of [...this.approvals.values()]) this.clearApproval(approval, new Error("The Codex turn ended before this approval was confirmed"));
+      for (const approval of [...this.approvals.values()]) this.clearApproval(approval, new Error("The Codex turn ended before this interaction was resolved"));
       this.activeTurn = undefined;
       this.turnEnded?.();
       this.completion = this.completion.then(async () => {
@@ -190,6 +191,21 @@ export class CodexAdapter implements CliAdapter {
     const p = record.params;
     const item = object(p) ? this.approvalItems.get(p.itemId) : undefined;
     const scope = this.activeTurn?.trim() && this.thread && object(p) && p.threadId === this.thread.threadId && p.turnId === this.activeTurn && typeof p.itemId === "string";
+    const question = record.method === "item/tool/requestUserInput" || record.method === "tool/requestUserInput";
+    // Action-owned input can carry approval semantics; this path is only for task forms.
+    if (question && scope && !item && p.itemId.trim() && typeof p.isBlocking === "boolean" && !this.failed && !this.ending &&
+      (typeof rpcId === "string" || Number.isSafeInteger(rpcId)) && !this.approvalByRpcId.has(requestKey(rpcId))) {
+      const fields = readCodexQuestionFields(p.questions);
+      if (fields && JSON.stringify(fields).length <= 12_000) {
+        const id = randomUUID();
+        const pending: Approval = { id, rpcId, threadId: p.threadId, turnId: p.turnId, attempted: false, fields };
+        this.approvals.set(id, pending); this.approvalByRpcId.set(requestKey(rpcId), pending);
+        this.options.onEvent({ type: "question", question: { id, method: "form", kind: "question", fields,
+          isBlocking: p.isBlocking, humanOnly: false, parentPolicy: { answers: true }, title: "Codex task questions",
+          message: `${p.isBlocking ? "The current turn is waiting for these answers." : "Non-blocking: the current turn may continue."}\n${JSON.stringify(fields, null, 2)}` } });
+        return;
+      }
+    }
     const decisions = object(p) && Array.isArray(p.availableDecisions) ? p.availableDecisions : undefined;
     const unsupportedDecisions = object(p) && p.availableDecisions != null &&
       (!decisions || !decisions.includes("accept") || !(decisions.includes("decline") || decisions.includes("cancel")));
@@ -284,21 +300,30 @@ export class CodexAdapter implements CliAdapter {
     const approval = this.approvals.get(answer.id);
     if (!this.activeTurn?.trim() || !approval || approval.attempted || approval.threadId !== this.thread?.threadId || approval.turnId !== this.activeTurn)
       throw new Error("Codex approval is no longer pending or was already answered; inspect before retrying");
-    if (Number(answer.cancelled === true) + Number(typeof answer.confirmed === "boolean") + Number(typeof answer.value === "string") !== 1)
-      throw new Error("Codex approvals require one explicit decision");
-    const cancelOnly = approval.allowed && !approval.allowed.has("decline");
-    if (cancelOnly ? answer.confirmed !== undefined || answer.value !== undefined && !["Approve once", "Cancel turn"].includes(answer.value) : answer.value !== undefined)
-      throw new Error("Use the explicit choices offered by this Codex request");
-    const decision = answer.cancelled || answer.value === "Cancel turn" ? "cancel" : answer.confirmed || answer.value === "Approve once" ? "accept" : "decline";
-    if (approval.allowed && !approval.allowed.has(decision)) throw new Error(`Codex decision ${decision} was not offered for this request`);
+    let result: RecordValue;
+    if (approval.fields) {
+      if (Number(answer.cancelled === true) + Number(answer.answers !== undefined) !== 1 || answer.confirmed !== undefined || answer.value !== undefined)
+        throw new Error("Codex task forms require answers or cancellation, not an approval");
+      const answers = answer.cancelled ? {} : validateQuestionAnswers(approval.fields, answer.answers);
+      result = { answers: Object.fromEntries(Object.entries(answers).map(([id, values]) => [id, { answers: values }])) };
+    } else {
+      if (answer.answers !== undefined || Number(answer.cancelled === true) + Number(typeof answer.confirmed === "boolean") + Number(typeof answer.value === "string") !== 1)
+        throw new Error("Codex approvals require one explicit decision");
+      const cancelOnly = approval.allowed && !approval.allowed.has("decline");
+      if (cancelOnly ? answer.confirmed !== undefined || answer.value !== undefined && !["Approve once", "Cancel turn"].includes(answer.value) : answer.value !== undefined)
+        throw new Error("Use the explicit choices offered by this Codex request");
+      const decision = answer.cancelled || answer.value === "Cancel turn" ? "cancel" : answer.confirmed || answer.value === "Approve once" ? "accept" : "decline";
+      if (approval.allowed && !approval.allowed.has(decision)) throw new Error(`Codex decision ${decision} was not offered for this request`);
+      result = { decision };
+    }
     approval.attempted = true;
     let timer: NodeJS.Timeout | undefined;
     const resolved = new Promise<void>((resolve, reject) => {
       approval.resolved = resolve; approval.rejected = reject;
-      timer = setTimeout(() => reject(new Error("Codex approval resolution timed out; delivery is uncertain. Do not retry this decision.")), this.timeout);
+      timer = setTimeout(() => reject(new Error("Codex interaction resolution timed out; delivery is uncertain. Do not retry this response.")), this.timeout);
     });
     try {
-      await this.write({ id: approval.rpcId, result: { decision } });
+      await this.write({ id: approval.rpcId, result });
       await resolved;
     } finally { if (timer) clearTimeout(timer); }
   }

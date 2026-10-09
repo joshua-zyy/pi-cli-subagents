@@ -48,10 +48,23 @@ export interface AgentSpec {
   launch: Launch;
   createdAt: number;
 }
+export interface QuestionField {
+  id: string;
+  header: string;
+  question: string;
+  options: { label: string; description: string }[];
+  allowOther: boolean;
+  isSecret: boolean;
+}
+export type QuestionAnswers = Record<string, string[]>;
 export interface Question {
   id: string;
-  method: "select" | "confirm" | "input" | "editor";
-  /** Set only for the bundled, call-correlated task-question contract. */
+  method: "select" | "confirm" | "input" | "editor" | "form";
+  /** Present only for a recognized native task-question form. */
+  fields?: QuestionField[];
+  /** Absent means blocking for legacy/native permission dialogs. */
+  isBlocking?: boolean;
+  /** Set only for a recognized, call-correlated task-question contract. */
   kind?: "question";
   title: string;
   message?: string;
@@ -66,9 +79,11 @@ export interface Question {
    * (`cancelled`, or `confirmed: false`), because this extension never lets an agent produce an
    * authorization whose scope it cannot establish. Records written by earlier versions carry no
    * policy and therefore stay unanswerable by the parent. `text` permits custom answers only for
-   * the recognized task-question contract, including its logical selection request.
+   * the recognized task-question contract, including its logical selection request. `answers`
+   * permits a scoped Codex task form, not its native MCP approval forms. Codex treats answers as
+   * trusted user input (like delegated prompts), so the parent must not invent new authorization.
    */
-  parentPolicy?: { values?: string[]; confirm?: boolean; text?: true };
+  parentPolicy?: { values?: string[]; confirm?: boolean; text?: true; answers?: true };
 }
 /** Legacy Pi fields remain readable, including pre-adapter request/state records. */
 export interface SessionHandle { sessionId: string; sessionFile: string }
@@ -109,7 +124,7 @@ export interface AgentState extends Partial<SessionHandle> {
 export interface StartRequest { runId: string; message: string; session?: NativeSession | SessionHandle; createdAt?: number }
 export interface Endpoint { port: number; token: string; runId: string }
 /** The interaction a waiting report is about, so the notifier can state it without re-reading state. */
-export type PendingRequest = Pick<Question, "method" | "options" | "parentPolicy" | "humanOnly" | "kind">;
+export type PendingRequest = Pick<Question, "method" | "options" | "parentPolicy" | "humanOnly" | "kind" | "fields" | "isBlocking">;
 export interface Report {
   notificationId: string;
   agentId: string;
@@ -143,4 +158,4 @@ export type Control =
   | { type: "status" }
   | { type: "send"; message: string; mode: Delivery }
   | { type: "close" }
-  | { type: "reply"; id: string; value?: string; confirmed?: boolean; cancelled?: boolean; actor?: "human" | "parent"; reason?: string };
+  | { type: "reply"; id: string; value?: string; answers?: QuestionAnswers; confirmed?: boolean; cancelled?: boolean; actor?: "human" | "parent"; reason?: string };

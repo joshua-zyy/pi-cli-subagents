@@ -20,6 +20,7 @@ const quoted = (values: readonly string[]): string =>
 
 /** A native human-only policy can still list refusal choices the parent may submit. */
 function needsHumanApproval(request: Report["request"]): boolean {
+  if (request?.method === "form") return request.kind !== "question" || request.parentPolicy?.answers !== true || request.humanOnly === true;
   return request?.humanOnly === true || !(request?.method === "confirm"
     ? request.parentPolicy?.confirm === true : request?.parentPolicy?.values?.length ||
       request?.kind === "question" && (request.method === "select" || request.method === "input") && request.parentPolicy?.text === true);
@@ -37,7 +38,10 @@ function waitingAnswerLine(report: Report): string {
   if (!request) return `\nQuestion ID: ${id}; inspect the request with subagent_query before answering, then use subagent_reply or /agent-reply.`;
   const offered = request.options?.length ? `; offered: ${quoted(request.options)}` : "";
   const human = `/agent-reply ${report.agentId} ${id}`;
-  const header = `\nQuestion ID: ${id} (${request.method}${offered}).`;
+  const header = `\nQuestion ID: ${id} (${request.method}${offered}${request.isBlocking === false ? "; non-blocking, child may continue" : ""}).`;
+  if (request.method === "form") return needsHumanApproval(request)
+    ? `${header} You may only cancel; the human answers it with ${human}.`
+    : `${header} Submit one answers object mapping every field ID to an array of exact answer strings, or cancelled to dismiss without answers. Empty arrays skip individual fields. Follow each field's options/allowOther. Read the full fields with subagent_query get if needed. Answer only from the user's authorized task context; do not invent or expand authorization. Use subagent_reply, not a new task prompt.`;
   const review = " Handle this request now with subagent_reply within the user's task authorization; do not wait for routine human approval.";
   if (request.kind === "question" && !needsHumanApproval(request)) {
     const answer = request.parentPolicy?.text === true ? "value as answer text (an offered label or your custom answer)" : quoted(request.parentPolicy?.values ?? []);
@@ -69,7 +73,11 @@ function surfaceWaitingForHuman(
     needsHumanApproval(question) ? [{ id: state.id, questionId: question.id }] : []));
   let status: string | undefined;
   if (human.length) status = `${human.length} child request${human.length === 1 ? " needs" : "s need"} your decision: /agent-reply ${human[0].id} ${human[0].questionId}`;
-  else if (waiting.length) status = `${waiting.length} subagent${waiting.length === 1 ? "" : "s"} waiting for parent review; /agents to inspect or intervene`;
+  else if (waiting.length) {
+    const blocked = waiting.filter(state => state.questions.some(question => question.isBlocking !== false)).length;
+    status = blocked ? `${blocked} subagent${blocked === 1 ? "" : "s"} waiting for parent review; /agents to inspect or intervene` :
+      `${waiting.length} subagent${waiting.length === 1 ? " has" : "s have"} pending questions while running; /agents to inspect`;
+  }
   ui.setStatus(WAITING_STATUS_KEY, status);
   for (const report of reports) {
     if (report.status !== "waiting" || !needsHumanApproval(report.request)) continue;

@@ -297,6 +297,77 @@ test('Codex does not send decisions excluded by the native server', async t => {
   assert.equal((await settled(events)).text, 'DENY');
 });
 
+test('Codex task questions preserve fields and write one native answer map, not an approval', async t => {
+  const { client, requests } = setup(t);
+  for (const [task, answer] of [
+    ['QUESTION', { answers: { checks: ['Unit'], context: ['Keep commas, whitespace, and 雪 exactly.'] } }],
+    ['QUESTION', { answers: { checks: [], context: [] } }],
+    ['QUESTION_NONBLOCKING_STRING_ID', { cancelled: true }],
+  ]) {
+    const { c, events } = client(); await c.ready(); await c.start(task);
+    const q = events.find(e => e.type === 'question')?.question;
+    assert(q, 'native task questions must be presented, not failed as unsupported');
+    assert.equal(q.method, 'form'); assert.equal(q.kind, 'question');
+    assert.deepEqual(q.parentPolicy, { answers: true }); assert.equal(q.humanOnly, false);
+    assert.equal(q.isBlocking, !task.includes('NONBLOCKING'));
+    assert.deepEqual(q.fields.map(f => f.id), ['checks','context']);
+    assert.equal(q.fields[0].options[0].description, 'Focused checks');
+    assert.equal(q.fields[1].allowOther, true); assert.equal(q.expiresAt, undefined, 'deprecated autoResolutionMs is not a client timer');
+    const before = requests().filter(r => !r.method).length;
+    for (const invalid of [{ confirmed: true }, { value: 'Unit' }, { answers: { checks: ['Unit'] } },
+      { answers: { checks: ['acceptForSession'], context: ['x'] } }, { answers: answer.answers, cancelled: true }]) {
+      if (invalid.answers === undefined && invalid.cancelled) continue;
+      await assert.rejects(c.reply({ type: 'reply', id: q.id, ...invalid }), /answer|field|choice|response|form/i);
+    }
+    assert.equal(requests().filter(r => !r.method).length, before, 'invalid answers do not reach the CLI');
+    await c.reply({ type: 'reply', id: q.id, ...answer });
+    const wire = requests().filter(r => !r.method).slice(before);
+    assert.equal(wire.length, 1); assert.equal(wire[0].id, task.includes('STRING_ID') ? '17' : 17);
+    const expected = answer.cancelled ? {} : Object.fromEntries(Object.entries(answer.answers).map(([id, answers]) => [id, { answers }]));
+    assert.deepEqual(wire[0].result, { answers: expected });
+    assert.deepEqual(JSON.parse((await settled(events)).text), expected);
+    assert.equal(events.filter(e => e.type === 'resolved' && e.id === q.id).length, 1);
+    await assert.rejects(c.reply({ type: 'reply', id: q.id, ...answer }), /answered|pending/);
+    await c.end();
+  }
+});
+
+test('Codex does not reclassify MCP approval forms or action-owned input as task questions', async t => {
+  const { client, requests } = setup(t);
+  for (const task of ['QUESTION_MCP_APPROVAL', 'QUESTION_MCP_ITEM']) {
+    const { c, events } = client(); await c.ready(); await c.start(task);
+    assert.equal(events.some(e => e.type === 'question'), false, 'do not publish agent-answerable approval forms');
+    assert.equal((await settled(events)).status, 'failed'); await c.stop();
+  }
+  const replies = requests().filter(r => !r.method);
+  assert.equal(replies.length, 2); assert(replies.every(r => r.error && !r.result), 'neither answer maps nor permission grants reach the CLI');
+});
+
+test('Codex task form ends with its turn even without a request-resolved event', async t => {
+  const { client, requests } = setup(t); const { c, events } = client();
+  await c.ready(); await c.start('QUESTION_NONBLOCKING_TURN_END');
+  const q = events.find(e => e.type === 'question')?.question; assert(q);
+  assert.equal((await settled(events)).text, 'TURN-ENDED');
+  assert.equal(events.filter(e => e.type === 'resolved' && e.id === q.id).length, 1);
+  await assert.rejects(c.reply({ type: 'reply', id: q.id, cancelled: true }), /pending|answered/);
+  assert.equal(requests().filter(r => !r.method).length, 0); await c.end();
+});
+
+test('Codex question auto-resolution and uncertain delivery never allow a replay', async t => {
+  const { client, requests } = setup(t);
+  const auto = client(); await auto.c.ready(); await auto.c.start('QUESTION_AUTO_RESOLVE');
+  const q = auto.events.find(e => e.type === 'question')?.question; assert(q);
+  await settled(auto.events);
+  await assert.rejects(auto.c.reply({ type: 'reply', id: q.id, cancelled: true }), /pending|answered/);
+  await auto.c.end();
+  const noAck = client(undefined, ['--no-resolved']); await noAck.c.ready(); await noAck.c.start('QUESTION');
+  const pending = noAck.events.find(e => e.type === 'question')?.question; assert(pending);
+  await assert.rejects(noAck.c.reply({ type: 'reply', id: pending.id, cancelled: true }), /uncertain|timed out/);
+  await assert.rejects(noAck.c.reply({ type: 'reply', id: pending.id, cancelled: true }), /pending|answered/);
+  assert.equal(requests().filter(r => !r.method && r.result?.answers).length, 1);
+  await noAck.c.stop();
+});
+
 test('Codex approval response without server resolution cannot be submitted a second time', async t => {
   const { client, requests } = setup(t); const { c, events } = client(undefined, ['--no-resolved']);
   await c.ready(); await c.start('APPROVAL');

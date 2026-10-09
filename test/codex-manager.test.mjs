@@ -4,6 +4,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { AgentManager } from '../dist/manager.js';
+import extension from '../dist/index.js';
+import { deliverReports } from '../dist/notifier.js';
 import { TranscriptReader } from '../dist/ui/transcript.js';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -109,6 +111,64 @@ test('Codex approval is visible to the parent and one reasoned decision is audit
   const requests = fs.readFileSync(path.join(home, 'requests.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
   assert.equal(requests.filter(r => !r.method && r.result?.decision === 'accept').length, 1);
   await assert.rejects(manager.reply(started.id, waiting.questions[0].id, { confirmed: true }), /exited|ended/);
+});
+
+test('Codex forms reach the public parent reply tool with scoped answers, notifications, and non-blocking steer', { timeout: 30_000 }, async t => {
+  const { cwd, home, manager, done, parent } = setup(t);
+  const tools = new Map(), notices = [], messages = [], statuses = [];
+  const api = { registerTool: tool => tools.set(tool.name, tool), registerCommand() {}, registerShortcut() {}, registerMessageRenderer() {}, on() {},
+    sendMessage: (message, options) => messages.push({ message, options }) };
+  extension(api);
+  const ctx = { cwd, hasUI: true, sessionManager: { getSessionFile: () => parent, getEntries: () => [] },
+    ui: { notify: (...args) => notices.push(args), setStatus: (_key, status) => statuses.push(status) } };
+  const invoke = (name, args) => tools.get(name).execute('fixture-parent', args, new AbortController().signal, () => {}, ctx);
+  const answers = { checks: ['Unit'], context: ['literal, task context\nsecond line'] };
+  for (const task of ['QUESTION', 'QUESTION_NONBLOCKING', 'QUESTION_CANCEL']) {
+    const started = await manager.spawn('codex-worker', role, cwd, task);
+    const pending = await waitUntil('Codex form visibility', () => {
+      const state = manager.get(started.id); return state.questions.length ? state : undefined;
+    });
+    const q = pending.questions[0], nonBlocking = task.includes('NONBLOCKING');
+    assert.equal(pending.phase, nonBlocking ? 'running' : 'waiting'); assert.equal(q.isBlocking, !nonBlocking);
+    assert.equal(q.method, 'form'); assert.equal(q.kind, 'question'); assert.deepEqual(q.parentPolicy, { answers: true });
+    assert.deepEqual(q.fields.map(f => f.id), ['checks', 'context']);
+    const query = await invoke('subagent_query', { action: 'get', id: started.id });
+    assert.deepEqual(JSON.parse(query.content[0].text).agents[0].questions[0].fields, q.fields);
+    const report = manager.reports().find(r => r.agentId === started.id && r.status === 'waiting');
+    assert.equal(report.questionId, q.id); assert.deepEqual(report.request.fields, q.fields); assert.equal(report.request.isBlocking, !nonBlocking);
+    deliverReports(manager, api, ctx, new Set(), Date.now(), manager.list());
+    assert.equal(notices.length, 0, 'a supported task form does not demand human approval');
+    const notice = messages.find(entry => entry.message.details?.ids?.includes(report.notificationId));
+    assert(notice); assert.equal(notice.options.deliverAs, 'steer'); assert.match(notice.message.content, /answers object.*field ID/s);
+    if (nonBlocking) {
+      assert.match(notice.message.content, /non-blocking/); assert.match(statuses.at(-1), /pending questions while running/);
+      await invoke('subagent', { action: 'send', id: started.id, message: 'HOLD', mode: 'steer' });
+      assert.equal(manager.get(started.id).phase, 'running'); assert.equal(manager.get(started.id).runId, started.runId);
+    } else await assert.rejects(manager.send(started.id, 'HOLD'), /unresolved interaction/);
+    const base = { id: started.id, questionId: q.id, reason: 'Only the user-authorized fixture context' };
+    for (const invalid of [{ confirmed: true }, { value: 'approve' }, { answers: { checks: ['Unit'] } },
+      { answers: { ...answers, foreign: [] } }, { answers: { ...answers, checks: ['acceptForSession'] } },
+      { answers, confirmed: true }]) await assert.rejects(invoke('subagent_reply', { ...base, ...invalid }), /answers|response|field|choice|offered/i);
+    const auditFile = path.join(manager.root, started.id, 'runs', started.runId, 'permissions.jsonl');
+    assert.equal(fs.existsSync(auditFile), false, 'invalid answers are rejected before the attempted-answer audit');
+    const cancelled = task.includes('CANCEL');
+    await invoke('subagent_reply', { ...base, ...(cancelled ? { cancelled: true } : { answers }) });
+    const final = await done(started.id);
+    const expected = cancelled ? {} : Object.fromEntries(Object.entries(answers).map(([id, values]) => [id, { answers: values }]));
+    assert.deepEqual(JSON.parse(final.text), expected); assert.equal(final.runId, started.runId); assert.deepEqual(final.session, started.session);
+    assert.deepEqual(final.questions, []); assert(!manager.reports().some(r => r.agentId === started.id && r.status === 'waiting'));
+    const audit = fs.readFileSync(auditFile, 'utf8').trim().split('\n').map(JSON.parse);
+    assert.equal(audit.length, 1); assert.equal(audit[0].kind, 'question'); assert.equal(audit[0].actor, 'parent');
+    assert.equal(audit[0].decision, cancelled ? 'cancelled' : 'answered'); assert.equal(audit[0].reason, base.reason);
+    assert(!JSON.stringify(audit).includes('literal, task context'), 'answer contents are not copied into the permission audit');
+    await assert.rejects(invoke('subagent_reply', { ...base, answers }), /exited|ended|pending/i);
+    const native = readJson(path.join(home, `${final.session.threadId}.json`));
+    assert.equal(native.turns.length, 1); assert.equal(native.turns[0].items.filter(item => item.type === 'userMessage').length, 1);
+  }
+  const records = fs.readFileSync(path.join(home, 'requests.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  const responses = records.filter(r => !r.method);
+  assert.equal(responses.length, 3); assert(responses.every(r => Object.keys(r.result).join() === 'answers'));
+  assert.equal(records.filter(r => r.method === 'turn/start').length, 3); assert.equal(records.filter(r => r.method === 'turn/steer').length, 1);
 });
 
 test('Codex accept/cancel-only choices route through the worker and record the exact selection', { timeout: 20_000 }, async t => {
