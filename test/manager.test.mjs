@@ -13,16 +13,16 @@ import { tempDir } from './helpers/tmp.mjs';
 
 const fixture = fileURLToPath(new URL('./fixtures/pi.mjs', import.meta.url));
 const launch = { command: process.execPath, args: [fixture] };
-// A saved PID can belong to another process after this CLI exits, especially on Windows.
-// The unique instance directory is present in both first-start and resume argv.
-function originalCliAlive(state, instanceDirectory) {
-  if (!processAlive(state.cliPid)) return false;
+// A saved PID can belong to another process after exit, especially on Windows.
+// The unique instance directory is present in both worker and CLI argv.
+function originalProcessAlive(pid, instanceDirectory) {
+  if (!processAlive(pid)) return false;
   let commandLine;
   if (process.platform === 'win32') {
     commandLine = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
-      `(Get-CimInstance Win32_Process -Filter "ProcessId = ${state.cliPid}").CommandLine`], { encoding: 'utf8', windowsHide: true, timeout: 10_000 });
+      `(Get-CimInstance Win32_Process -Filter "ProcessId = ${pid}").CommandLine`], { encoding: 'utf8', windowsHide: true, timeout: 10_000 });
   } else {
-    try { commandLine = execFileSync('ps', ['-p', String(state.cliPid), '-o', 'args='], { encoding: 'utf8' }); }
+    try { commandLine = execFileSync('ps', ['-p', String(pid), '-o', 'args='], { encoding: 'utf8' }); }
     catch (error) { if (error.status === 1) return false; throw error; }
   }
   const normalize = text => text.replace(/\\/g, '/').toLowerCase();
@@ -35,10 +35,12 @@ function setup(t) {
   t.after(async () => {
     for (const state of manager.list()) {
       if (processAlive(state.workerPid)) await manager.close(state.id);
-      assert.equal(processAlive(manager.get(state.id).workerPid), false, 'worker must be reaped');
+      const directory = path.join(manager.root, state.id);
+      // Lock release follows CLI reaping, but the worker may still be draining its event loop.
+      await waitUntil('original worker exit', () => !originalProcessAlive(manager.get(state.id).workerPid, directory), 5000);
       const final = manager.get(state.id);
       assert.notEqual(final.exitCode, undefined, 'worker must have observed the CLI close event');
-      assert.equal(originalCliAlive(final, path.join(manager.root, state.id)), false, 'the original CLI must be reaped, not just its old PID');
+      assert.equal(originalProcessAlive(final.cliPid, directory), false, 'the original CLI must be reaped, not just its old PID');
     }
   });
   return { cwd, parent, manager };
@@ -62,12 +64,13 @@ test('CLI cleanup checks distinguish the live original CLI from an unrelated reu
   const { cwd, manager } = setup(t);
   const state = await manager.spawn('worker', defaultRoles.worker, cwd, 'HOLD identity');
   const directory = path.join(manager.root, state.id);
-  assert.equal(originalCliAlive(state, directory), true, 'must detect a real running child');
+  assert.equal(originalProcessAlive(state.cliPid, directory), true, 'must detect a real running child');
+  assert.equal(originalProcessAlive(state.workerPid, directory), true, 'must detect a real running worker');
   assert.equal(processAlive(process.pid), true);
-  assert.equal(originalCliAlive({ ...state, cliPid: process.pid }, directory), false,
+  assert.equal(originalProcessAlive(process.pid, directory), false,
     'PID existence alone must not report an unrelated process as a leaked child');
   await manager.close(state.id);
-  assert.equal(originalCliAlive(manager.get(state.id), directory), false);
+  assert.equal(originalProcessAlive(manager.get(state.id).cliPid, directory), false);
 });
 
 test('complete, release, then resume the original native session', { timeout: 20_000 }, async t => {
@@ -231,24 +234,22 @@ test('permissions remain waiting until an explicit human reply', { timeout: 20_0
 test('running child inactive for 15 minutes produces one stable, non-terminal alert', { timeout: 20_000 }, async t => {
   const { cwd, manager } = setup(t);
   const start = await manager.spawn('worker', defaultRoles.worker, cwd, 'HOLD');
-  const file = path.join(manager.root, start.id, 'state.json');
-  // spawn returns before the worker publishes its first state, so read it only once it exists:
-  // spreading an undefined state would drop the run ID the alert is keyed on.
   const state = await waitUntil('running worker state', () => {
-    const published = readJson(file);
-    return published?.phase === 'running' ? published : undefined;
+    const published = manager.get(start.id);
+    return published.phase === 'running' ? published : undefined;
   }, 10_000);
-  fs.writeFileSync(file, JSON.stringify({ ...state, updatedAt: 1000 }));
-  assert.equal(manager.reports(900999).length, 0);
-  const alert = manager.reports(901000)[0];
+  // Use the existing snapshot input; backdating the live file races the worker's own writes.
+  const inactive = [{ ...state, updatedAt: 1000 }];
+  assert.equal(manager.reports(900999, inactive).length, 0);
+  const alert = manager.reports(901000, inactive)[0];
   assert.equal(alert.status, 'stalled');
   assert.equal(alert.notificationId, `${state.runId}-inactive`);
   assert.match(alert.text, /15 minutes.*subagent_query/i);
-  assert.equal(manager.reports(1000000)[0].notificationId, alert.notificationId);
+  assert.equal(manager.reports(1000000, inactive)[0].notificationId, alert.notificationId);
   assert.equal(manager.get(start.id).phase, 'running', 'reminder must not stop the worker');
   await manager.send(start.id, 'FINISH');
-  await complete(manager, start.id);
-  assert.ok(manager.reports(1000000).every(r => r.status !== 'stalled'));
+  const terminal = await complete(manager, start.id);
+  assert.ok(manager.reports(1000000, [{ ...terminal, updatedAt: 1000 }]).every(r => r.status !== 'stalled'));
 });
 
 test('close stops active work without deleting the resumable session', { timeout: 20_000 }, async t => {
