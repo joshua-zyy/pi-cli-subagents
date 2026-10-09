@@ -69,6 +69,28 @@ test('mode is chosen from that CLI’s own postures and explains each one', () =
   assert.deepEqual(claude.actions, [{ kind: 'set', role: 'worker', field: 'mode', value: 'acceptEdits' }]);
 });
 
+test('Codex Default question picker exposes inherit/true/false and separates capability from permissions', () => {
+  for (const value of [undefined, true, false]) {
+    const codex = panel([row({ effective: role({ cli: 'codex', model: 'm', ...(value === undefined ? {} : { defaultModeQuestions: value }) }) })],
+      { cursor: { role: 'worker', field: 'defaultModeQuestions' } });
+    assert.match(codex.render(120), new RegExp('› defaultModeQuestions\\s+' + (value === undefined ? 'inherit' : value)));
+    codex.instance.handleInput(keys.enter);
+    const choices = codex.render(120);
+    assert.match(choices, /worker · defaultModeQuestions/);
+    assert.match(choices, /Experimental/);
+    assert.match(choices, /approvals and sandbox unchanged/);
+    assert.match(choices, /inherit\s+(current · )?native Codex setting/);
+    assert.match(choices, /true\s+(current · )?enable in Default mode/);
+    assert.match(choices, /false\s+(current · )?disable in Default mode/);
+    codex.instance.handleInput(keys.enter);
+    assert.deepEqual(codex.actions, [{ kind: 'set', role: 'worker', field: 'defaultModeQuestions', value: value === undefined ? 'inherit' : String(value) }]);
+  }
+  for (const cli of ['pi', 'claude']) {
+    const p = panel([row({ effective: role({ cli }) })]); p.instance.handleInput(keys.enter);
+    assert.doesNotMatch(p.render(120), /defaultModeQuestions/);
+  }
+});
+
 test('a mode that removes native approvals is called out before it is chosen', () => {
   const plain = panel([row({ effective: role({ cli: 'claude', model: 'opus' }) })]);
   plain.instance.handleInput(keys.enter);
@@ -291,7 +313,7 @@ test('field selection survives notes and approval warnings in a short terminal',
   for (const effective of [role({ cli: 'pi' }), role({ cli: 'codex', model: 'gpt-6-luna', mode: 'full-access' }),
     role({ cli: 'claude', model: 'opus', mode: 'bypassPermissions' })]) {
     const fields = effective.cli === 'pi' ? ['cli', 'provider', 'model', 'thinking', 'description', 'instructions']
-      : ['cli', 'model', effective.cli === 'codex' ? 'effort' : 'thinking', 'mode', 'description', 'instructions'];
+      : ['cli', 'model', effective.cli === 'codex' ? 'effort' : 'thinking', 'mode', ...(effective.cli === 'codex' ? ['defaultModeQuestions'] : []), 'description', 'instructions'];
     for (const budget of [4, 6, 8, 14]) {
       const p = panel([row({ effective })], { rows: budget, choices: { pending: true } });
       p.instance.handleInput(keys.enter);

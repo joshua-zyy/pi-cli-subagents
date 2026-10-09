@@ -68,6 +68,52 @@ test('Codex role mode is sent as one approval/sandbox preset and unset roles inh
   assert.ok(!('approvalPolicy' in defaults) && !('sandbox' in defaults), 'no mode means the native configuration stays in charge');
 });
 
+test('Codex Default question override uses process config on initial launch and resume without changing permissions', async t => {
+  for (const value of [undefined, true, false]) {
+    const role = { cli: 'codex', description: 'test', instructions: 'Keep the task scope.', model: 'gpt-6-luna', effort: 'high', mode: 'read-only',
+      ...(value === undefined ? {} : { defaultModeQuestions: value }) };
+    const { client, requests, home } = setup(t, { role });
+    const config = path.join(home, 'config.toml'); fs.writeFileSync(config, '# native configuration is not rewritten\n');
+    let original;
+    for (const resume of [false, true]) {
+      const { c, events } = client(resume ? original : undefined);
+      const session = await c.ready();
+      if (resume) assert.deepEqual(session, original); else original = session;
+      await c.start('DEFAULT_QUESTION');
+      if (value === true) {
+        const question = await waitUntil('Default question', () => events.find(e => e.type === 'question'), 1500);
+        assert.equal(question.question.method, 'form');
+        await c.reply({ type: 'reply', id: question.question.id, cancelled: true });
+        assert.equal((await settled(events)).text, '{}');
+      } else {
+        assert.equal((await settled(events)).text, 'DEFAULT_QUESTIONS_DISABLED');
+        assert.ok(!events.some(e => e.type === 'question'));
+      }
+      assert.equal((await c.end()).exit.code, 0);
+    }
+    const calls = requests();
+    const args = [...(value === undefined ? [] : ['-c', 'features.default_mode_request_user_input=' + value]), 'app-server', '--listen', 'stdio://'];
+    assert.deepEqual(calls.filter(r => r.method === 'initialize').map(r => r.launchArgs), [args, args]);
+    for (const call of calls.filter(r => ['thread/start', 'thread/resume'].includes(r.method))) {
+      assert.deepEqual([call.params.model, call.params.approvalPolicy, call.params.sandbox], ['gpt-6-luna', 'on-request', 'read-only']);
+    }
+    for (const call of calls.filter(r => r.method === 'turn/start')) {
+      assert.equal(call.params.effort, 'high');
+      assert.equal(Object.hasOwn(call.params, 'collaborationMode'), false, 'enabling Default questions never switches to Plan');
+    }
+    assert.equal(fs.readFileSync(config, 'utf8'), '# native configuration is not rewritten\n');
+  }
+});
+
+test('Codex refuses non-boolean Default question settings before starting a process', t => {
+  const role = { cli: 'codex', description: 'test', instructions: 'Task.', model: 'm' };
+  for (const value of ['true', 'false', null, 1]) {
+    const { client, home } = setup(t, { role: { ...role, defaultModeQuestions: value } });
+    assert.throws(() => client(), /defaultModeQuestions/);
+    assert.equal(fs.existsSync(path.join(home, 'requests.jsonl')), false);
+  }
+});
+
 test('Codex preflight reads only original metadata, submits no turn and reaps its process', async t => {
   const { client, requests, home } = setup(t);
   const first = client(); const original = await first.c.ready(); await first.c.end();

@@ -47,7 +47,7 @@ export const CODEX_MODE_PRESETS: Record<CodexMode, { approvalPolicy: "untrusted"
   "full-access": { approvalPolicy: "never", sandbox: "danger-full-access" },
 };
 export const CODEX_MODES = Object.keys(CODEX_MODE_PRESETS) as CodexMode[];
-export const ROLE_FIELDS = ["description", "instructions", "provider", "model", "thinking", "cli", "effort", "mode"] as const;
+export const ROLE_FIELDS = ["description", "instructions", "provider", "model", "thinking", "cli", "effort", "mode", "defaultModeQuestions"] as const;
 
 const levels = new Set<Thinking>(PI_THINKING_LEVELS);
 const claudeLevels = new Set<Thinking>(CLAUDE_THINKING_LEVELS);
@@ -77,6 +77,7 @@ export function validateRoleFile(value: unknown, source: string): Record<string,
     if (role.mode !== undefined && (typeof role.mode !== "string" || !role.mode.trim())) throw new Error(`${source}: ${name}.mode must be a non-empty string`);
     if (role.thinking !== undefined && !levels.has(role.thinking as Thinking)) throw new Error(`${source}: invalid thinking level`);
     if (role.cli !== undefined && !CLI_CHOICES.includes(role.cli as Cli)) throw new Error(`${source}: ${name}.cli must be pi, codex or claude`);
+    if (role.defaultModeQuestions !== undefined && (role.cli !== "codex" || typeof role.defaultModeQuestions !== "boolean")) throw new Error(`${source}: ${name}.defaultModeQuestions requires cli: codex and a boolean`);
     if (role.cli === "claude" && role.provider) throw new Error(`${source}: ${name} Claude role does not accept a Pi provider`);
     if (role.cli === "claude" && role.thinking !== undefined && !claudeLevels.has(role.thinking as Thinking)) throw new Error(`${source}: ${name} Claude thinking must be low, medium, high, xhigh or max`);
     if (role.cli === "codex" && (!role.model || role.provider || role.thinking)) throw new Error(`${source}: ${name} Codex role requires model and does not accept Pi provider/thinking fields`);
@@ -94,6 +95,7 @@ export function validateRoleFile(value: unknown, source: string): Record<string,
       ...(role.model ? { model: role.model as string } : {}),
       ...(role.thinking ? { thinking: role.thinking as Thinking } : {}),
       ...(role.mode ? { mode: role.mode as Mode } : {}),
+      ...(role.defaultModeQuestions !== undefined ? { defaultModeQuestions: role.defaultModeQuestions as boolean } : {}),
     };
   }
   return roles;

@@ -36,15 +36,21 @@ function setup(t) {
 
 test('manager preserves Codex native identity across a fresh controller, old Pi records still resume', { timeout: 30_000 }, async t => {
   const { cwd, home, manager, done, parent, launch, options } = setup(t);
-  const started = await manager.spawn('codex-worker', role, cwd, 'REMEMBER alpha');
+  const launchRole = { ...role, defaultModeQuestions: true };
+  const started = await manager.spawn('codex-worker', launchRole, cwd, 'REMEMBER alpha');
   const first = await done(started.id);
   assert.equal(first.cli, 'codex'); assert.equal(first.session.cli, 'codex'); assert.equal(first.session.codexHome, home);
   assert.ok(first.session.threadId); assert.notEqual(first.session.threadId, first.sessionId); assert.equal(first.sessionFile, undefined);
+  launchRole.defaultModeQuestions = false; // New role edits must not rewrite the existing instance's snapshot.
   const reopened = new AgentManager(parent, launch, { ...options, home: path.join(cwd, 'different-home') });
   const next = await reopened.send(started.id, 'RECALL');
   const result = await done(next.id);
   assert.equal(result.text, 'alpha'); assert.deepEqual(result.session, first.session); assert.equal(result.runCount, 2);
   assert.equal(manager.reports().filter(r => r.agentId === result.id && r.status === 'completed').length, 2);
+  const starts = fs.readFileSync(path.join(home, 'requests.jsonl'), 'utf8').trim().split('\n').map(JSON.parse).filter(r => r.method === 'initialize');
+  assert.ok(starts.length >= 2);
+  assert.ok(starts.every(r => r.launchArgs.includes('features.default_mode_request_user_input=true')), 'continuations keep the saved question override');
+  assert.equal(readJson(path.join(manager.root, started.id, 'spec.json')).role.defaultModeQuestions, true);
   const piStarted = await manager.spawn('worker', { description: 'old Pi', instructions: 'test' }, cwd, 'REMEMBER beta');
   const piFirst = await done(piStarted.id);
   const spec = path.join(manager.root, piStarted.id, 'spec.json');
@@ -123,8 +129,8 @@ test('Codex forms reach the public parent reply tool with scoped answers, notifi
     ui: { notify: (...args) => notices.push(args), setStatus: (_key, status) => statuses.push(status) } };
   const invoke = (name, args) => tools.get(name).execute('fixture-parent', args, new AbortController().signal, () => {}, ctx);
   const answers = { checks: ['Unit'], context: ['literal, task context\nsecond line'] };
-  for (const task of ['QUESTION', 'QUESTION_NONBLOCKING', 'QUESTION_CANCEL']) {
-    const started = await manager.spawn('codex-worker', role, cwd, task);
+  for (const task of ['DEFAULT_QUESTION', 'QUESTION_NONBLOCKING', 'QUESTION_CANCEL']) {
+    const started = await manager.spawn('codex-worker', { ...role, defaultModeQuestions: true }, cwd, task);
     const pending = await waitUntil('Codex form visibility', () => {
       const state = manager.get(started.id); return state.questions.length ? state : undefined;
     });
@@ -209,6 +215,9 @@ test('Codex rejects invalid workspace and missing model before creating instance
   const { cwd, manager } = setup(t);
   await assert.rejects(manager.spawn('codex-worker', role, cwd, 'DO', 'any-workspace'), /Invalid workspace/);
   await assert.rejects(manager.spawn('codex-worker', { ...role, model: undefined }, cwd, 'DO'), /explicit model/);
+  for (const invalid of [{ ...role, defaultModeQuestions: 'true' }, { ...role, defaultModeQuestions: null },
+    { ...role, cli: 'pi', defaultModeQuestions: false }, { ...role, cli: 'claude', defaultModeQuestions: true }])
+    await assert.rejects(manager.spawn('worker', invalid, cwd, 'DO'), /defaultModeQuestions/);
   assert.deepEqual(manager.list(), []);
 });
 

@@ -25,6 +25,8 @@ export interface Role {
   thinking?: Thinking;
   /** Native permission posture for this role's launches; only Claude and Codex expose one. */
   mode?: Mode;
+  /** Codex experimental Default-mode question gate; omitted inherits native config, not permissions. */
+  defaultModeQuestions?: boolean;
 }
 
 // An argv launch, not a shell command. Injectable for protocol tests.

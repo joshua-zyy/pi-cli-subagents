@@ -3,7 +3,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { addRole, deleteRole, fieldChoices, fieldIsChoice, readScope, roleRows, roleSummary, setField, visibleFields, writeScope } from '../dist/role-settings.js';
+import { addRole, deleteRole, fieldChoices, fieldIsChoice, fieldValue, readScope, roleRows, roleSummary, setField, visibleFields, writeScope } from '../dist/role-settings.js';
 import { mergeRoles, validateRoleFile } from '../dist/roles.js';
 import { tempDir } from './helpers/tmp.mjs';
 
@@ -33,7 +33,7 @@ test('visible fields follow the chosen CLI instead of exposing every field at on
   assert.deepEqual(visibleFields({ ...base, provider: 'opencode-go', model: 'deepseek' }), ['cli', 'provider', 'model', 'thinking', 'description', 'instructions'],
     'a role that already carries Pi fields is already a Pi role');
   assert.deepEqual(visibleFields({ ...base, cli: 'pi' }), ['cli', 'provider', 'model', 'thinking', 'description', 'instructions'], 'Pi has no permission mode to offer');
-  assert.deepEqual(visibleFields({ ...base, cli: 'codex', model: 'gpt-6-luna' }), ['cli', 'model', 'effort', 'mode', 'description', 'instructions']);
+  assert.deepEqual(visibleFields({ ...base, cli: 'codex', model: 'gpt-6-luna' }), ['cli', 'model', 'effort', 'mode', 'defaultModeQuestions', 'description', 'instructions']);
   assert.deepEqual(visibleFields({ ...base, cli: 'claude' }), ['cli', 'model', 'thinking', 'mode', 'description', 'instructions']);
 });
 
@@ -63,6 +63,41 @@ test('mode is picked from the chosen CLI’s own list and can be cleared', () =>
   assert.equal(set.mode, 'plan');
   assert.equal(setField({}, 'worker', set, 'mode', '').worker.mode, undefined, 'an empty choice clears the field');
   assert.throws(() => writeScope('user', temp(), temp(), { worker: setField({}, 'worker', claude, 'mode', 'full-access').worker }), /Claude mode/);
+});
+
+test('Codex Default questions round-trip as true, false or omitted without changing model or permissions', () => {
+  const agent = temp(), cwd = temp();
+  const codex = { ...base, cli: 'codex', model: 'm', effort: 'high', mode: 'read-only' };
+  assert.equal(fieldIsChoice(codex, 'defaultModeQuestions'), true);
+  assert.deepEqual(fieldChoices(codex, 'defaultModeQuestions'), ['inherit', 'true', 'false']);
+  for (const value of ['true', 'false', 'inherit', '']) {
+    const next = setField({}, 'worker', { ...codex, defaultModeQuestions: true }, 'defaultModeQuestions', value).worker;
+    const expected = value === 'true' ? true : value === 'false' ? false : undefined;
+    assert.deepEqual(next, { ...codex, ...(expected === undefined ? {} : { defaultModeQuestions: expected }) });
+    assert.equal(fieldValue(next, 'defaultModeQuestions'), expected === undefined ? 'inherit' : String(expected));
+    writeScope('project', agent, cwd, { worker: next });
+    assert.deepEqual(readScope('project', agent, cwd).worker, next, 'false must not disappear on save or load');
+  }
+  assert.throws(() => setField({}, 'worker', codex, 'defaultModeQuestions', 'yes'), /defaultModeQuestions/);
+  for (const cli of [undefined, 'pi', 'claude']) {
+    assert.deepEqual(fieldChoices({ ...base, cli }, 'defaultModeQuestions'), []);
+    for (const value of [true, false])
+      assert.throws(() => validateRoleFile({ worker: { ...base, cli, defaultModeQuestions: value } }, 'test'), /defaultModeQuestions/);
+  }
+  for (const value of ['true', 'false', null, 0, {}, []])
+    assert.throws(() => validateRoleFile({ worker: { ...codex, defaultModeQuestions: value } }, 'test'), /defaultModeQuestions/);
+});
+
+test('Default question overrides survive reselecting Codex but are dropped when switching CLI', () => {
+  for (const value of [true, false]) {
+    const codex = { ...base, cli: 'codex', model: 'm', defaultModeQuestions: value };
+    assert.equal(setField({}, 'worker', codex, 'cli', 'codex').worker.defaultModeQuestions, value);
+    for (const cli of ['pi', 'claude']) {
+      const switched = setField({}, 'worker', codex, 'cli', cli).worker;
+      assert.equal(Object.hasOwn(switched, 'defaultModeQuestions'), false);
+      assert.doesNotThrow(() => validateRoleFile({ worker: switched }, 'test'));
+    }
+  }
 });
 
 test('CLI choices expose only that CLI\u2019s levels', () => {

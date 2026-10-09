@@ -156,6 +156,7 @@ export class AgentManager {
   async spawn(roleName: string, role: Role, cwd: string, message: string, workspace?: string): Promise<AgentView> {
     if (!message.trim()) throw new Error("Task must not be empty");
     if (role.cli !== undefined && !["pi", "codex", "claude"].includes(role.cli)) throw new Error("Unsupported CLI");
+    if (role.defaultModeQuestions !== undefined && (role.cli !== "codex" || typeof role.defaultModeQuestions !== "boolean")) throw new Error("defaultModeQuestions requires cli: codex and a boolean");
     if (role.cli === "claude" && role.provider) throw new Error("Claude does not accept a Pi provider");
     if (role.cli === "claude" && role.thinking !== undefined && !["low", "medium", "high", "xhigh", "max"].includes(role.thinking)) throw new Error("Claude thinking must be low, medium, high, xhigh or max");
     if (role.cli === "codex" && (!role.model || role.provider || role.thinking)) throw new Error("Codex requires an explicit model without Pi provider/thinking fields");

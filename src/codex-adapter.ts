@@ -9,7 +9,8 @@ import { CODEX_MODE_PRESETS } from "./roles.js";
 import type { CodexMode, NativeSession, Delivery, QuestionField } from "./types.js";
 import { readCodexQuestionFields, validateQuestionAnswers } from "./codex-question.js";
 
-// pi-lens-ignore: no-unsafe-dictionary-type
+// Legacy RPC envelope; a typed decoder migration is separate from the role capability gate.
+// pi-lens-ignore: no-unsafe-dictionary-any
 type RecordValue = Record<string, any>;
 const object = (value: unknown): value is RecordValue => value !== null && typeof value === "object" && !Array.isArray(value);
 const textInput = (text: string) => [{ type: "text", text }];
@@ -46,10 +47,13 @@ export class CodexAdapter implements CliAdapter {
   constructor(private readonly options: AdapterOptions) {
     if (options.spec.role.cli !== "codex" || !options.spec.role.model?.trim() || !options.spec.codexHome) throw new Error("Codex requires an explicit model and a pinned native home");
     if (options.session && (options.session.cli !== "codex" || options.session.codexHome !== options.spec.codexHome)) throw new Error("Codex native home or CLI differs from the original session");
+    const { defaultModeQuestions } = options.spec.role;
+    if (defaultModeQuestions !== undefined && typeof defaultModeQuestions !== "boolean") throw new Error("Codex defaultModeQuestions must be a boolean");
     this.timeout = options.requestTimeout ?? 30_000;
     const output = createWriteStream(options.logFile, { flags: "a", mode: 0o600 });
     const stderr = createWriteStream(`${options.logFile}.stderr`, { flags: "a", mode: 0o600 });
-    this.child = spawn(options.spec.launch.command, [...options.spec.launch.args, "app-server", "--listen", "stdio://"], {
+    const questionArgs = defaultModeQuestions === undefined ? [] : ["-c", `features.default_mode_request_user_input=${defaultModeQuestions}`];
+    this.child = spawn(options.spec.launch.command, [...options.spec.launch.args, ...questionArgs, "app-server", "--listen", "stdio://"], {
       cwd: options.spec.cwd,
       env: { ...childEnvironment(), CODEX_HOME: options.spec.codexHome },
       stdio: ["pipe", "pipe", "pipe"], shell: false, windowsHide: true, detached: process.platform !== "win32",

@@ -13,6 +13,14 @@ choose a custom-entry menu item or wait for a second question. Answer from the a
 context; escalate if the missing decision belongs to the user. An answer does not authorize new
 actions or change permissions. Other Pi dialogs are separate generic requests; do not reuse a cached task answer for them.
 
+If Codex reports `request_user_input` unavailable in Default mode, check the configured role and actual
+CLI version/configuration before trying again. The Codex-only role field `defaultModeQuestions: true`
+opts into the experimental native Default-mode feature (checked with 0.159.2); `false` disables it, and
+omission/UI `inherit` leaves native configuration in charge. It does not switch to Plan, grant permissions,
+or override a disabled `tools.experimental_request_user_input.enabled`. Configure a new instance only
+within the user’s authorization: editing the role does not change an existing instance’s saved settings.
+Do not widen permission `mode`, edit global config, or silently launch a replacement as a workaround.
+
 For a Codex `form` with `parentPolicy.answers: true`, read the full `fields` with `subagent_query get`.
 Submit one `answers` object mapping every exact field ID to a string array, respecting offered labels
 and `allowOther`. Use `[]` to skip a field, or `cancelled: true` to dismiss the whole form; never

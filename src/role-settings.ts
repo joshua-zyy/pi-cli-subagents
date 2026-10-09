@@ -6,12 +6,12 @@ import type { Cli, Effort, Mode, Role, Thinking } from "./types.js";
 
 export type Scope = "user" | "project";
 export type Origin = "built-in" | Scope;
-export type EditableField = "cli" | "provider" | "model" | "thinking" | "effort" | "mode" | "description" | "instructions";
+export type EditableField = "cli" | "provider" | "model" | "thinking" | "effort" | "mode" | "defaultModeQuestions" | "description" | "instructions";
 
 /** Text fields are edited in Pi's own dialogs; the rest are picked from a list. */
 export const TEXT_FIELDS: EditableField[] = ["provider", "model", "description", "instructions"];
-export const CHOICE_FIELDS: EditableField[] = ["cli", "thinking", "effort", "mode"];
-export const FIELD_LABELS: Record<EditableField, string> = { cli: "cli", provider: "provider", model: "model", thinking: "thinking", effort: "effort", mode: "mode", description: "description", instructions: "instructions" };
+export const CHOICE_FIELDS: EditableField[] = ["cli", "thinking", "effort", "mode", "defaultModeQuestions"];
+export const FIELD_LABELS: Record<EditableField, string> = { cli: "cli", provider: "provider", model: "model", thinking: "thinking", effort: "effort", mode: "mode", defaultModeQuestions: "defaultModeQuestions", description: "description", instructions: "instructions" };
 /** Offered last in a discovered list, so a value the CLI did not publish stays reachable. */
 export const CUSTOM_CHOICE = "✎ type a value…";
 
@@ -71,6 +71,7 @@ export function withCli(role: Role, cli: Cli): Role {
   } else if (cli === "codex") {
     if (role.model) next.model = role.model;
     if (role.effort) next.effort = role.effort;
+    if (role.defaultModeQuestions !== undefined) next.defaultModeQuestions = role.defaultModeQuestions;
   } else {
     if (role.provider) next.provider = role.provider;
     if (role.model) next.model = role.model;
@@ -89,7 +90,7 @@ export function setField(doc: Record<string, Role>, name: string, base: Role, fi
   if (field === "description") return { ...doc, [name]: { ...current, description: value } };
   if (field === "instructions") return { ...doc, [name]: { ...current, instructions: value } };
   const next: Role = { ...current };
-  if (!value.trim()) {
+  if (!value.trim() || (field === "defaultModeQuestions" && value === "inherit")) {
     delete next[field as Exclude<EditableField, "cli" | "description" | "instructions">];
     return { ...doc, [name]: next };
   }
@@ -97,7 +98,10 @@ export function setField(doc: Record<string, Role>, name: string, base: Role, fi
   else if (field === "model") next.model = value;
   else if (field === "thinking") next.thinking = value as Thinking;
   else if (field === "mode") next.mode = value as Mode;
-  else next.effort = value as Effort;
+  else if (field === "defaultModeQuestions") {
+    if (value === "true" || value === "false") next.defaultModeQuestions = value === "true";
+    else throw new Error("defaultModeQuestions must be inherit, true or false");
+  } else next.effort = value as Effort;
   return { ...doc, [name]: next };
 }
 
@@ -144,11 +148,13 @@ export function fieldChoices(role: Role, field: EditableField, options: ChoiceOp
   // A model that publishes its own levels replaces the generic list rather than adding to it.
   if (field === "effort") return [...(modelEfforts(catalog, role.model) ?? EFFORT_LEVELS)];
   if (field === "mode") return role.cli === "claude" ? [...CLAUDE_MODES] : role.cli === "codex" ? [...CODEX_MODES] : [];
+  if (field === "defaultModeQuestions") return role.cli === "codex" ? ["inherit", "true", "false"] : [];
   return field === "provider" || field === "model" ? fieldValues(role, field, catalog) : [];
 }
 
 export function fieldValue(role: Role, field: EditableField): string {
   const value = role[field];
+  if (field === "defaultModeQuestions") return value === undefined ? "inherit" : String(value);
   return typeof value === "string" ? value : "";
 }
 
@@ -159,7 +165,7 @@ export function visibleFields(role: Role): EditableField[] {
   if (!role.cli) return role.provider || role.model || role.thinking
     ? ["cli", "provider", "model", "thinking", "description", "instructions"]
     : ["cli", "description", "instructions"];
-  if (role.cli === "codex") return ["cli", "model", "effort", "mode", "description", "instructions"];
+  if (role.cli === "codex") return ["cli", "model", "effort", "mode", "defaultModeQuestions", "description", "instructions"];
   if (role.cli === "claude") return ["cli", "model", "thinking", "mode", "description", "instructions"];
   return ["cli", "provider", "model", "thinking", "description", "instructions"];
 }

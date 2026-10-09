@@ -44,6 +44,10 @@ function execute(message) {
   if (message === 'CRASH') return process.exit(2);
   if (message === 'NOISE') return process.stdout.write('not-json\n');
   if (message === 'EARLY_EXIT') return process.exit(0);
+  if (message === 'DEFAULT_QUESTION') {
+    const setting = process.argv.filter(arg => arg.startsWith('features.default_mode_request_user_input=')).at(-1);
+    return setting === 'features.default_mode_request_user_input=true' ? execute('QUESTION') : finish('DEFAULT_QUESTIONS_DISABLED');
+  }
   if (message.startsWith('QUESTION')) {
     const id = message.includes('STRING_ID') ? '17' : 17;
     const request = { id, itemId: 'ask', turnId: turn.id };
@@ -131,7 +135,7 @@ function execute(message) {
   finish(message);
 }
 function handle(cmd) {
-  fs.appendFileSync(path.join(home, 'requests.jsonl'), JSON.stringify({ ...cmd, pid: process.pid, cwd: process.cwd() }) + '\n');
+  fs.appendFileSync(path.join(home, 'requests.jsonl'), JSON.stringify({ ...cmd, pid: process.pid, cwd: process.cwd(), ...(cmd.method === 'initialize' ? { launchArgs: process.argv.slice(2) } : {}) }) + '\n');
   if (!cmd.method) {
     const key = `${typeof cmd.id}:${cmd.id}`, question = questions.get(key);
     if (question) {

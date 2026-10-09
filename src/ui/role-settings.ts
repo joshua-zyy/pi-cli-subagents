@@ -195,6 +195,11 @@ export class RoleSettingsPanel {
     if (choice === current) parts.push("current");
     if (field === "cli") parts.push(cliDetail(choice));
     if (field === "mode") parts.push(modeDetail(choice));
+    if (field === "defaultModeQuestions") {
+      if (choice === "inherit") parts.push("native Codex setting");
+      else if (choice === "true") parts.push("enable in Default mode");
+      else parts.push("disable in Default mode (not Plan)");
+    }
     return parts.join(" · ");
   }
 
@@ -253,6 +258,7 @@ export class RoleSettingsPanel {
     if (!selected || !field) return [this.theme.fg("dim", "No field selected")];
     const lines = [this.theme.bold(this.theme.fg("accent", `${selected.name} · ${FIELD_LABELS[field]}`))];
     lines.push(this.hint([["↑↓", "select"], ["enter", "apply"], ["esc", "back"]]));
+    if (field === "defaultModeQuestions") lines.push(this.theme.fg("muted", "Experimental Default-mode questions; approvals and sandbox unchanged."));
     const choices = this.choices, current = fieldValue(selected.override ?? selected.effective, field);
     // While discovery runs the list only holds the escape hatch, so say why it is still empty.
     if (!this.values.length && this.choiceOptions().pending) lines.push(this.theme.fg("muted", "Reading this CLI's own model list…"));
