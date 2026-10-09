@@ -16,15 +16,21 @@ function setup(t) {
   t.after(async () => { for (const c of clients) await c.stop(); });
   const client = (session, flags = [], requestTimeout = 1000) => {
     const events = [];
+    const logFile = path.join(cwd, `${clients.length}.jsonl`);
     const c = new ClaudeAdapter({ spec: { ...spec, launch: { ...spec.launch, args: [...spec.launch.args, ...flags] } }, session,
-      logFile: path.join(cwd, `${clients.length}.jsonl`), onEvent: e => events.push(e), requestTimeout });
-    clients.push(c); return { c, events };
+      logFile, onEvent: e => events.push(e), requestTimeout });
+    clients.push(c); return { c, events, logFile };
   };
   const requests = () => fs.readFileSync(path.join(home, 'requests.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
   return { client, requests, spec, home, cwd };
 }
 const terminal = events => waitUntil('Claude terminal', () => events.find(e => e.type === 'settled'), 3000);
 const question = events => waitUntil('Claude permission', () => events.find(e => e.type === 'question')?.question, 3000);
+const taskQuestion = async events => {
+  const first = await waitUntil('Claude task question or failure', () => events.find(e => e.type === 'question' || e.type === 'settled'), 3000);
+  assert.equal(first.type, 'question', first.error); return first.question;
+};
+const skipped = q => Object.fromEntries(q.fields.map(field => [field.id, []]));
 
 test('Claude terminal result does not require optional session-state events', async t => {
   const {client} = setup(t);
@@ -156,6 +162,92 @@ test('Claude manual approval cannot be supplied by parent; unsafe, duplicate and
     await c.stop();
   }
   assert(!requests().some(r=>r.response?.response?.behavior==='allow'));
+});
+
+test('Claude AskUserQuestion returns one correlated structured answer, never a blanket approval', async t => {
+  const {client,requests} = setup(t), {c,events,logFile} = client();
+  await c.ready(); await c.start('QUESTION'); const q = await taskQuestion(events);
+  assert.equal(q.kind,'question'); assert.equal(q.method,'form'); assert.deepEqual(q.parentPolicy,{answers:true});
+  assert.notEqual(q.humanOnly,true); assert.equal(q.options,undefined); assert.equal(q.title,'Fixture task questions');
+  assert.deepEqual(q.fields.map(f=>f.id),['Which checks?','Which outputs?','What marker?','How many items?']);
+  assert.deepEqual(q.fields.map(f=>f.multiSelect),[false,true,false,false]); assert(q.fields.every(f=>f.allowOther));
+  assert.equal(q.fields[0].options[0].preview,'<pre>work.txt</pre>'); assert.match(q.fields[3].description,/min.*1.*max.*10/);
+  const answers = {'Which checks?':['Read, write'],'Which outputs?':['Logs','Summary'],'What marker?':[' literal\nmarker '],'How many items?':[]};
+  for(const invalid of [{value:'Approve once'},{confirmed:true},{answers:{}},{answers:{...answers,'Which checks?':['Read, write','Review']}},{answers,cancelled:true}])
+    await assert.rejects(c.reply({type:'reply',id:q.id,actor:'parent',...invalid}),/answers|form|field|single|one|cancellation/i);
+  await c.reply({type:'reply',id:q.id,answers,actor:'parent'});
+  const result = await terminal(events); assert.equal(result.status,'completed');
+  const expected = {'Which checks?':'Read, write','Which outputs?':['Logs','Summary'],'What marker?':' literal\nmarker ','How many items?':''};
+  assert.deepEqual(JSON.parse(result.text),expected);
+  await assert.rejects(c.reply({type:'reply',id:q.id,answers,actor:'parent'}),/pending|answered/); await c.end();
+  const native = fs.readFileSync(logFile,'utf8').trim().split('\n').map(JSON.parse);
+  const ask = native.find(r=>r.type==='control_request'); assert.equal(ask.request.requires_user_interaction,true);
+  const replies = requests().filter(r=>r.type==='control_response'); assert.equal(replies.length,1);
+  assert.equal(replies[0].response.request_id,ask.request_id);
+  assert.deepEqual(replies[0].response.response,{behavior:'allow',toolUseID:ask.request.tool_use_id,updatedInput:{...ask.request.input,answers:expected}});
+  const output = native.find(r=>r.type==='user'&&r.message?.content?.[0]?.type==='tool_result').message.content[0];
+  assert.equal(output.tool_use_id,ask.request.tool_use_id); assert.deepEqual(JSON.parse(output.content),expected);
+  assert.equal(requests().filter(r=>r.type==='user').length,1,'an answer is not a new task');
+  assert.equal(events.filter(e=>e.type==='resolved'&&e.id===q.id).length,1);
+});
+
+test('Claude task forms preserve native human-only limits while cancellation denies only the question', async t => {
+  const {client,requests} = setup(t);
+  for(const task of ['QUESTION_MANUAL','QUESTION_RULE','QUESTION_REASON_RULE']) {
+    const {c,events} = client(); await c.ready(); await c.start(task); const q = await taskQuestion(events);
+    assert.equal(q.humanOnly,true); assert.notEqual(q.parentPolicy?.answers,true);
+    await assert.rejects(c.reply({type:'reply',id:q.id,answers:skipped(q),actor:'parent'}),/human/i);
+    if(task==='QUESTION_MANUAL') await c.reply({type:'reply',id:q.id,answers:skipped(q),actor:'human'});
+    else await c.reply({type:'reply',id:q.id,cancelled:true,actor:'parent'});
+    const result = await terminal(events); assert.equal(result.status,'completed');
+    if(task!=='QUESTION_MANUAL') assert.equal(result.text,'QUESTION_CANCELLED'); await c.end();
+  }
+  const replies = requests().filter(r=>r.type==='control_response').map(r=>r.response.response);
+  assert.equal(replies.length,3); assert.equal(replies.filter(r=>r.behavior==='allow').length,1);
+  for(const task of ['QUESTION_HOOK','QUESTION_MODE']) {
+    const {c,events}=client();await c.ready();await c.start(task);const q=await taskQuestion(events);
+    assert.notEqual(q.humanOnly,true,'a reason category alone is not proof of a native human-only restriction');
+    await c.reply({type:'reply',id:q.id,answers:skipped(q),actor:'parent'});
+    assert.equal((await terminal(events)).status,'completed');await c.end();
+  }
+  assert(replies.filter(r=>r.behavior==='deny').every(r=>r.interrupt===false&&r.updatedInput===undefined&&r.updatedPermissions===undefined));
+});
+
+test('Claude malformed or host-owned forms never fall back to approval, and closed requests cannot be replayed', async t => {
+  const {client,requests} = setup(t);
+  for(const task of ['QUESTION_HOST_FIELDS','QUESTION_INVALID','QUESTION_MCP','QUESTION_BROWSER','QUESTION_OVERSIZED','QUESTION_DUPLICATE','QUESTION_EXPIRED']) {
+    const {c,events} = client(); await c.ready(); await c.start(task);
+    const result = await terminal(events); assert.equal(result.status,task==='QUESTION_EXPIRED'?'completed':'failed',task);
+    for(const e of events.filter(e=>e.type==='question')) await assert.rejects(c.reply({type:'reply',id:e.question.id,answers:skipped(e.question),actor:'parent'}),/pending|answered/);
+    await c.stop();
+  }
+  assert(!requests().some(r=>r.response?.response?.behavior==='allow'));
+});
+
+test('Claude simultaneous task forms keep native request IDs separate when answered in reverse order', async t => {
+  const {client,requests} = setup(t), {c,events,logFile} = client(); await c.ready(); await c.start('QUESTION_PAIR');
+  await taskQuestion(events); const forms = await waitUntil('two forms',()=>{const found=events.filter(e=>e.type==='question');return found.length===2?found.map(e=>e.question):undefined;},3000);
+  for(const q of [...forms].reverse()) await c.reply({type:'reply',id:q.id,actor:'parent',answers:{...skipped(q),'What marker?':[q.title]}});
+  const result = await terminal(events); assert.equal(result.status,'completed');
+  assert.deepEqual(JSON.parse(result.text).map(answer=>answer['What marker?']),['Second form','Fixture task questions']); await c.end();
+  const asks=fs.readFileSync(logFile,'utf8').trim().split('\n').map(JSON.parse).filter(r=>r.type==='control_request');
+  const replies=requests().filter(r=>r.type==='control_response'); assert.equal(replies.length,2);
+  for(const reply of replies) {
+    const ask=asks.find(r=>r.request_id===reply.response.request_id); assert(ask);
+    assert.equal(reply.response.response.toolUseID,ask.request.tool_use_id);
+    assert.equal(reply.response.response.updatedInput.answers['What marker?'],ask.request.input.title);
+  }
+});
+
+test('Claude uncertain question writes are attempted once and never automatically replayed', async t => {
+  const {client} = setup(t), {c,events} = client(); await c.ready(); await c.start('QUESTION'); const q = await taskQuestion(events);
+  const write = c.child.stdin.write; let attempts=0;
+  try {
+    c.child.stdin.write = (_chunk,callback) => { attempts++; queueMicrotask(()=>callback(new Error('fixture uncertain write'))); return true; };
+    const answer={type:'reply',id:q.id,answers:skipped(q),actor:'parent'};
+    await assert.rejects(c.reply(answer),/uncertain write/);
+    await assert.rejects(c.reply(answer),/pending|answered/); assert.equal(attempts,1);
+  } finally {c.child.stdin.write=write;await c.stop();}
 });
 
 test('Claude early unscoped approval, malformed stdout and process death are not completions', async t => {

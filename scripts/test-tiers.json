@@ -1,5 +1,6 @@
 {
   "fast": [
+    "claude-question.test.mjs",
     "claude-transcript.test.mjs",
     "cli-discovery.test.mjs",
     "codex-question.test.mjs",

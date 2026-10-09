@@ -120,6 +120,65 @@ test('human Codex forms collect fields once, warn about visible sensitive input,
   }
 });
 
+test('human multi-select forms toggle choices, preserve previews, allow explicit skips and cancel without partial replies', async t => {
+  for(const scenario of [
+    {steps:[0,0,1,'custom','done'],inputs:['custom, exact','context'],answer:{answers:{outputs:['Summary','custom, exact'],context:['context']}}},
+    {steps:['done'],inputs:['context'],answer:{answers:{outputs:[],context:['context']}}},
+    {steps:[1,'custom','done'],inputs:['','context'],answer:{answers:{outputs:['Summary'],context:['context']}}},
+    {steps:[0,'done'],inputs:[undefined],answer:{cancelled:true}},
+    {steps:['custom'],inputs:[undefined],answer:{cancelled:true}},
+  ]) {
+    const h=harness(t,'waiting'),replies=[],steps=[...scenario.steps],inputs=[...scenario.inputs];
+    h.before.questions=[{id:'claude-form',title:'Native task questions',method:'form',kind:'question',humanOnly:true,parentPolicy:{},fields:[
+      {id:'outputs',header:'Outputs',question:'Which outputs?',description:'Select the authorized evidence',multiSelect:true,allowOther:true,isSecret:false,options:[
+        {label:'Finish selection.',description:'An ordinary label',preview:'<pre>raw preview</pre>'},{label:'Summary',description:'Short report'},
+      ]},
+      {id:'context',header:'Context',question:'Supply context',description:'Literal input only',multiSelect:false,allowOther:true,isSecret:false,options:[]},
+    ]}];
+    const reply=t.mock.method(AgentManager.prototype,'reply',async(id,questionId,answer)=>{replies.push({id,questionId,answer});return h.before;});
+    try {
+      h.ctx.hasUI=true;
+      h.ctx.ui.select=async(title,options)=>{
+        assert.match(title,/human/i);assert.match(title,/authorized evidence/);assert.match(title,/raw preview/);
+        assert.match(options[0],/1\..*\[[ x]\].*Finish selection/);
+        const step=steps.shift();assert.notEqual(step,undefined,'UI must not reopen a completed form');
+        if(typeof step==='number') return options[step];
+        if(step==='custom') return options.find(value=>/Type something|Edit other/i.test(value));
+        return options.find(value=>/^\d+\. Finish selection\./.test(value));
+      };
+      h.ctx.ui.input=async()=>{assert(inputs.length);return inputs.shift();};
+      await h.commands.get('agent-reply').handler(h.before.id+' claude-form',h.ctx);
+      assert.deepEqual(replies,[{id:h.before.id,questionId:'claude-form',answer:scenario.answer}]);
+      assert.equal(steps.length,0);assert.equal(inputs.length,0);
+    } finally {reply.mock.restore();await h.close();}
+  }
+});
+
+test('human form display escapes controls while preserving native field IDs and selected labels', async t => {
+  const h=harness(t,'waiting'),replies=[],displays=[],poison='\u202e\u2069\u2028\u2029\u061c\u200f\x1b[31m';
+  h.before.questions=[{id:'untrusted-form',title:'Title'+poison,method:'form',kind:'question',humanOnly:true,parentPolicy:{},fields:[false,true].map((multiSelect,index)=>({
+    id:String(index)+poison,header:'Header'+poison,question:'Question'+poison,description:'Hint'+poison,multiSelect,allowOther:true,isSecret:false,
+    options:[{label:'First'+poison,description:'Description'+poison,preview:'<pre>'+poison+'</pre>'},{label:'Second',description:'Plain'}],
+  }))}];
+  const snapshot=structuredClone(h.before.questions),fields=h.before.questions[0].fields;
+  const reply=t.mock.method(AgentManager.prototype,'reply',async(_id,_questionId,answer)=>{replies.push(answer);return h.before;});
+  try {
+    h.ctx.hasUI=true;let menus=0;
+    h.ctx.ui.select=async(title,options)=>{
+      displays.push({title,options});
+      return ++menus===3?options.at(-1):options[0];
+    };
+    await h.commands.get('agent-reply').handler(h.before.id+' untrusted-form',h.ctx);
+    assert.equal(menus,3);
+    for(const {title,options} of displays) {
+      for(const text of [title,...options]) assert.doesNotMatch(text,/[\x00-\x08\x0b-\x1f\x7f-\x9f\u061c\u200e-\u200f\u2028-\u202e\u2066-\u2069]/u);
+      assert.match(title,/\\u202e/);assert.match(title,/Human response required/);
+    }
+    assert.deepEqual(replies,[{answers:Object.fromEntries(fields.map(field=>[field.id,[field.options[0].label]]))}]);
+    assert.deepEqual(h.before.questions,snapshot,'presentation must not mutate the native payload');
+  } finally {reply.mock.restore();await h.close();}
+});
+
 test('inline input surfaces failed state instead of an accepted notice and records the human attempt', async t => {
   for(const phase of ['completed','running']) {
     const h = harness(t,phase);

@@ -102,6 +102,10 @@ Codex task forms (`requestUserInput`, checked against CLI 0.159.2) can contain m
 
 Codex treats these answers as trusted user input, so provide only already-authorized task context, never new authorization. Its native MCP approval forms and input associated with known action items remain unsupported and fail the run; they are not ordinary questions. The host-reserved `mcp_tool_call_approval*` IDs must not be used for task questions. Human form entry is available through `/agent-reply`; sensitive fields warn that input is visible and may be retained in logs, not masked.
 
+Claude's built-in `AskUserQuestion` (checked against 2.1.283) uses the same `answers` interface for 1–4 choice, text or number questions. Text/number cards require the native extended-question feature; this extension does not enable it. Its field IDs are the **full question text**, not display headers. `multiSelect: false` accepts at most one string; `true` accepts multiple selections plus one custom answer. `[]` skips a field without guessing a default. The native `requires_user_interaction: true` flag is satisfied only by this decoded question card, never by a blanket approval; explicit native human-only restrictions still apply. Cancellation denies the question without interrupting the whole turn. Answers provide task context, not new authorization or persistent permissions.
+
+Human entry collects the whole form before sending one reply. Multi-select menus toggle choices and require **Finish selection**; cancelling any entry discards the partial form. Previews are shown as plain text, not rendered HTML, and display controls are escaped without changing native answer data. Number/text hints are displayed without coercion or applying defaults. Claude question mapping is verified offline; a real Claude model round trip is a separate, explicitly authorized acceptance gate.
+
 Pi and Codex accept running `steer` messages; running `followUp` is Pi-only. Wait for Claude to finish before sending more instructions. Panels are TUI-only; the tools also work in RPC/non-interactive modes.
 
 ## Isolate parallel edits

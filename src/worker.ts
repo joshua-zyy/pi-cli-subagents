@@ -6,6 +6,7 @@ import { PiAdapter } from "./pi-adapter.js";
 import { CodexAdapter } from "./codex-adapter.js";
 import { validateQuestionAnswers } from "./codex-question.js";
 import { ClaudeAdapter } from "./claude-adapter.js";
+import { claudeQuestionAnswers } from "./claude-question.js";
 import { nativeSession, type CliAdapter, type AdapterEvent } from "./cli-adapter.js";
 import { readJson, writeJson } from "./storage.js";
 import type { AgentSpec, AgentState, Control, Question, Report, StartRequest } from "./types.js";
@@ -123,8 +124,10 @@ async function run(dir: string, runId: string): Promise<void> {
       const textAnswer = q.parentPolicy?.text === true && q.humanOnly !== true &&
         (q.method === "input" || q.method === "editor" || q.kind === "question" && q.method === "select");
       if (!input.cancelled) {
-        if (form) input.answers = validateQuestionAnswers(form, input.answers);
-        else {
+        if (form) {
+          input.answers = validateQuestionAnswers(form, input.answers);
+          if (spec.cli === "claude") claudeQuestionAnswers(form, input.answers);
+        } else {
           if (input.answers !== undefined || (q.method === "confirm" ? typeof input.confirmed !== "boolean" : typeof input.value !== "string")) throw new Error("Response type does not match the question");
           if (q.method === "select" && !textAnswer && !q.options?.includes(input.value!)) throw new Error("Response is not one of the available options");
         }

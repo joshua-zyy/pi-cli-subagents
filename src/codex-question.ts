@@ -38,6 +38,9 @@ export function validateQuestionAnswers(fields: readonly QuestionField[], input:
   return Object.fromEntries(fields.map(field => {
     const values = input[field.id];
     if (!Array.isArray(values) || values.some(value => typeof value !== "string")) throw new Error("Each field answer must be a string array");
+    if (field.multiSelect === false && values.length > 1) throw new Error(`Field ${field.id} accepts at most one answer`);
+    if (field.multiSelect === true && values.length > field.options.length + Number(field.allowOther))
+      throw new Error(`Too many answers for multi-select field ${field.id}`);
     if (!field.allowOther && values.some(value => !field.options.some(option => option.label === value)))
       throw new Error(`Answer for field ${field.id} is not an offered choice`);
     return [field.id, [...values]];

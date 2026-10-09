@@ -5,9 +5,11 @@ import { randomUUID } from "node:crypto";
 import path from "node:path";
 import type { AdapterOptions, CliAdapter, InteractionReply } from "./cli-adapter.js";
 import { childEnvironment, type Exit } from "./pi-process.js";
-import type { AgentSpec, NativeSession, Delivery } from "./types.js";
+import type { AgentSpec, NativeSession, Delivery, QuestionField } from "./types.js";
+import { claudeQuestionAnswers, readClaudeQuestionFields } from "./claude-question.js";
 
-// pi-lens-ignore: no-any-type, no-unsafe-dictionary-type
+// Legacy RPC envelope; a typed decoder migration is separate from task-question support.
+// pi-lens-ignore: no-unsafe-dictionary-any
 type Json = Record<string, any>;
 const object = (value: unknown): value is Json => value !== null && typeof value === "object" && !Array.isArray(value);
 const uuid = /^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/;
@@ -50,7 +52,7 @@ export function inspectClaudeSession(spec: AgentSpec, session: ClaudeSession): s
   return files[0];
 }
 
-type Approval = { id: string; requestId: string; toolId: string; input: Json; messageId: string; humanOnly: boolean; attempted: boolean };
+type Approval = { id: string; requestId: string; toolId: string; input: Json; messageId: string; humanOnly: boolean; attempted: boolean; fields?: QuestionField[] };
 /** Native stream-json stays inside this adapter; the worker retains ownership and audit. */
 export class ClaudeAdapter implements CliAdapter {
   readonly child: ChildProcessWithoutNullStreams;
@@ -217,20 +219,30 @@ export class ClaudeAdapter implements CliAdapter {
       this.tools.has(p.tool_use_id) && this.tools.get(p.tool_use_id) === p.tool_name && object(p.input);
     const details = object(p) ? JSON.stringify({ tool: p.tool_name, input: p.input, reason: p.decision_reason, matchedAskRule: p.matched_ask_rule }, null, 2)
       .replace(/[\u202a-\u202e\u2066-\u2069]/g, c => `\\u${c.charCodeAt(0).toString(16)}`) : "";
-    if (!scoped || p.requires_user_interaction !== undefined && p.requires_user_interaction !== false ||
+    const isTaskQuestion = object(p) && p.tool_name === "AskUserQuestion";
+    const fields = scoped && isTaskQuestion && p.mcp_server === undefined && p.tool_kind === undefined ? readClaudeQuestionFields(p.input) : undefined;
+    if (!scoped || isTaskQuestion && !fields ||
+      p.requires_user_interaction !== undefined && typeof p.requires_user_interaction !== "boolean" || p.requires_user_interaction === true && !fields ||
       p.classifier_approvable !== undefined && typeof p.classifier_approvable !== "boolean" || details.length > 12_000) {
-      // No allow response, including for dialogs whose consent disclosure is not carried by this wire.
+      // Only the built-in, fully decoded question card can satisfy requires_user_interaction.
+      // Other dedicated/local-only dialogs still cannot be approved over this wire.
       void this.write({ type: "control_response", response: { subtype: "error", request_id: requestId, error: "Unsupported or unscoped interaction; open the original Claude session to inspect" } }).catch(() => {});
       this.fail(new Error("Claude interaction is unsupported, unscoped or requires a dedicated user dialog; not approved")); return;
     }
     this.seenRequests.add(requestId);
     const humanOnly = p.classifier_approvable === false || p.decision_reason_type === "rule" || p.matched_ask_rule != null;
-    const approval: Approval = { id: randomUUID(), requestId, toolId: p.tool_use_id, input: structuredClone(p.input), messageId: this.activeMessage!, humanOnly, attempted: false };
+    const approval: Approval = { id: randomUUID(), requestId, toolId: p.tool_use_id, input: structuredClone(p.input), messageId: this.activeMessage!, humanOnly, attempted: false, ...(fields ? { fields } : {}) };
     this.approvals.set(approval.id, approval);
-    const options = ["Deny once", "Approve once", "Cancel turn"];
-    this.options.onEvent({ type: "question", question: { id: approval.id, method: "select", title: "Approve one Claude tool call?",
-      message: `${humanOnly ? "Human approval required; the parent may only deny or cancel.\n" : ""}${details}`, options,
-      parentPolicy: { values: humanOnly ? ["Deny once", "Cancel turn"] : options }, ...(humanOnly ? { humanOnly: true } : {}) } });
+    if (fields) {
+      this.options.onEvent({ type: "question", question: { id: approval.id, method: "form", kind: "question", title: p.input.title || "Claude task questions", fields,
+        message: `${humanOnly ? "Human response required by native policy; the parent may only cancel.\n" : "Answers supply task context, not permission to take new actions.\n"}${details}`,
+        parentPolicy: humanOnly ? {} : { answers: true }, ...(humanOnly ? { humanOnly: true } : {}) } });
+    } else {
+      const options = ["Deny once", "Approve once", "Cancel turn"];
+      this.options.onEvent({ type: "question", question: { id: approval.id, method: "select", title: "Approve one Claude tool call?",
+        message: `${humanOnly ? "Human approval required; the parent may only deny or cancel.\n" : ""}${details}`, options,
+        parentPolicy: { values: humanOnly ? ["Deny once", "Cancel turn"] : options }, ...(humanOnly ? { humanOnly: true } : {}) } });
+    }
   }
   async ready(): Promise<NativeSession> {
     const result = await this.request({ subtype: "initialize", appendSystemPrompt: `# Delegated role: ${this.options.spec.roleName}\n${this.options.spec.role.instructions}`,
@@ -258,12 +270,22 @@ export class ClaudeAdapter implements CliAdapter {
   async reply(answer: InteractionReply): Promise<void> {
     const a = this.approvals.get(answer.id);
     if (!a || a.attempted || !this.activeMessage || a.messageId !== this.activeMessage || this.result || this.settled || this.ending) throw new Error("Claude approval is no longer pending or was already answered");
-    if (Number(answer.cancelled === true) + Number(typeof answer.value === "string") !== 1 || answer.confirmed !== undefined || answer.value !== undefined && !["Deny once", "Approve once", "Cancel turn"].includes(answer.value)) throw new Error("Claude requires one of the explicit choices offered");
-    const allow = answer.value === "Approve once";
-    if (allow && a.humanOnly && answer.actor !== "human") throw new Error("This Claude request requires human approval");
+    let response: Json;
+    if (a.fields) {
+      if (Number(answer.cancelled === true) + Number(answer.answers !== undefined) !== 1 || answer.value !== undefined || answer.confirmed !== undefined)
+        throw new Error("Claude task forms require answers or cancellation, not an approval");
+      if (!answer.cancelled && a.humanOnly && answer.actor !== "human") throw new Error("This Claude request requires a human response");
+      response = answer.cancelled ? { behavior: "deny", message: "Delegated-task controller declined to answer the questions", interrupt: false } :
+        { behavior: "allow", updatedInput: { ...a.input, answers: claudeQuestionAnswers(a.fields, answer.answers) } };
+    } else {
+      if (Number(answer.cancelled === true) + Number(typeof answer.value === "string") !== 1 || answer.confirmed !== undefined || answer.answers !== undefined || answer.value !== undefined && !["Deny once", "Approve once", "Cancel turn"].includes(answer.value)) throw new Error("Claude requires one of the explicit choices offered");
+      const allow = answer.value === "Approve once";
+      if (allow && a.humanOnly && answer.actor !== "human") throw new Error("This Claude request requires human approval");
+      response = allow ? { behavior: "allow", updatedInput: a.input } :
+        { behavior: "deny", message: "Denied by delegated-task controller", interrupt: answer.cancelled === true || answer.value === "Cancel turn" };
+    }
     a.attempted = true;
-    await this.write({ type: "control_response", response: { subtype: "success", request_id: a.requestId,
-      response: allow ? { behavior: "allow", updatedInput: a.input, toolUseID: a.toolId } : { behavior: "deny", message: "Denied by delegated-task controller", interrupt: answer.cancelled === true || answer.value === "Cancel turn", toolUseID: a.toolId } } });
+    await this.write({ type: "control_response", response: { subtype: "success", request_id: a.requestId, response: { ...response, toolUseID: a.toolId } } });
     // Native stdio has no approval receipt. A successful write is not proof of tool execution.
     if (this.approvals.delete(a.id)) this.options.onEvent({ type: "resolved", id: a.id });
   }

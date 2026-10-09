@@ -248,7 +248,7 @@ export default function extension(pi: ExtensionAPI): void {
       questionId: Type.String({ description: "Exact current interaction ID" }),
       confirmed: Type.Optional(Type.Boolean({ description: "confirm only: native yes/no response; inspect the request to establish its effect before confirming" })),
       value: Type.Optional(Type.String({ description: "task question: an offered label or custom answer text, submitted once; other select: exact offered option; input/editor: response text" })),
-      answers: Type.Optional(Type.Record(Type.String(), Type.Array(Type.String()), { description: "form only: map every field ID to its answer strings; empty arrays skip individual fields. Preserve exact text and respect offered choices/allowOther. Never invent authorization." })),
+      answers: Type.Optional(Type.Record(Type.String(), Type.Array(Type.String()), { description: "form only: map every field ID to its answer strings; empty arrays skip individual fields. multiSelect:false takes at most one string; true permits choices plus one custom answer. Preserve exact text and respect offered choices/allowOther. Never invent authorization." })),
       cancelled: Type.Optional(Type.Literal(true, { description: "Cancel instead of answering" })),
       reason: Type.String({ minLength: 1, description: "Why the decision is within the user's authorization, or why it is denied/cancelled" }),
     }, { additionalProperties: false }),
@@ -274,13 +274,42 @@ export default function extension(pi: ExtensionAPI): void {
     let answer: { value?: string; answers?: QuestionAnswers; confirmed?: boolean; cancelled?: boolean };
     if (q.method === "form") {
       if (!q.fields?.length) throw new Error("The task form has no fields");
+      // Escape presentation controls only; IDs, chosen labels and typed answers stay verbatim.
+      const display = (text: string): string => text.replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f\u061c\u200e-\u200f\u2028-\u202e\u2066-\u2069]/gu,
+        char => `\\u${char.charCodeAt(0).toString(16).padStart(4, "0")}`);
       const entries: [string, string[]][] = [];
       let cancelled = false;
       for (const field of q.fields) {
-        const title = `${field.isSecret ? "Sensitive question: input is visible in Pi and saved history.\n" : ""}[${field.header}] ${field.question}`;
+        const previews = field.options.flatMap(option => option.preview === undefined ? [] :
+          [`\nPreview (plain text): ${JSON.stringify({ label: option.label, preview: option.preview })}`]).join("");
+        const title = display(`${q.title ? `${q.title}\n` : ""}${q.humanOnly ? "Human response required by native policy.\n" : ""}${field.isSecret ? "Sensitive question: input is visible in Pi and saved history.\n" : ""}[${field.header}] ${field.question}${field.description ? `\n${field.description}` : ""}${previews}`);
+        if (field.multiSelect) {
+          const selected = new Set<number>();
+          let other: string | undefined;
+          for (;;) {
+            const choices = field.options.map((option, index) => display(`${index + 1}. [${selected.has(index) ? "x" : " "}] ${option.label} — ${option.description}`));
+            const custom = `${choices.length + 1}. ${other === undefined ? "Type something." : "Edit other answer."}`;
+            const finish = `${choices.length + (field.allowOther ? 2 : 1)}. Finish selection.`;
+            const choice = await ctx.ui.select(display(`${title}${other === undefined ? "" : `\nOther answer: ${JSON.stringify(other)}`}`),
+              [...choices, ...(field.allowOther ? [custom] : []), finish]);
+            if (choice === undefined) { cancelled = true; break; }
+            if (choice === finish) break;
+            if (choice === custom && field.allowOther) {
+              other = await ctx.ui.input(title, display(other ?? ""));
+              if (other === undefined) { cancelled = true; break; }
+            } else {
+              const index = choices.indexOf(choice);
+              if (index < 0) throw new Error("Response is not an offered form choice");
+              if (selected.has(index)) selected.delete(index); else selected.add(index);
+            }
+          }
+          if (cancelled) break;
+          entries.push([field.id, [...field.options.flatMap((option, index) => selected.has(index) ? [option.label] : []), ...(other ? [other] : [])]]);
+          continue;
+        }
         let value: string | undefined;
         if (field.options.length) {
-          const choices = field.options.map((option, index) => `${index + 1}. ${option.label} — ${option.description}`);
+          const choices = field.options.map((option, index) => display(`${index + 1}. ${option.label} — ${option.description}`));
           const custom = `${choices.length + 1}. Type something.`;
           const selected = await ctx.ui.select(title, field.allowOther ? [...choices, custom] : choices);
           value = selected === custom && field.allowOther ? await ctx.ui.input(title, "") :

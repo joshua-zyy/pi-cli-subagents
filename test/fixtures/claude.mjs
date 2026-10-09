@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import assert from 'node:assert/strict';
 import path from 'node:path';
 import readline from 'node:readline';
 import { randomUUID } from 'node:crypto';
@@ -38,6 +39,28 @@ const ask = (extra = {}) => {
     tool_use_id: toolId, input: { file_path: 'work.txt', content: 'fixture' }, ...extra } };
   emit(approval);
 };
+const questionInput = {
+  title: 'Fixture task questions', metadata: { source: 'fixture' }, questions: [
+    { question: 'Which checks?', header: 'Checks', kind: 'choice', multiSelect: false, options: [
+      { label: 'Read, write', description: 'Only the assigned workspace', preview: '<pre>work.txt</pre>' },
+      { label: 'Review', description: 'Read only' },
+    ] },
+    { question: 'Which outputs?', header: 'Checks', multiSelect: true, options: [
+      { label: 'Logs', description: 'Execution evidence' }, { label: 'Summary', description: 'Short report' },
+    ] },
+    { question: 'What marker?', header: 'Context', kind: 'text', description: 'Assigned context only', placeholder: 'Literal marker', options: [], multiSelect: false },
+    { question: 'How many items?', header: 'Count', kind: 'number', options: [], multiSelect: false, min: 1, max: 10, step: 1, defaultValue: 2, unit: 'items' },
+  ],
+};
+const questionRequests = new Map(), questionResults = [];
+function askQuestion(extra = {}, input = structuredClone(questionInput)) {
+  const toolId = randomUUID();
+  emit({ type: 'assistant', session_id: sessionId, parent_tool_use_id: null,
+    message: { id: randomUUID(), role: 'assistant', content: [{ type: 'tool_use', id: toolId, name: 'AskUserQuestion', input }] } });
+  const request = { type: 'control_request', request_id: randomUUID(), request: { subtype: 'can_use_tool', tool_name: 'AskUserQuestion',
+    tool_use_id: toolId, input, requires_user_interaction: true, ...extra } };
+  questionRequests.set(request.request_id, request); emit(request); return request;
+}
 for await (const line of readline.createInterface({ input: process.stdin })) {
   const record = JSON.parse(line); fs.appendFileSync(requests, JSON.stringify(record) + '\n');
   if (record.type === 'control_request') {
@@ -83,6 +106,24 @@ for await (const line of readline.createInterface({ input: process.stdin })) {
       if (task === 'APPROVAL_DUPLICATE') emit(approval);
       continue;
     }
+    if (task.startsWith('QUESTION')) {
+      const input = structuredClone(questionInput);
+      if (task === 'QUESTION_HOST_FIELDS') input.answers = {};
+      if (task === 'QUESTION_INVALID') input.questions[0].kind = 'future-dialog';
+      if (task === 'QUESTION_OVERSIZED') input.title = 'x'.repeat(12_001);
+      const request = askQuestion(task === 'QUESTION_MANUAL' ? { classifier_approvable: false } :
+        task === 'QUESTION_RULE' ? { matched_ask_rule: { source: 'userSettings', tool_name: 'AskUserQuestion' } } :
+        task === 'QUESTION_REASON_RULE' ? { decision_reason_type: 'rule', decision_reason: 'User explicitly requested review' } :
+        task === 'QUESTION_MCP' ? { mcp_server: { name: 'not-the-builtin' } } :
+        task === 'QUESTION_BROWSER' ? { tool_kind: 'browser' } :
+        task === 'QUESTION_HOOK' ? { decision_reason_type: 'hook' } :
+        task === 'QUESTION_MODE' ? { decision_reason_type: 'mode' } :
+        task === 'QUESTION_INVALID' ? { requires_user_interaction: false } : {}, input);
+      if (task === 'QUESTION_PAIR') askQuestion({}, { ...structuredClone(questionInput), title: 'Second form' });
+      if (task === 'QUESTION_DUPLICATE') emit(request);
+      if (task === 'QUESTION_EXPIRED') { emit({ type: 'control_cancel_request', request_id: request.request_id }); finish('EXPIRED'); }
+      continue;
+    }
     if (task.startsWith('FILE ')) {
       const {file,content}=JSON.parse(task.slice(5)); const target=path.resolve(process.cwd(),file);
       if(content!==undefined)fs.writeFileSync(target,content);
@@ -94,7 +135,24 @@ for await (const line of readline.createInterface({ input: process.stdin })) {
     system('task_notification', { task_id: 'background', status: 'completed', summary: 'finished' });
   } else if (record.type === 'control_response' && active) {
     const r = record.response.response;
-    if (r?.behavior === 'allow') finish('ALLOW');
+    if (questionRequests.has(record.response.request_id)) {
+      const request = questionRequests.get(record.response.request_id).request;
+      assert.equal(record.response.subtype, 'success'); assert.equal(r.toolUseID, request.tool_use_id);
+      assert.equal(r.updatedPermissions, undefined);
+      let answer;
+      if (r.behavior === 'allow') {
+        const { answers, ...shown } = r.updatedInput;
+        assert.deepEqual(shown, request.input, 'the shown native input must not be rewritten');
+        assert.deepEqual(Object.keys(answers).sort(), request.input.questions.map(q => q.question).sort());
+        for (const q of request.input.questions) assert.equal(Array.isArray(answers[q.question]), q.multiSelect === true);
+        answer = answers;
+        emit({ type: 'user', session_id: sessionId, parent_tool_use_id: null, message: { role: 'user', content: [
+          { type: 'tool_result', tool_use_id: request.tool_use_id, content: JSON.stringify(answer) },
+        ] } });
+      } else { assert.equal(r.behavior, 'deny'); assert.equal(r.interrupt, false); answer = 'QUESTION_CANCELLED'; }
+      questionResults.push(answer); questionRequests.delete(record.response.request_id);
+      if (!questionRequests.size) finish(task === 'QUESTION_PAIR' ? JSON.stringify(questionResults) : typeof answer === 'string' ? answer : JSON.stringify(answer));
+    } else if (r?.behavior === 'allow') finish('ALLOW');
     else finish('DENY', r?.interrupt ? { terminal_reason: 'aborted_tools' } : {});
   }
 }

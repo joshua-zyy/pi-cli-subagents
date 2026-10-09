@@ -21,7 +21,7 @@ or override a disabled `tools.experimental_request_user_input.enabled`. Configur
 within the user’s authorization: editing the role does not change an existing instance’s saved settings.
 Do not widen permission `mode`, edit global config, or silently launch a replacement as a workaround.
 
-For a Codex `form` with `parentPolicy.answers: true`, read the full `fields` with `subagent_query get`.
+For a Codex or Claude `form` with `parentPolicy.answers: true`, read the full `fields` with `subagent_query get`.
 Submit one `answers` object mapping every exact field ID to a string array, respecting offered labels
 and `allowOther`. Use `[]` to skip a field, or `cancelled: true` to dismiss the whole form; never
 guess a first choice or replace an ID with its display header. Do not mix `answers` with `value` or
@@ -32,6 +32,18 @@ Codex treats answers as trusted user input: provide only the user’s already-au
 new authorization. Native MCP approval forms are not task questions and remain unsupported; their
 `mcp_tool_call_approval*` IDs belong to the host. Do not work around this refusal. Sensitive fields
 are marked, not masked or guaranteed absent from native logs; do not invent or expose secrets.
+
+Claude `AskUserQuestion` field IDs are the full question text, not short headers. Respect explicit
+`multiSelect`: false permits at most one string, true permits selections plus one custom answer.
+Send arrays through `answers`; the adapter maps single answers to strings and leaves multi-select
+encoding to Claude. `[]` skips; no range/default hint is an automatic answer. Native previews and
+hints are context to read, not new authorization. Text/number cards require the native extended-question
+feature; this extension does not enable it. Answers are bounded locally using the audited strict-card
+limits (8192 UTF-16 code units per string, 32768 encoded answer characters). Cancellation denies the
+question without explicitly interrupting the turn. Do not replace an answer with `Approve once`,
+change shown input, supply host annotations/timeout fields, or write native permission updates.
+An explicit native human-only rule still requires `/agent-reply`; the recognized question card is
+the only supported exception to the generic dedicated-dialog refusal. Unknown forms remain refused.
 
 ## Decide
 
@@ -58,7 +70,7 @@ including a legacy record, remains refusal-only for the parent; the human can us
 
 - A response outside the request's stated policy cannot be approved by the parent. Prefer the offered
   one-action choice when it covers the authorized work; missing authorization must be resolved by the user.
-- Dedicated native dialogs and unscoped requests fail closed. A refusal is not something to work around
+- Unrecognized dedicated native dialogs and unscoped requests fail closed. A refusal is not something to work around
   with a raw `cwd`, a replacement instance or a hand-edited record.
 - Native permission requests from Pi, Codex and Claude Code offer their own choice values, including
   `Deny once`, `Approve once` and `Cancel turn`. Respond with an **exact offered value**.

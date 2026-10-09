@@ -54,7 +54,11 @@ export interface QuestionField {
   id: string;
   header: string;
   question: string;
-  options: { label: string; description: string }[];
+  /** Native hints, including text/number constraints; displayed without selecting a default. */
+  description?: string;
+  options: { label: string; description: string; preview?: string }[];
+  /** Explicit false limits a field to one answer; omitted preserves the older Codex contract. */
+  multiSelect?: boolean;
   allowOther: boolean;
   isSecret: boolean;
 }
@@ -81,7 +85,7 @@ export interface Question {
    * Pi dialogs expose their native choices; the parent judges scope and user-required escalation.
    * Absent policy preserves legacy refusal-only behavior (`cancelled`, or `confirmed: false`).
    * `text` permits input/editor text and custom answers for recognized logical question selects.
-   * `answers` permits a scoped Codex task form, not its native MCP approval forms. Explicit native
+   * `answers` permits a scoped Codex or Claude task form, not native MCP approval forms. Explicit
    * human-only restrictions remain; the parent must not invent or broaden authorization.
    */
   parentPolicy?: { values?: string[]; confirm?: boolean; text?: true; answers?: true };
