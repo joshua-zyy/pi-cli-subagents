@@ -65,7 +65,8 @@ export interface Question {
    * Which responses the parent agent may submit. Absent means the parent may only refuse
    * (`cancelled`, or `confirmed: false`), because this extension never lets an agent produce an
    * authorization whose scope it cannot establish. Records written by earlier versions carry no
-   * policy and therefore stay unanswerable by the parent.
+   * policy and therefore stay unanswerable by the parent. `text` permits custom answers only for
+   * the recognized task-question contract, including its logical selection request.
    */
   parentPolicy?: { values?: string[]; confirm?: boolean; text?: true };
 }

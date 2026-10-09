@@ -57,7 +57,7 @@ test('parent can explicitly review a child request while the human command remai
   await commands.get('agent-reply').handler(`${second.id} permission-1`,ctx);
   await waitUntil('human complete',()=>manager.get(second.id).phase==='completed'&&!processAlive(manager.get(second.id).workerPid));
   assert.equal(confirmations,1);assert.equal(manager.get(second.id).text,'DENY');
-  assert.ok(notices.some(message=>message.includes('Human response sent to subagent')));
+  assert.ok(notices.some(message=>message.includes('Human response accepted for subagent')));
 });
 
 test('permission tools reject foreign parents, missing persistent sessions and invalid decisions', {timeout:12000}, async t=>{
@@ -132,7 +132,7 @@ test('owned Pi questions accept parent choices, custom text and cancellation in 
   const invoke=async(name,args)=>(await tools.get(name).execute('test',args,undefined,undefined,ctx)).content[0].text;
   const notify=()=>deliverReports(manager,{sendMessage:(message,options)=>sent.push({message,options})},ctx,new Set(),Date.now(),manager.list());
   let existingId,originalSessionId,taskCount=0;
-  for(const mode of ['option','custom','cancel']){
+  for(const mode of ['custom','option','cancel']){
     const initial=JSON.parse((await invoke('subagent',existingId
       ? {action:'send',id:existingId,message:'ASK_PARENT'}
       : {action:'start',role:'worker',task:'ASK_PARENT',cwd})).match(/\{.+\}/)[0]);
@@ -141,19 +141,13 @@ test('owned Pi questions accept parent choices, custom text and cancellation in 
     existingId=id;originalSessionId=sessionId;taskCount++;
     const q=await waitUntil('owned question',()=>manager.get(id).questions[0],3000);
     assert.equal(q.kind,'question');assert.equal(q.humanOnly,false);
-    assert.deepEqual(q.options,['1. Unit — Fast tests','2. Integration — Full local scenario','3. Type something.']);
     notify();
     const notice=sent.find(s=>s.message.content.includes(q.id));
     assert.equal(notice.options.deliverAs,'steer');assert.match(notice.message.content,/task question/i);
+    assert.match(notice.message.content,/offered label or your custom answer/);
+    // The caller submits one logical answer, never a menu entry followed by a second reply.
     await invoke('subagent_reply',{id,questionId:q.id,reason:'Use the agreed verification scope',
-      ...(mode==='cancel'?{cancelled:true}:{value:mode==='custom'?q.options[2]:q.options[0]})});
-    if(mode==='custom'){
-      const input=await waitUntil('custom answer',()=>manager.get(id).questions.find(q=>q.method==='input'),3000);
-      assert.equal(input.kind,'question');assert.deepEqual(input.parentPolicy,{text:true});
-      notify();const message=sent.find(s=>s.message.content.includes(input.id)).message.content;
-      assert.match(message,/value.*text/i);assert.doesNotMatch(message,/human answers|requires the human/i);
-      await invoke('subagent_reply',{id,questionId:input.id,value:'Only the focused regression.',reason:'Task context, not permission to change scope'});
-    }
+      ...(mode==='cancel'?{cancelled:true}:{value:mode==='custom'?'Only the focused regression.':'Unit'})});
     await waitUntil('question run completion',()=>manager.get(id).phase==='completed'&&!processAlive(manager.get(id).workerPid),4000);
     const state=manager.get(id);assert.equal(state.runId,runId);assert.equal(state.sessionId,sessionId);assert.deepEqual(state.questions,[]);
     const result=JSON.parse(await invoke('subagent_query',{action:'result',id,runId}));
@@ -168,8 +162,9 @@ test('owned Pi questions accept parent choices, custom text and cancellation in 
     const events=fs.readFileSync(state.logFile,'utf8').trim().split('\n').map(JSON.parse);
     assert.equal(events.filter(e=>e.type==='agent_start').length,1);
     const audit=fs.readFileSync(path.join(manager.root,id,'runs',runId,'permissions.jsonl'),'utf8').trim().split('\n').map(JSON.parse);
-    assert.equal(audit.length,mode==='custom'?2:1);assert(audit.every(row=>row.actor==='parent'&&row.runId===runId));
+    assert.equal(audit.length,1);assert(audit.every(row=>row.actor==='parent'&&row.runId===runId));
     assert(audit.every(row=>row.kind==='question'&&['answered','cancelled'].includes(row.decision)));
+    if(mode==='custom')assert.equal(audit[0].selectedOption,undefined,'free text is not an option or a permission grant');
   }
   assert.deepEqual(warnings,[]);assert(statuses.some(s=>s?.includes('waiting for parent review')));
 });

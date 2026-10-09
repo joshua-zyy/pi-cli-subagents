@@ -22,7 +22,7 @@ const quoted = (values: readonly string[]): string =>
 function needsHumanApproval(request: Report["request"]): boolean {
   return request?.humanOnly === true || !(request?.method === "confirm"
     ? request.parentPolicy?.confirm === true : request?.parentPolicy?.values?.length ||
-      request?.kind === "question" && request.method === "input" && request.parentPolicy?.text === true);
+      request?.kind === "question" && (request.method === "select" || request.method === "input") && request.parentPolicy?.text === true);
 }
 
 /**
@@ -40,7 +40,7 @@ function waitingAnswerLine(report: Report): string {
   const header = `\nQuestion ID: ${id} (${request.method}${offered}).`;
   const review = " Handle this request now with subagent_reply within the user's task authorization; do not wait for routine human approval.";
   if (request.kind === "question" && !needsHumanApproval(request)) {
-    const answer = request.method === "input" ? "value as answer text" : quoted(request.parentPolicy?.values ?? []);
+    const answer = request.parentPolicy?.text === true ? "value as answer text (an offered label or your custom answer)" : quoted(request.parentPolicy?.values ?? []);
     return `${header} This is a task question, not a permission request. You may submit ${answer}, or cancelled. Answer with subagent_reply using the authorized task context.`;
   }
   if (request.method === "confirm") return !needsHumanApproval(request)

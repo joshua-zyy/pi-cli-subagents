@@ -7,10 +7,11 @@ Read this when a child is `waiting` on a permission request or task question. Th
 ## Task questions
 
 Pi children have a bundled `subagent_ask_parent` tool for one task-context question at a time.
-Recognized requests have `kind: "question"`: use an exact offered value, or answer a follow-up input
-with `value` text when `parentPolicy.text` is true. Answer from the authorized task context; escalate
-if the missing decision belongs to the user. An answer does not authorize new actions or change
-permissions. This does not make unknown Pi dialogs answerable.
+For a recognized `kind: "question"` with `parentPolicy.text: true`, submit an offered label or your
+actual custom answer once in `value`. The adapter handles the native selection/input sequence; do not
+choose a custom-entry menu item or wait for a second question. Answer from the authorized task
+context; escalate if the missing decision belongs to the user. An answer does not authorize new
+actions or change permissions. This does not make unknown Pi dialogs answerable.
 
 ## Decide
 
@@ -37,8 +38,8 @@ version — is answered by the human: refusing from the parent still works, appr
   one-action choice when it covers the authorized work; ask for a wider grant only if actually needed.
 - Dedicated native dialogs and unscoped requests fail closed. A refusal is not something to work around
   with a raw `cwd`, a replacement instance or a hand-edited record.
-- Pi, Codex and Claude Code each offer their own choice values, including `Deny once`, `Approve once`
-  and `Cancel turn`. Respond with an **exact offered value**.
+- Native permission requests from Pi, Codex and Claude Code offer their own choice values, including
+  `Deny once`, `Approve once` and `Cancel turn`. Respond with an **exact offered value**.
 - `confirmed: false` is not a decline-and-continue, and a request that already resolved or
   auto-resolved cannot be answered twice.
 

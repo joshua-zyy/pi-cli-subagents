@@ -88,7 +88,7 @@ In the TUI, reports follow Pi’s expand/collapse state (**Ctrl+O** by default, 
 
 A waiting request reaches a busy parent through `steer`, before its next model request without aborting an in-flight tool. Other notification batches remain `followUp` messages, delivered when the parent finishes its current execution. The parent reviews task-scoped requests itself; it escalates only when authorization is missing or the native request requires a human.
 
-Pi children explicitly load the bundled `subagent_ask_parent` tool on each start or resume; no global plugin installation is needed. It asks one task-context question with 2–4 choices and a custom-answer option. The parent answers through `subagent_reply` using the offered values, or `value` text for the follow-up input. These requests carry `kind: "question"`; answers are context, not permission grants. Only dialogs matching the bundled tool call and its versioned wire contract receive this policy. Unknown dialogs retain their human-only approval boundary.
+Pi children explicitly load the bundled `subagent_ask_parent` tool on each start or resume; no global plugin installation is needed. Its recognized call becomes one logical task question with 2–4 choices and custom text. Submit an offered label or your custom answer once as `subagent_reply.value`. Following Paseo’s flow, the adapter caches the answer and automatically replies to the matching native selection and input; the parent does not handle a second UI step or send another prompt. These requests carry `kind: "question"` and `parentPolicy.text: true`; answers are context, not permission grants. Native dialogs are consumed only when their call, versioned title and expected UI stage/shape match. Unknown dialogs retain their human-only approval boundary.
 
 Pi and Codex accept running `steer` messages; running `followUp` is Pi-only. Wait for Claude to finish before sending more instructions. Panels are TUI-only; the tools also work in RPC/non-interactive modes.
 
@@ -129,7 +129,7 @@ After code changes, rebuild and run `/reload` in Pi. Automated tests are not ful
 
 ## Credits
 
-- [Paseo](https://github.com/getpaseo/paseo): lifecycle design, plus Pi tool-call/dialog correlation adapted from its [pinned mapper](https://github.com/getpaseo/paseo/blob/99fc204c55c8c1666477282eeba562ba87a3135f/packages/server/src/server/agent/providers/pi/extensions/rpiv-ask-user-question/index.ts) (Apache-2.0).
+- [Paseo](https://github.com/getpaseo/paseo): lifecycle design, plus Pi logical-question normalization, tool-call/dialog correlation and cached answer replay adapted from its [pinned mapper](https://github.com/getpaseo/paseo/blob/99fc204c55c8c1666477282eeba562ba87a3135f/packages/server/src/server/agent/providers/pi/extensions/rpiv-ask-user-question/index.ts) (Apache-2.0).
 - [@juicesharp/rpiv-ask-user-question 2.12.0](https://www.npmjs.com/package/@juicesharp/rpiv-ask-user-question/v/2.12.0): the single-question RPC choice/custom-answer flow used by the bundled child tool (MIT).
 - [pi-subagents](https://github.com/tintinweb/pi-subagents): inspiration for the status and conversation UI.
 

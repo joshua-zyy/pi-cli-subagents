@@ -118,9 +118,10 @@ async function run(dir: string, runId: string): Promise<void> {
       if (!q || (q.expiresAt !== undefined && q.expiresAt <= Date.now())) throw new Error("The interaction has ended or does not exist");
       const choices = Number(input.cancelled === true) + Number(typeof input.confirmed === "boolean") + Number(typeof input.value === "string");
       if (choices !== 1) throw new Error("Provide exactly one response: confirmed, value, or cancelled");
+      const textAnswer = q.kind === "question" && (q.method === "select" || q.method === "input") && q.parentPolicy?.text === true && q.humanOnly !== true;
       if (!input.cancelled) {
         if (q.method === "confirm" ? typeof input.confirmed !== "boolean" : typeof input.value !== "string") throw new Error("Response type does not match the question");
-        if (q.method === "select" && !q.options?.includes(input.value!)) throw new Error("Response is not one of the available options");
+        if (q.method === "select" && !textAnswer && !q.options?.includes(input.value!)) throw new Error("Response is not one of the available options");
       }
       if (input.actor === "parent" && (typeof input.reason !== "string" || !input.reason.trim())) throw new Error("A parent decision requires a reason");
       if (input.actor !== undefined && input.actor !== "parent" && input.actor !== "human") throw new Error("Unknown decision actor");
@@ -128,7 +129,6 @@ async function run(dir: string, runId: string): Promise<void> {
         // A refusal is always safe. Producing an authorization is not: without a policy that states
         // what a response means, the parent may only refuse and the human answers the request.
         const refusal = q.method === "confirm" && input.confirmed === false;
-        const textAnswer = q.kind === "question" && q.method === "input" && q.parentPolicy?.text === true && q.humanOnly !== true;
         const permitted = q.method === "confirm" ? q.parentPolicy?.confirm === true : textAnswer || q.parentPolicy?.values?.includes(input.value!) === true;
         if (!refusal && !permitted) throw new Error("This request requires human approval; the parent agent may only refuse it, not approve it");
       }
@@ -136,7 +136,7 @@ async function run(dir: string, runId: string): Promise<void> {
       appendFileSync(path.join(runDir, "permissions.jsonl"), `${JSON.stringify({ time: Date.now(), runId, questionId: q.id,
         actor: input.actor ?? "human", decision: input.cancelled ? "cancelled" : q.method === "confirm" ? input.confirmed ? "approved" : "denied" : "answered",
         delivery: "attempted", ...(q.kind ? { kind: q.kind } : {}), ...(input.reason ? { reason: input.reason.slice(0, 2000) } : {}),
-        ...(q.method === "select" && input.value !== undefined ? { selectedOption: input.value } : {}),
+        ...(q.method === "select" && q.options?.includes(input.value!) ? { selectedOption: input.value } : {}),
       })}\n`, { mode: 0o600 });
       await rpc.reply(input);
       state.questions = state.questions.filter((item) => item !== q);

@@ -1,6 +1,6 @@
 ---
 name: delegate-cli-agents
-description: Handle CLI subagent approvals, truncated or missing results, managed-worktree baselines, and interrupted sessions. Use the tool descriptions for routine dispatch and parameters.
+description: Handle CLI subagent task questions, approvals, truncated or missing results, managed-worktree baselines, and interrupted sessions. Use the tool descriptions for routine dispatch and parameters.
 ---
 
 # CLI subagent operational reference
@@ -26,7 +26,7 @@ replays unrecorded reports with their original run IDs; recorded reports are not
 
 Handle task-scoped requests yourself; do not pass routine approvals to the human. Inspect the current
 request with `subagent_query({ action: "get", id })` when its content or policy is missing, truncated or
-stale. Use its type and exact permitted options, not guesses. Send the answer through `subagent_reply`,
+stale. Follow its type and stated `parentPolicy`, not guesses. Send the answer through `subagent_reply`,
 not `subagent` send. See [references/approvals.md](references/approvals.md) for
 single-action authorization and human-only requests.
 

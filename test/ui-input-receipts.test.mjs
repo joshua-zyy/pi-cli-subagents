@@ -35,7 +35,7 @@ function harness(t, beforePhase = 'completed', decision = 'none') {
     }};
   extension({on:(name,handler)=>events.set(name,handler), registerTool(){}, registerCommand:(name,command)=>commands.set(name,command), registerShortcut(){}, registerMessageRenderer(){},
     sendMessage:(message,options)=>messages.push({message,options})});
-  return {before,failed,notices,messages,calls,
+  return {before,failed,notices,messages,calls,ctx,commands,
     open(){running=commands.get('agents').handler('',ctx);},
     press(key){assert.deepEqual(listener(key),{consume:true});},
     viewer:()=>viewer,
@@ -68,6 +68,26 @@ test('roster reports failed input with original evidence after direct or confirm
       assert.ok(!h.notices.some(notice=>/accepted/i.test(notice.message)));
       assert.equal(h.calls.length,decision === 'inherit' ? 3 : decision === 'baseline' ? 2 : 1,'no automatic retry after failure');
     } finally {await h.close();}
+  }
+});
+
+test('human task answers collect custom text locally and submit one logical reply', async t => {
+  for(const value of ['Human task context',undefined]){
+    const h=harness(t,'waiting'),replies=[];
+    h.before.questions=[{id:'logical-question',kind:'question',method:'select',title:'Choose tests',
+      message:'Unit — Fast tests',options:['Unit','Integration'],humanOnly:false,parentPolicy:{values:['Unit','Integration'],text:true}}];
+    const reply=t.mock.method(AgentManager.prototype,'reply',async(id,questionId,answer)=>{
+      replies.push({id,questionId,answer});return h.before;
+    });
+    try {
+      h.ctx.hasUI=true;
+      h.ctx.ui.select=async(title,options)=>{assert.match(title,/Fast tests/);assert.deepEqual(options,['Unit','Integration','Type something.']);return 'Type something.';};
+      h.ctx.ui.input=async()=>value;
+      await h.commands.get('agent-reply').handler(h.before.id+' logical-question',h.ctx);
+      assert.deepEqual(replies,[{id:h.before.id,questionId:'logical-question',answer:value===undefined?{cancelled:true}:{value}}]);
+      assert(h.notices.some(n=>n.type==='info'&&/response accepted/.test(n.message)));
+      assert.equal(h.messages.filter(m=>m.message.customType==='cli-subagents-human-action').length,1);
+    } finally {reply.mock.restore();await h.close();}
   }
 });
 

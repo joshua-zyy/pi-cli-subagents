@@ -247,7 +247,7 @@ export default function extension(pi: ExtensionAPI): void {
       id: Type.String({ description: "Existing instance ID" }),
       questionId: Type.String({ description: "Exact current interaction ID" }),
       confirmed: Type.Optional(Type.Boolean({ description: "confirm only: true approves once, false denies" })),
-      value: Type.Optional(Type.String({ description: "select: exact offered option; input/editor: response text" })),
+      value: Type.Optional(Type.String({ description: "task question: an offered label or custom answer text, submitted once; other select: exact offered option; input/editor: response text" })),
       cancelled: Type.Optional(Type.Literal(true, { description: "Cancel instead of answering" })),
       reason: Type.String({ minLength: 1, description: "Why the decision is within the user's authorization, or why it is denied/cancelled" }),
     }, { additionalProperties: false }),
@@ -255,7 +255,7 @@ export default function extension(pi: ExtensionAPI): void {
       checkFields(args, ["id", "questionId", "reason"], ["confirmed", "value", "cancelled"]);
       const state = await parentManager(ctx, launch).reply(args.id, args.questionId,
         { confirmed: args.confirmed, value: args.value, cancelled: args.cancelled }, { actor: "parent", reason: args.reason });
-      return content(`Response sent to the child's current interaction; delivery is not proof the action completed: ${view(state)}`);
+      return content(`Response accepted for the child's current interaction; delivery is not proof the action completed: ${view(state)}`);
     },
   });
 
@@ -272,7 +272,10 @@ export default function extension(pi: ExtensionAPI): void {
     let answer: { value?: string; confirmed?: boolean; cancelled?: boolean };
     if (q.method === "confirm") answer = { confirmed: await ctx.ui.confirm(q.title, q.message ?? "") };
     else if (q.method === "select") {
-      const value = await ctx.ui.select(q.message ? `${q.title}\n\n${q.message}` : q.title, q.options ?? []);
+      const freeText = q.kind === "question" && q.parentPolicy?.text === true && q.humanOnly !== true;
+      const options = q.options ?? [];
+      let value = await ctx.ui.select(q.message ? `${q.title}\n\n${q.message}` : q.title, freeText ? [...options, "Type something."] : options);
+      if (freeText && value === "Type something.") value = await ctx.ui.input(q.title, "");
       answer = value === undefined ? { cancelled: true } : { value };
     } else if (q.method === "editor") {
       const value = await ctx.ui.editor(q.title, q.prefill);
@@ -283,7 +286,7 @@ export default function extension(pi: ExtensionAPI): void {
     }
     await manager.reply(id, questionId, answer);
     recordHumanAction(ctx, manager.get(id), `Answered pending request ${questionId}: ${describeAnswer(answer)}.`);
-    ctx.ui.notify(`Human response sent to subagent ${id}`, "info");
+    ctx.ui.notify(`Human response accepted for subagent ${id}`, "info");
   }
 
   pi.registerCommand("agent-reply", {

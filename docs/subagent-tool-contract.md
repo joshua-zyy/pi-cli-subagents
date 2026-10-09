@@ -102,16 +102,17 @@ Retain the parameters: `id`, `questionId` and `reason` are required; supply exac
 | Request type | Answer |
 |---|---|
 | confirm | A confirmed boolean, or cancellation |
-| select | The value of a currently valid option, or cancellation |
+| Task question with `parentPolicy.text: true` | An offered label or custom text in `value`, submitted once, or cancellation |
+| Other select | The value of a currently valid option, or cancellation |
 | input/editor | Text in value, or cancellation |
 
 The request must belong to the current parent session and specified instance and must not be resolved or expired. The tool implementation sets the actor to parent; the model cannot supply `actor: human`. The parent should handle task-authorized one-action approvals and refusals itself, using the request’s stated `parentPolicy`. Escalate only missing authorization or native human-only approvals, with the specific decision needed; the presence of a wider offered option is not a reason to defer an available in-scope one-action choice. Unknown contracts remain human-only for approval, while refusal/cancellation stays available.
 
-Return the current state and actual response-receipt result, without claiming that the approved operation completed. Preserve existing local decision records. Ordinary send operations cannot bypass these checks.
+Return the current state and actual response-receipt result. Acceptance can precede a matching native dialog; it does not claim delivery or completion of the requested operation. Preserve existing local decision records. Ordinary send operations cannot bypass these checks.
 
 Keep this tool separate so approval responses remain distinguishable from ordinary lifecycle operations; do not turn it into an automatic approval policy.
 
-Pi additionally receives a bundled, child-only `subagent_ask_parent` resource at launch and resume. Its single-question contract uses 2–4 choices with a custom-text continuation. The adapter binds its dialogs to the tool call, versioned title and expected method/options, setting `kind: "question"` and an explicit parent policy; only its input continuation permits `parentPolicy.text: true`. The existing reply tool answers in the same native turn. Unknown dialogs and native permission restrictions are unchanged. This is not a general-purpose messaging channel or a permission grant. The protocol/mapping and local lifecycle checks do not establish real-model collaboration acceptance.
+Pi additionally receives a bundled, child-only `subagent_ask_parent` resource at launch and resume. Its recognized tool call creates one logical request with option labels, `kind: "question"` and `parentPolicy.text: true`. Following Paseo, the adapter caches one answer and defers native UI until the answer is available. An option label maps to its original menu entry; custom text selects the custom-answer entry and automatically fills the subsequent input. Every consumed dialog must match its active call, versioned title, expected stage and full shape. Tool completion and shutdown discard cached answers. A failed UI write fails the run instead of silently losing or replaying the answer. Replies stay in the same native turn; no extra parent reply or user prompt is needed. Unknown dialogs and native permission restrictions are unchanged. This is not a general-purpose messaging channel or a permission grant. Protocol/mapping and local lifecycle checks do not establish real-model collaboration acceptance.
 
 ## 5. `subagent_workspace`: managed worktrees
 

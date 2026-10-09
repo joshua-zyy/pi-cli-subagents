@@ -61,7 +61,13 @@ export class PiAdapter implements CliAdapter {
   readonly closed: Promise<Exit>;
   private assistant?: WireRecord;
   private readonly sessionDir: string;
-  private readonly parentCalls = new Map<string, { question: ParentQuestion; dialogs: Set<string> }>();
+  private readonly parentCalls = new Map<string, {
+    id: string;
+    question: ParentQuestion;
+    next: "select" | "input" | undefined;
+    answer?: Pick<InteractionReply, "value" | "cancelled">;
+    deferred?: { id: string; options?: string[] };
+  }>();
   get pid(): number | undefined { return this.rpc.child.pid; }
 
   constructor(private readonly options: AdapterOptions) {
@@ -81,23 +87,47 @@ export class PiAdapter implements CliAdapter {
   }
 
   private event(record: WireRecord): void {
-    // Tool/dialog correlation adapted from Paseo's rpiv-ask-user-question mapper (Apache-2.0).
-    // Copyright (c) 2025-present Mohamed Boudra; see README.md#credits.
-    // Modified: per-call tracking and exact, versioned dialogs instead of claiming the next UI.
+    // Question normalization and cached UI replay adapted from Paseo's rpiv-ask-user-question
+    // mapper (Apache-2.0). Copyright (c) 2025-present Mohamed Boudra; see README.md#credits.
+    // Modified: one question per call, per-call tracking and exact, versioned UI stages.
     if (record.toolName === ASK_PARENT_TOOL && typeof record.toolCallId === "string") {
       if (record.type === "tool_execution_start") {
         const question = readParentQuestion(record.args);
-        if (question) this.parentCalls.set(record.toolCallId, { question, dialogs: new Set() });
+        if (question) {
+          const id = `${ASK_PARENT_TOOL}:${record.toolCallId}`;
+          const values = question.options.map(option => option.label);
+          this.parentCalls.set(record.toolCallId, { id, question, next: "select" });
+          this.options.onEvent({ type: "question", question: {
+            id, method: "select", kind: "question", humanOnly: false,
+            title: parentQuestionDialog(record.toolCallId, question, "select").displayTitle,
+            message: question.options.map(option => `${option.label} — ${option.description}`).join("\n"),
+            options: values, parentPolicy: { values, text: true },
+          } });
+        }
       } else if (record.type === "tool_execution_end") {
         const active = this.parentCalls.get(record.toolCallId);
         this.parentCalls.delete(record.toolCallId);
-        for (const id of active?.dialogs ?? []) this.options.onEvent({ type: "resolved", id });
+        if (active) this.options.onEvent({ type: "resolved", id: active.id });
       }
     }
     if (record.type === "message_end" && typeof record.message === "object" && record.message?.role === "assistant") this.assistant = record.message;
     if (record.type === "agent_start" || record.type === "tool_execution_start" || record.type === "tool_execution_end")
       this.options.onEvent({ type: "activity", detail: record.type === "agent_start" ? "agent_start" : `${record.type}: ${record.toolName}` });
     if (record.type === "extension_ui_request" && ["select", "confirm", "input", "editor"].includes(String(record.method))) {
+      if ((record.method === "select" || record.method === "input") && typeof record.id === "string" && record.message === undefined && record.prefill === undefined) {
+        for (const [callId, active] of this.parentCalls) {
+          if (active.next !== record.method) continue;
+          const expected = parentQuestionDialog(callId, active.question, record.method);
+          const matches = record.method === "select"
+            ? Array.isArray(record.options) && record.options.length === expected.options!.length && record.options.every((value, i) => value === expected.options![i])
+            : record.options === undefined && (record.placeholder === undefined || record.placeholder === expected.placeholder);
+          if (record.title !== expected.title || !matches) continue;
+          active.deferred = { id: record.id, options: record.options };
+          // The logical answer can arrive before the first UI, or while Pi is waiting on it.
+          if (active.answer) void this.answerParentDialog(callId).catch(() => {});
+          return;
+        }
+      }
       const question: Question = {
         id: String(record.id), method: record.method as Question["method"], title: String(record.title ?? "Subagent needs a response"),
         message: typeof record.message === "string" ? record.message : undefined,
@@ -105,21 +135,6 @@ export class PiAdapter implements CliAdapter {
         ...auditedParentPolicy(record.method, record.options),
         ...(typeof record.timeout === "number" ? { expiresAt: Date.now() + record.timeout } : {}),
       };
-      if ((record.method === "select" || record.method === "input") && record.message === undefined && record.prefill === undefined) {
-        for (const [callId, active] of this.parentCalls) {
-          const expected = parentQuestionDialog(callId, active.question, record.method);
-          const matches = record.method === "select"
-            ? Array.isArray(record.options) && record.options.length === expected.options!.length && record.options.every((value, i) => value === expected.options![i])
-            : record.options === undefined && (record.placeholder === undefined || record.placeholder === expected.placeholder);
-          if (record.title !== expected.title || !matches) continue;
-          question.title = expected.displayTitle;
-          question.kind = "question";
-          question.humanOnly = false;
-          question.parentPolicy = record.method === "select" ? { values: expected.options } : { text: true };
-          active.dialogs.add(question.id);
-          break;
-        }
-      }
       this.options.onEvent({ type: "question", question });
     }
     if (record.type === "agent_settled") {
@@ -141,9 +156,38 @@ export class PiAdapter implements CliAdapter {
   async start(message: string): Promise<void> { await this.rpc.request({ type: "prompt", message }); }
   async send(message: string, mode: Delivery): Promise<void> { await this.rpc.request({ type: "prompt", message, streamingBehavior: mode }); }
   async reply(answer: InteractionReply): Promise<void> {
+    for (const [callId, active] of this.parentCalls) {
+      if (active.id !== answer.id) continue;
+      active.answer = { value: answer.value, cancelled: answer.cancelled };
+      if (active.deferred) await this.answerParentDialog(callId);
+      return;
+    }
     await this.rpc.reply({ id: answer.id, value: answer.value, confirmed: answer.confirmed, cancelled: answer.cancelled });
-    for (const active of this.parentCalls.values()) active.dialogs.delete(answer.id);
   }
-  end(): Promise<{ exit: Exit; forced: boolean }> { return this.rpc.end(); }
-  stop(): Promise<{ exit: Exit; forced: boolean }> { return this.rpc.stop(); }
+
+  private async answerParentDialog(callId: string): Promise<void> {
+    const active = this.parentCalls.get(callId)!;
+    const dialog = active.deferred!;
+    const answer = active.answer!;
+    active.deferred = undefined;
+    let value = answer.value;
+    if (!answer.cancelled && active.next === "select") {
+      const index = active.question.options.findIndex(option => option.label === value);
+      value = dialog.options![index < 0 ? active.question.options.length : index];
+      active.next = index < 0 ? "input" : undefined;
+    } else active.next = undefined;
+    try {
+      await this.rpc.reply(answer.cancelled ? { id: dialog.id, cancelled: true } : { id: dialog.id, value });
+    } catch (error) {
+      // A later auto-write has no waiting caller to receive its error. Fail the run rather than
+      // silently lose the answer or replay it after an uncertain write.
+      this.parentCalls.delete(callId);
+      this.options.onEvent({ type: "settled", status: "failed", text: "", stop: true,
+        error: `Question response delivery failed: ${(error as Error).message}` });
+      throw error;
+    }
+  }
+
+  end(): Promise<{ exit: Exit; forced: boolean }> { this.parentCalls.clear(); return this.rpc.end(); }
+  stop(): Promise<{ exit: Exit; forced: boolean }> { this.parentCalls.clear(); return this.rpc.stop(); }
 }
