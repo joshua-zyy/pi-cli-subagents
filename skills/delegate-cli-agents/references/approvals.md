@@ -29,8 +29,11 @@ guess a first choice or replace an ID with its display header. Do not mix `answe
 original request/turn. Never retry an uncertain delivery or send the answer as a new prompt.
 
 Codex treats answers as trusted user input: provide only the user’s already-authorized context, not
-new authorization. Native MCP approval forms are not task questions and remain unsupported; their
-`mcp_tool_call_approval*` IDs belong to the host. Do not work around this refusal. Sensitive fields
+new authorization. A recognized `mcp_tool_call_approval_<callId>` tied to a live MCP action is a
+permission, not a task question: inspect the server/tool/arguments, then use the offered `value`
+("Allow" or "Cancel") or cancellation with a reason. Never submit `answers` or a persistent grant.
+Uncorrelated forms and the separate MCP elicitation channel remain unsupported; do not work around
+the refusal. The reserved IDs belong to the host. Sensitive fields
 are marked, not masked or guaranteed absent from native logs; do not invent or expose secrets.
 
 Claude `AskUserQuestion` field IDs are the full question text, not short headers. Respect explicit

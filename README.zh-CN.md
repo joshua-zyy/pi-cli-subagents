@@ -100,7 +100,7 @@ Pi 子代理每次启动或恢复时会显式加载随包提供的 `subagent_ask
 
 Codex 的任务表单（`requestUserInput`，按 CLI 0.159.2 核对）可以包含多道问题。对 `method: "form"`、`parentPolicy.answers: true` 的请求，通过 `subagent_query get` 读取 `fields`，一次提交 `subagent_reply.answers`：每个字段 ID 对应一个字符串数组，如 `{ "<字段ID>": ["原样答案"] }`。遵守选项及 `allowOther`；`[]` 明确跳过该题，`cancelled: true` 取消整张表单。缺少字段会被拒绝，绝不猜选第一项。非阻塞问题不会让子代理进入等待状态，但答案仍绑定原请求和原 turn；已解决、已结束或投递不确定的答复不得重放。
 
-Codex 将这些回答视为可信用户输入，因此只能提供用户已经授权的任务上下文，不能创造新授权。原生 MCP 审批表单及关联已知操作项的输入仍不支持，会令本轮失败，不会被当成普通问题；普通问题不得使用主机保留的 `mcp_tool_call_approval*` ID。人工可用 `/agent-reply` 逐题作答；敏感字段会提示输入可见且可能留在日志中，并非掩码输入。
+Codex 将这些回答视为可信用户输入，因此只能提供用户已经授权的任务上下文，不能创造新授权。已识别的 `mcp_tool_call_approval_<callId>` 请求只有绑定当前活跃 MCP 操作时，才作为独立的单次许可处理：通过 `subagent_reply.value` 选择 `"Allow"` 或 `"Cancel"`（也可 `cancelled: true`），不能用 `answers`。即使原生提供持久选项，本扩展也只开放这两个选择。未关联的请求、普通操作项伪装的问题以及独立的 `mcpServer/elicitation/request` 通道仍不支持，按 fail-closed 处理；普通问题不得使用主机保留的 `mcp_tool_call_approval*` ID。人工可用 `/agent-reply` 逐题作答；敏感字段会提示输入可见且可能留在日志中，并非掩码输入。
 
 Claude 内置的 `AskUserQuestion`（按 2.1.283 核对）也使用同一个 `answers` 接口，支持 1–4 道选择、文本或数值问题。文本和数值题需要原生扩展提问特性已开启，本扩展不会替你开启。字段 ID 是**完整问题正文**，不是显示用的短标题。`multiSelect: false` 最多提交一个字符串；`true` 可提交多个选项及一个自定义答案；`[]` 跳题，不猜默认值。只有这类完整解析的问题卡片能承接原生 `requires_user_interaction: true`，不能用“批准一次”代替；明确的原生人工限制仍有效。取消会拒绝回答该问题，但不主动中断整轮；答案只是任务上下文，不创造新授权或持久权限。
 
@@ -146,6 +146,7 @@ npm run test:list # 只列本地选集，不构建或执行测试
 ## 致谢
 
 - [Paseo](https://github.com/getpaseo/paseo)：生命周期设计参考；Pi 工具调用与对话的关联逻辑改编自其[固定版本的映射器](https://github.com/getpaseo/paseo/blob/99fc204c55c8c1666477282eeba562ba87a3135f/packages/server/src/server/agent/providers/pi/extensions/rpiv-ask-user-question/index.ts)（Apache-2.0）。Codex 问题归一化与答案映射也改编自其[固定版本的 Codex 适配器](https://github.com/getpaseo/paseo/blob/06fe97c9019c1db4a5264dfb9b369b93e5e2fba4/packages/server/src/server/agent/providers/codex-app-server-agent.ts)，改为按 ID 回答、严格校验，并去掉缺失答案默认选第一项的行为。
+- [Lody Codex ACP](https://github.com/LodyAI/acp-extension-codex/blob/60f1dc4bda7d503eb107a9875893a62d399fd97e/src/permissions/mcp.ts)：单次与持久许可分离的设计来源（Apache-2.0），按 [OpenAI Codex rust-v0.159.2](https://github.com/openai/codex/blob/rust-v0.159.2/codex-rs/core/src/mcp_tool_call.rs#L1460) 的 MCP 前缀问题协议适配，增加活跃操作关联并禁用持久许可；不捆绑 Lody/ACP 运行时。
 - [@juicesharp/rpiv-ask-user-question 2.12.0](https://www.npmjs.com/package/@juicesharp/rpiv-ask-user-question/v/2.12.0)：子 Pi 内置工具的单问题 RPC 选项／自定义回答流程来源（MIT）。
 - [pi-subagents](https://github.com/tintinweb/pi-subagents)：状态区与对话界面的设计参考。
 

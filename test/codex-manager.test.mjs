@@ -177,6 +177,53 @@ test('Codex forms reach the public parent reply tool with scoped answers, notifi
   assert.equal(records.filter(r => r.method === 'turn/start').length, 3); assert.equal(records.filter(r => r.method === 'turn/steer').length, 1);
 });
 
+test('Codex MCP prefix approval reaches public tools, parent notification, audit and the original run result', { timeout: 25_000 }, async t => {
+  const { cwd, home, manager, done, parent } = setup(t);
+  const tools = new Map(), messages = [], notices = [];
+  const api = { registerTool: tool => tools.set(tool.name, tool), registerCommand() {}, registerShortcut() {}, registerMessageRenderer() {}, on() {},
+    sendMessage: (message, options) => messages.push({ message, options }) };
+  extension(api);
+  const ctx = { cwd, sessionManager: { getSessionFile: () => parent, getEntries: () => [] },
+    ui: { notify: (...args) => notices.push(args), setStatus() {} } };
+  const invoke = (name, args) => tools.get(name).execute('fixture-parent', args, new AbortController().signal, () => {}, ctx);
+  for (const value of ['Allow', 'Cancel']) {
+    const started = await manager.spawn('codex-worker', role, cwd, 'MCP_APPROVAL');
+    const pending = manager.get(started.id), q = pending.questions[0];
+    assert.equal(pending.phase, 'waiting'); assert(q); assert.equal(q.fields, undefined); assert.notEqual(q.kind, 'question');
+    const query = JSON.parse((await invoke('subagent_query', { action: 'get', id: started.id })).content[0].text);
+    assert.deepEqual(query.agents[0].questions, pending.questions);
+    const report = manager.reports().find(r => r.agentId === started.id && r.status === 'waiting'); assert(report);
+    deliverReports(manager, api, ctx, new Set(), Date.now(), manager.list());
+    const message = messages.find(m => m.message.details.ids.includes(report.notificationId));
+    assert.equal(message.options.deliverAs, 'steer'); assert.match(message.message.content, /Handle this request now.*user's task authorization/);
+    assert.equal(notices.length, 0, 'single-call permission defaults to parent review, even when native persistent options exist');
+    await assert.rejects(invoke('subagent', { action: 'send', id: started.id, message: 'Allow' }), /unresolved interaction/);
+    const base = { id: started.id, questionId: q.id, reason: 'Only the user-authorized fixture write' };
+    for (const bad of [{ value: 'Allow for this session' }, { value: "Allow and don't ask me again" }, { confirmed: true },
+      { answers: { 'mcp_tool_call_approval_mcp-call': ['Allow'] } }, { value: 'Allow', reason: '' }])
+      await assert.rejects(invoke('subagent_reply', { ...base, ...bad }), /option|type|reason|response/i);
+    const auditFile = path.join(manager.root, started.id, 'runs', started.runId, 'permissions.jsonl');
+    assert.equal(fs.existsSync(auditFile), false, 'invalid requests are rejected before the intent audit');
+    await invoke('subagent_reply', { ...base, value });
+    const final = await done(started.id, value === 'Allow' ? 'completed' : 'stopped');
+    assert.equal(final.runId, started.runId); assert.deepEqual(final.session, started.session);
+    assert.equal(final.text, `MCP:${value}`); assert.equal(final.questions.length, 0);
+    const audit = fs.readFileSync(auditFile, 'utf8').trim().split('\n').map(JSON.parse);
+    assert.equal(audit.length, 1); assert.equal(audit[0].actor, 'parent'); assert.equal(audit[0].selectedOption, value);
+    assert.equal(audit[0].reason, base.reason); assert.equal(audit[0].kind, undefined, 'not audited as a task question');
+    assert.ok(!JSON.stringify(audit).includes('fixture-only.txt'), 'action arguments are not copied to the decision audit');
+    const result = JSON.parse((await invoke('subagent_query', { action: 'result', id: started.id, runId: started.runId })).content[0].text);
+    assert.equal(result.text, final.text);
+    await assert.rejects(invoke('subagent_reply', { ...base, value }), /exited|ended|pending/);
+    assert.ok(!manager.reports().some(r => r.agentId === started.id && r.status === 'waiting'));
+  }
+  const native = fs.readFileSync(path.join(home, 'requests.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  assert.equal(native.filter(r => r.method === 'turn/start').length, 2, 'reply is not another prompt');
+  assert.equal(native.filter(r => !r.method && r.result?.answers).length, 2);
+  assert.equal(fs.readFileSync(path.join(home, 'mcp-effect.txt'), 'utf8'), '1');
+  assert.equal(fs.existsSync(path.join(home, 'mcp-grants.jsonl')), false);
+});
+
 test('Codex accept/cancel-only choices route through the worker and record the exact selection', { timeout: 20_000 }, async t => {
   const { cwd, manager, done, home } = setup(t);
   for (const [value, phase] of [['Approve once', 'completed'], ['Cancel turn', 'stopped']]) {

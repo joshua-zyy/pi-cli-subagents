@@ -389,6 +389,79 @@ test('Codex does not reclassify MCP approval forms or action-owned input as task
   assert.equal(replies.length, 2); assert(replies.every(r => r.error && !r.result), 'neither answer maps nor permission grants reach the CLI');
 });
 
+test('Codex MCP prefix approvals expose only single-action choices and return one correlated native answer', async t => {
+  const { client, requests, home } = setup(t);
+  for (const [task, answer, native] of [
+    ['MCP_APPROVAL', { value: 'Allow' }, 'Allow'],
+    ['MCP_APPROVAL_STRING_ID', { value: 'Cancel' }, 'Cancel'],
+    ['MCP_APPROVAL_LEGACY', { cancelled: true }, 'Cancel'],
+    ['MCP_APPROVAL_OMITTED_FLAGS', { value: 'Cancel' }, 'Cancel'],
+  ]) {
+    const { c, events } = client(); await c.ready(); await c.start(task);
+    const q = events.find(e => e.type === 'question')?.question;
+    assert(q, 'a correlated native MCP approval must not fail the entire run');
+    assert.equal(q.method, 'select'); assert.notEqual(q.kind, 'question'); assert.equal(q.fields, undefined);
+    assert.deepEqual(q.options, ['Allow', 'Cancel']); assert.deepEqual(q.parentPolicy, { values: ['Allow', 'Cancel'] });
+    assert.match(q.message, /fixture-only\.txt/); assert.match(q.message, /fixture/); assert.match(q.message, /write/);
+    const before = requests().filter(r => !r.method).length;
+    for (const invalid of [{ value: 'Allow for this session' }, { value: "Allow and don't ask me again" },
+      { answers: { mcp_tool_call_approval_mcp_call: ['Allow'] } }, { confirmed: true }, { value: 'Allow', cancelled: true }]) {
+      await assert.rejects(c.reply({ type: 'reply', id: q.id, ...invalid }), /MCP|choice|decision/i);
+    }
+    assert.equal(requests().filter(r => !r.method).length, before);
+    await c.reply({ type: 'reply', id: q.id, ...answer });
+    assert.equal((await settled(events)).text, `MCP:${native}`);
+    assert.deepEqual(requests().filter(r => !r.method).slice(before).map(({ id, result }) => ({ id, result })),
+      [{ id: task.includes('STRING_ID') ? '17' : 17, result: { answers: { 'mcp_tool_call_approval_mcp-call': { answers: [native] } } } }]);
+    await assert.rejects(c.reply({ type: 'reply', id: q.id, ...answer }), /pending|answered/);
+    assert.equal(events.filter(e => e.type === 'resolved' && e.id === q.id).length, 1);
+    await c.end();
+  }
+  assert.equal(fs.readFileSync(path.join(home, 'mcp-effect.txt'), 'utf8'), '1');
+  assert.equal(fs.existsSync(path.join(home, 'mcp-grants.jsonl')), false);
+});
+
+test('Codex MCP prefix approvals reject foreign, old, missing or completed call associations', async t => {
+  const { client, requests } = setup(t);
+  for (const suffix of ['WRONG_THREAD', 'WRONG_TURN', 'WRONG_ITEM', 'WRONG_KEY', 'MISSING_ITEM', 'COMPLETED_ITEM', 'OLD_ITEM', 'NONBLOCKING']) {
+    const { c, events } = client(); await c.ready(); await c.start(`MCP_APPROVAL_${suffix}`);
+    assert.equal(events.some(e => e.type === 'question'), false, suffix);
+    assert.equal((await settled(events)).status, 'failed', suffix);
+    await c.stop();
+  }
+  assert.ok(requests().filter(r => !r.method).every(r => r.error && !r.result));
+});
+
+test('Codex MCP prefix approval rechecks the captured action before sending', async t => {
+  const { client, requests } = setup(t); const { c, events } = client();
+  await c.ready(); await c.start('MCP_APPROVAL');
+  const q = events.find(e => e.type === 'question')?.question; assert(q);
+  const previous = events.length;
+  c.child.stdin.write(JSON.stringify({ method: 'fixture/mcpItemUpdate' }) + '\n');
+  await waitUntil('native item completed', () => events.slice(previous).some(e => e.type === 'activity'));
+  await assert.rejects(c.reply({ type: 'reply', id: q.id, value: 'Allow' }), /no longer pending|details changed/);
+  assert.equal(requests().filter(r => !r.method).length, 0);
+  await c.stop();
+});
+
+test('Codex MCP prefix expiry and uncertain delivery never replay an approval', async t => {
+  const { client, requests, home } = setup(t);
+  for (const task of ['MCP_APPROVAL_AUTO_RESOLVE', 'MCP_APPROVAL_TURN_END']) {
+    const { c, events } = client(); await c.ready(); await c.start(task);
+    const q = events.find(e => e.type === 'question')?.question; assert(q);
+    await settled(events);
+    await assert.rejects(c.reply({ type: 'reply', id: q.id, value: 'Allow' }), /pending|answered/);
+    await c.end();
+  }
+  const { c, events } = client(undefined, ['--no-resolved']); await c.ready(); await c.start('MCP_APPROVAL');
+  const q = events.find(e => e.type === 'question')?.question; assert(q);
+  await assert.rejects(c.reply({ type: 'reply', id: q.id, value: 'Allow' }), /uncertain|timed out/);
+  await assert.rejects(c.reply({ type: 'reply', id: q.id, value: 'Allow' }), /pending|answered/);
+  assert.equal(requests().filter(r => !r.method && r.result?.answers).length, 1);
+  assert.equal(fs.readFileSync(path.join(home, 'mcp-effect.txt'), 'utf8'), '1');
+  await c.stop();
+});
+
 test('Codex task form ends with its turn even without a request-resolved event', async t => {
   const { client, requests } = setup(t); const { c, events } = client();
   await c.ready(); await c.start('QUESTION_NONBLOCKING_TURN_END');

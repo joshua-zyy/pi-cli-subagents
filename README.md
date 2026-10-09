@@ -100,7 +100,7 @@ Pi children explicitly load the bundled `subagent_ask_parent` tool on each start
 
 Codex task forms (`requestUserInput`, checked against CLI 0.159.2) can contain multiple questions. For `method: "form"` with `parentPolicy.answers: true`, read `fields` via `subagent_query get` and submit one `subagent_reply.answers` object: `{ "<field-id>": ["exact answer"] }` for every field. Respect choices and `allowOther`; `[]` explicitly skips a field, while `cancelled: true` dismisses the whole form. Missing fields are rejected, never filled with a guessed first option. Non-blocking forms keep the child running, but answers remain bound to the original request and turn; resolved, ended or uncertain deliveries must not be replayed.
 
-Codex treats these answers as trusted user input, so provide only already-authorized task context, never new authorization. Its native MCP approval forms and input associated with known action items remain unsupported and fail the run; they are not ordinary questions. The host-reserved `mcp_tool_call_approval*` IDs must not be used for task questions. Human form entry is available through `/agent-reply`; sensitive fields warn that input is visible and may be retained in logs, not masked.
+Codex treats these answers as trusted user input, so provide only already-authorized task context, never new authorization. A recognized `mcp_tool_call_approval_<callId>` request bound to a live MCP action is a separate single-call permission: use `subagent_reply.value: "Allow"` or `"Cancel"` (or `cancelled: true`), never `answers`. Only these two choices are exposed, even if native persistent options exist. Uncorrelated/action-owned task forms and the separate `mcpServer/elicitation/request` channel remain unsupported and fail closed. The host-reserved `mcp_tool_call_approval*` IDs must not be used for task questions. Human form entry is available through `/agent-reply`; sensitive fields warn that input is visible and may be retained in logs, not masked.
 
 Claude's built-in `AskUserQuestion` (checked against 2.1.283) uses the same `answers` interface for 1–4 choice, text or number questions. Text/number cards require the native extended-question feature; this extension does not enable it. Its field IDs are the **full question text**, not display headers. `multiSelect: false` accepts at most one string; `true` accepts multiple selections plus one custom answer. `[]` skips a field without guessing a default. The native `requires_user_interaction: true` flag is satisfied only by this decoded question card, never by a blanket approval; explicit native human-only restrictions still apply. Cancellation denies the question without interrupting the whole turn. Answers provide task context, not new authorization or persistent permissions.
 
@@ -146,6 +146,7 @@ After code changes, rebuild and run `/reload` in Pi. Automated tests are not ful
 ## Credits
 
 - [Paseo](https://github.com/getpaseo/paseo): lifecycle design, plus Pi logical-question normalization, tool-call/dialog correlation and cached answer replay adapted from its [pinned mapper](https://github.com/getpaseo/paseo/blob/99fc204c55c8c1666477282eeba562ba87a3135f/packages/server/src/server/agent/providers/pi/extensions/rpiv-ask-user-question/index.ts) (Apache-2.0). Codex question normalization and answer mapping are also adapted from its [pinned Codex adapter](https://github.com/getpaseo/paseo/blob/06fe97c9019c1db4a5264dfb9b369b93e5e2fba4/packages/server/src/server/agent/providers/codex-app-server-agent.ts), with ID-keyed answers, stricter validation and no default-choice fallback.
+- [Lody Codex ACP](https://github.com/LodyAI/acp-extension-codex/blob/60f1dc4bda7d503eb107a9875893a62d399fd97e/src/permissions/mcp.ts): single-action versus persistent permission separation (Apache-2.0), adapted to the [OpenAI Codex rust-v0.159.2 legacy MCP question envelope](https://github.com/openai/codex/blob/rust-v0.159.2/codex-rs/core/src/mcp_tool_call.rs#L1460). This port binds the request to a live native action and exposes no persistent grants; it does not bundle Lody or its ACP runtime.
 - [@juicesharp/rpiv-ask-user-question 2.12.0](https://www.npmjs.com/package/@juicesharp/rpiv-ask-user-question/v/2.12.0): the single-question RPC choice/custom-answer flow used by the bundled child tool (MIT).
 - [pi-subagents](https://github.com/tintinweb/pi-subagents): inspiration for the status and conversation UI.
 
@@ -177,6 +178,12 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+### Lody Codex ACP permission policy
+
+Copyright 2025 JetBrains s.r.o.
+
+The adapted permission policy retains the upstream Apache-2.0 license (full text below). Its legacy-question correlation and restricted response mapping are modified for this extension; source pointers and modification notes are retained in `src/codex-mcp-approval.ts`.
 
 ### Paseo
 

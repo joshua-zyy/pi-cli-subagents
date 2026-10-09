@@ -8,6 +8,7 @@ import { childEnvironment, type Exit } from "./pi-process.js";
 import { CODEX_MODE_PRESETS } from "./roles.js";
 import type { CodexMode, NativeSession, Delivery, QuestionField } from "./types.js";
 import { readCodexQuestionFields, validateQuestionAnswers } from "./codex-question.js";
+import { readCodexMcpApproval } from "./codex-mcp-approval.js";
 
 // Legacy RPC envelope; a typed decoder migration is separate from the role capability gate.
 // pi-lens-ignore: no-unsafe-dictionary-any
@@ -16,7 +17,8 @@ const object = (value: unknown): value is RecordValue => value !== null && typeo
 const textInput = (text: string) => [{ type: "text", text }];
 const requestKey = (id: string | number): string => `${typeof id}:${id}`;
 type Approval = { id: string; rpcId: string | number; threadId: string; turnId: string;
-  attempted: boolean; allowed?: Set<string>; fields?: QuestionField[]; resolved?: () => void; rejected?: (error: Error) => void };
+  attempted: boolean; allowed?: Set<string>; fields?: QuestionField[];
+  mcp?: { questionId: string; item: RecordValue }; resolved?: () => void; rejected?: (error: Error) => void };
 
 /** One worker owns one app-server process and one thread at a time. */
 export class CodexAdapter implements CliAdapter {
@@ -135,11 +137,13 @@ export class CodexAdapter implements CliAdapter {
       return;
     }
     if (record.method === "turn/started" && params.threadId === this.thread?.threadId && typeof params.turn?.id === "string") {
+      if (this.activeTurn !== params.turn.id) this.approvalItems.clear();
       this.activeTurn = params.turn.id;
       this.options.onEvent({ type: "activity", detail: "turn/started" });
     }
     if (params.threadId !== this.thread?.threadId || !this.activeTurn || params.turnId !== this.activeTurn && params.turn?.id !== this.activeTurn) return;
-    if (record.method === "item/started" && typeof params.item?.id === "string" && ["commandExecution", "fileChange", "mcpToolCall"].includes(params.item.type)) {
+    if ((record.method === "item/started" || record.method === "item/completed" && params.item?.type === "mcpToolCall") &&
+      typeof params.item?.id === "string" && ["commandExecution", "fileChange", "mcpToolCall"].includes(params.item.type)) {
       this.approvalItems.set(params.item.id, params.item);
     }
     if (record.method === "item/agentMessage/delta" && typeof params.itemId === "string" && typeof params.delta === "string") {
@@ -196,10 +200,21 @@ export class CodexAdapter implements CliAdapter {
     const item = object(p) ? this.approvalItems.get(p.itemId) : undefined;
     const scope = this.activeTurn?.trim() && this.thread && object(p) && p.threadId === this.thread.threadId && p.turnId === this.activeTurn && typeof p.itemId === "string";
     const question = record.method === "item/tool/requestUserInput" || record.method === "tool/requestUserInput";
-    // Action-owned input can carry approval semantics; this path is only for task forms.
-    if (question && scope && !item && p.itemId.trim() && typeof p.isBlocking === "boolean" && !this.failed && !this.ending &&
+    if (question && scope && p.itemId.trim() && typeof p.isBlocking === "boolean" && !this.failed && !this.ending &&
       (typeof rpcId === "string" || Number.isSafeInteger(rpcId)) && !this.approvalByRpcId.has(requestKey(rpcId))) {
-      const fields = readCodexQuestionFields(p.questions);
+      // Native MCP approval is an action, never an agent-answerable task form.
+      const mcp = p.isBlocking ? readCodexMcpApproval(p.questions, item) : undefined;
+      if (mcp && item) {
+        const id = randomUUID();
+        const pending: Approval = { id, rpcId, threadId: p.threadId, turnId: p.turnId, attempted: false,
+          mcp: { questionId: mcp.questionId, item } };
+        this.approvals.set(id, pending); this.approvalByRpcId.set(requestKey(rpcId), pending);
+        this.options.onEvent({ type: "question", question: { id, method: "select", title: "Approve one Codex MCP tool call?",
+          message: mcp.message, options: ["Allow", "Cancel"], parentPolicy: { values: ["Allow", "Cancel"] } } });
+        return;
+      }
+      // Unknown action-owned input and reserved MCP IDs stay out of task questions.
+      const fields = !item ? readCodexQuestionFields(p.questions) : undefined;
       if (fields && JSON.stringify(fields).length <= 12_000) {
         const id = randomUUID();
         const pending: Approval = { id, rpcId, threadId: p.threadId, turnId: p.turnId, attempted: false, fields };
@@ -305,7 +320,15 @@ export class CodexAdapter implements CliAdapter {
     if (!this.activeTurn?.trim() || !approval || approval.attempted || approval.threadId !== this.thread?.threadId || approval.turnId !== this.activeTurn)
       throw new Error("Codex approval is no longer pending or was already answered; inspect before retrying");
     let result: RecordValue;
-    if (approval.fields) {
+    if (approval.mcp) {
+      if (this.approvalItems.get(approval.mcp.item.id) !== approval.mcp.item || approval.mcp.item.status !== "inProgress")
+        throw new Error("Codex MCP action is no longer pending or its details changed; inspect before replying");
+      if (answer.answers !== undefined || answer.confirmed !== undefined ||
+        Number(answer.cancelled === true) + Number(typeof answer.value === "string") !== 1 ||
+        answer.value !== undefined && !["Allow", "Cancel"].includes(answer.value))
+        throw new Error("Codex MCP approvals require an explicit Allow/Cancel choice or cancellation; persistent grants are not supported");
+      result = { answers: { [approval.mcp.questionId]: { answers: [answer.cancelled ? "Cancel" : answer.value] } } };
+    } else if (approval.fields) {
       if (Number(answer.cancelled === true) + Number(answer.answers !== undefined) !== 1 || answer.confirmed !== undefined || answer.value !== undefined)
         throw new Error("Codex task forms require answers or cancellation, not an approval");
       const answers = answer.cancelled ? {} : validateQuestionAnswers(approval.fields, answer.answers);

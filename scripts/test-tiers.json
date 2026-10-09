@@ -3,6 +3,7 @@
     "claude-question.test.mjs",
     "claude-transcript.test.mjs",
     "cli-discovery.test.mjs",
+    "codex-mcp-approval.test.mjs",
     "codex-question.test.mjs",
     "codex-transcript.test.mjs",
     "conversation-history.test.mjs",

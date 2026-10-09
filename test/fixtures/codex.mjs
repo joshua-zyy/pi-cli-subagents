@@ -48,6 +48,30 @@ function execute(message) {
     const setting = process.argv.filter(arg => arg.startsWith('features.default_mode_request_user_input=')).at(-1);
     return setting === 'features.default_mode_request_user_input=true' ? execute('QUESTION') : finish('DEFAULT_QUESTIONS_DISABLED');
   }
+  if (message.startsWith('MCP_APPROVAL')) {
+    const id = message.includes('STRING_ID') ? '17' : 17, itemId = 'mcp-call';
+    const nativeItem = { type: 'mcpToolCall', id: itemId, server: 'fixture', tool: 'write', arguments: { file: 'fixture-only.txt' }, status: 'inProgress' };
+    const itemTurn = message.includes('OLD_ITEM') ? 'old-turn' : turn.id;
+    if (message.includes('OLD_ITEM')) notify('turn/started', { threadId: thread.id, turn: { id: itemTurn } });
+    if (!message.includes('MISSING_ITEM')) notify('item/started', { threadId: thread.id, turnId: itemTurn, item: nativeItem });
+    if (message.includes('OLD_ITEM')) notify('turn/started', { threadId: thread.id, turn: { id: turn.id } });
+    if (message.includes('COMPLETED_ITEM')) notify('item/completed', { threadId: thread.id, turnId: turn.id, item: { ...nativeItem, status: 'completed' } });
+    const questionId = `mcp_tool_call_approval_${message.includes('WRONG_KEY') ? 'other' : itemId}`;
+    questions.set(`${typeof id}:${id}`, { id, itemId, turnId: turn.id, mcpQuestionId: questionId });
+    emit({ id, method: message.includes('LEGACY') ? 'tool/requestUserInput' : 'item/tool/requestUserInput', params: {
+      threadId: message.includes('WRONG_THREAD') ? 'foreign' : thread.id,
+      turnId: message.includes('WRONG_TURN') ? 'old-turn' : turn.id,
+      itemId: message.includes('WRONG_ITEM') ? 'other' : itemId, isBlocking: !message.includes('NONBLOCKING'),
+      questions: [{ id: questionId, header: 'Approve app tool call?', question: 'Allow the fixture MCP write?',
+        isOther: message.includes('OMITTED_FLAGS') ? undefined : false, isSecret: message.includes('OMITTED_FLAGS') ? undefined : false,
+        options: ['Allow', 'Allow for this session', "Allow and don't ask me again", 'Cancel'].map(label => ({ label, description: label })) }],
+    } });
+    if (message.includes('AUTO_RESOLVE')) setTimeout(() => {
+      notify('serverRequest/resolved', { threadId: thread.id, requestId: id }); questions.delete(`${typeof id}:${id}`); finish('AUTO-RESOLVED');
+    }, 80);
+    if (message.includes('TURN_END')) finish('TURN-ENDED');
+    return;
+  }
   if (message.startsWith('QUESTION')) {
     const id = message.includes('STRING_ID') ? '17' : 17;
     const request = { id, itemId: 'ask', turnId: turn.id };
@@ -141,6 +165,21 @@ function handle(cmd) {
     if (question) {
       if (cmd.error) { questions.delete(key); return; }
       const answers = cmd.result?.answers;
+      if (question.mcpQuestionId) {
+        const selected = answers?.[question.mcpQuestionId]?.answers;
+        if (!answers || Object.keys(cmd.result).length !== 1 || Object.keys(answers).length !== 1 ||
+          !Array.isArray(selected) || selected.length !== 1 || !['Allow', 'Allow for this session', "Allow and don't ask me again", 'Cancel'].includes(selected[0])) throw Error('Malformed native MCP approval answer');
+        if (selected[0] !== 'Cancel') {
+          const effect = path.join(home, 'mcp-effect.txt');
+          fs.writeFileSync(effect, String((fs.existsSync(effect) ? Number(fs.readFileSync(effect, 'utf8')) : 0) + 1));
+          if (selected[0] !== 'Allow') fs.appendFileSync(path.join(home, 'mcp-grants.jsonl'), JSON.stringify(selected[0]) + '\n');
+        }
+        if (!process.argv.includes('--no-resolved')) {
+          notify('serverRequest/resolved', { threadId: thread.id, requestId: question.id }); questions.delete(key);
+          finish(`MCP:${selected[0]}`, selected[0] === 'Cancel' ? 'interrupted' : 'completed');
+        }
+        return;
+      }
       if (!answers || typeof answers !== 'object' || Array.isArray(answers) ||
         Object.entries(answers).some(([id, value]) => !['checks','context'].includes(id) ||
           !Array.isArray(value?.answers) || value.answers.some(answer => typeof answer !== 'string')) ||
@@ -195,6 +234,11 @@ function handle(cmd) {
       return;
     }
     return reply();
+  }
+  if (cmd.method === 'fixture/mcpItemUpdate') {
+    notify('item/completed', { threadId: thread.id, turnId: turn.id,
+      item: { type: 'mcpToolCall', id: 'mcp-call', status: 'completed', server: 'fixture', tool: 'write', arguments: {} } });
+    return;
   }
   if (cmd.method === 'fixture/approvalScope') {
     if ('activeTurnId' in cmd.params) notify('turn/started', { threadId: thread.id, turn: { id: cmd.params.activeTurnId } });
