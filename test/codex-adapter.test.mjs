@@ -607,6 +607,62 @@ test('Codex question auto-resolution and uncertain delivery never allow a replay
   await noAck.c.stop();
 });
 
+test('Codex completed async questions notify immediately and one answer steers the original turn', async t => {
+  const { client, requests } = setup(t); const { c, events } = client(undefined, ['--no-final-phase']); const session = await c.ready();
+  await c.start('ASYNC_QUESTION_DUPLICATE', 'one');
+  const q = events.find(e => e.type === 'question')?.question;
+  assert(q, 'a completed async message must notify the parent before any terminal event');
+  assert.equal(q.isBlocking, false); assert.equal(q.kind, 'question'); assert.equal(q.method, 'form');
+  assert.equal(events.filter(e => e.type === 'question').length, 1);
+  assert.equal(events.some(e => e.type === 'settled'), false);
+  const turnId = c.activeTurn, answers = { '0': ['custom choice'], '1': ['literal context'] };
+  await c.reply({ type: 'reply', id: q.id, answers });
+  const text = 'Answers to your questions:\n\nWhich check?\ncustom choice\n\nWhat context is missing?\nliteral context';
+  const steers = requests().filter(r => r.method === 'turn/steer'); assert.equal(steers.length, 1);
+  assert.deepEqual(steers[0].params, { threadId: session.threadId, expectedTurnId: turnId, input: [{ type: 'text', text }] });
+  assert.equal(requests().filter(r => r.method === 'turn/start').length, 1);
+  assert.equal(requests().filter(r => !r.method).length, 0, 'async messages have no JSON-RPC request to answer');
+  assert.equal((await runSettled(events, 'one')).text, text, 'a late duplicate async item must not replace the actual final answer');
+  assert.equal(events.filter(e => e.type === 'question').length, 1);
+  assert.equal(events.filter(e => e.type === 'resolved' && e.id === q.id).length, 1);
+  await assert.rejects(c.reply({ type: 'reply', id: q.id, answers }), /pending|answered/);
+});
+
+test('Codex async dismissal is local and expired or foreign messages cannot acquire a new turn', async t => {
+  const { client, requests } = setup(t); const { c, events } = client(); const session = await c.ready();
+  await c.start('ASYNC_QUESTION', 'cancel');
+  const q = events.find(e => e.type === 'question')?.question; assert(q);
+  await c.reply({ type: 'reply', id: q.id, cancelled: true });
+  assert.equal(requests().filter(r => r.method === 'turn/steer').length, 0);
+  await c.send('DONE', 'steer'); await runSettled(events, 'cancel');
+  await c.start('ASYNC_QUESTION_TURN_END', 'expired');
+  const late = events.filter(e => e.type === 'question').at(-1).question; await runSettled(events, 'expired');
+  const oldTurn = requests().filter(r => r.method === 'turn/steer').at(-1).params.expectedTurnId;
+  await c.start('HOLD', 'next');
+  await assert.rejects(c.reply({ type: 'reply', id: late.id, cancelled: true }), /pending|answered/);
+  const base = { type: 'agentMessage', text: 'Do not expose this as a task form', phase: 'final_answer', delivery: 'async', questions: [{ title: 'Context?', options: null }] };
+  const records = [
+    { method: 'item/completed', params: { threadId: 'foreign', turnId: c.activeTurn, item: { ...base, id: 'foreign' } } },
+    { method: 'item/completed', params: { threadId: session.threadId, turnId: oldTurn, item: { ...base, id: 'expired' } } },
+    { method: 'item/completed', params: { threadId: session.threadId, turnId: c.activeTurn, item: { ...base, id: 'malformed', questions: [{ title: 'Context?', options: {} }] } } },
+  ];
+  c.child.stdin.write(JSON.stringify({ method: 'fixture/emit', params: { records } }) + '\n');
+  await c.send('NEXT-DONE', 'steer'); await runSettled(events, 'next');
+  assert.equal(events.filter(e => e.type === 'question').length, 2);
+  assert.equal(requests().filter(r => !r.method).length, 0);
+});
+
+test('Codex uncertain async steering is never retried or converted into a new turn', async t => {
+  const { client, requests } = setup(t); const { c, events } = client(undefined, ['--no-steer-response']);
+  await c.ready(); await c.start('ASYNC_QUESTION', 'one');
+  const q = events.find(e => e.type === 'question')?.question; assert(q);
+  const answers = { '0': ['Unit'], '1': ['task context'] };
+  await assert.rejects(c.reply({ type: 'reply', id: q.id, answers }), /timed out|uncertain/);
+  await assert.rejects(c.reply({ type: 'reply', id: q.id, answers }), /pending|answered/);
+  assert.equal(requests().filter(r => r.method === 'turn/steer').length, 1);
+  assert.equal(requests().filter(r => r.method === 'turn/start').length, 1);
+});
+
 test('Codex approval response without server resolution cannot be submitted a second time', async t => {
   const { client, requests } = setup(t); const { c, events } = client(undefined, ['--no-resolved']);
   await c.ready(); await c.start('APPROVAL');

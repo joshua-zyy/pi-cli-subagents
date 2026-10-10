@@ -7,7 +7,7 @@ import type { AdapterEvent, AdapterOptions, CliAdapter, InteractionReply } from 
 import { childEnvironment, type Exit } from "./pi-process.js";
 import { CODEX_MODE_PRESETS } from "./roles.js";
 import type { CodexMode, NativeSession, Delivery, QuestionField } from "./types.js";
-import { readCodexQuestionFields, validateQuestionAnswers } from "./codex-question.js";
+import { readCodexAsyncQuestionFields, readCodexQuestionFields, validateQuestionAnswers } from "./codex-question.js";
 import { readCodexMcpApproval, readCodexMcpElicitation } from "./codex-mcp-approval.js";
 
 // Legacy RPC envelope; a typed decoder migration is separate from the role capability gate.
@@ -16,7 +16,8 @@ type RecordValue = Record<string, any>;
 const object = (value: unknown): value is RecordValue => value !== null && typeof value === "object" && !Array.isArray(value);
 const textInput = (text: string) => [{ type: "text", text }];
 const requestKey = (id: string | number): string => `${typeof id}:${id}`;
-type Approval = { id: string; rpcId: string | number; threadId: string; turnId: string;
+// Async message questions have no RPC request ID; their answer is captured-turn text.
+type Approval = { id: string; rpcId?: string | number; threadId: string; turnId: string;
   attempted: boolean; allowed?: Set<string>; fields?: QuestionField[];
   mcp?: { questionId?: string; item: RecordValue }; resolved?: () => void; rejected?: (error: Error) => void };
 
@@ -42,6 +43,7 @@ export class CodexAdapter implements CliAdapter {
   private thread?: NativeSession & { cli: "codex" };
   private textByItem = new Map<string, string>();
   private completedItems = new Map<string, string>();
+  private asyncMessageIds = new Set<string>();
   private finalAnswerId?: string;
   private approvalItems = new Map<string, RecordValue>();
   private approvals = new Map<string, Approval>();
@@ -155,8 +157,19 @@ export class CodexAdapter implements CliAdapter {
       const id = params.itemId;
       this.textByItem.set(id, (this.textByItem.get(id) ?? "") + params.delta);
     } else if (record.method === "item/completed" && params.item?.type === "agentMessage" && typeof params.item.id === "string" && typeof params.item.text === "string") {
+      const fresh = !this.completedItems.has(params.item.id);
       this.completedItems.set(params.item.id, params.item.text);
-      if (params.item.phase === "final_answer") this.finalAnswerId = params.item.id;
+      if (params.item.delivery === "async") this.asyncMessageIds.add(params.item.id);
+      // Async final_answer messages are mid-turn output, not the terminal answer.
+      if (params.item.delivery !== "async" && params.item.phase === "final_answer") this.finalAnswerId = params.item.id;
+      const fields = fresh ? readCodexAsyncQuestionFields(params.item) : undefined;
+      if (fields && JSON.stringify(fields).length <= 12_000) {
+        const id = randomUUID();
+        this.approvals.set(id, { id, threadId: params.threadId, turnId: this.activeTurn, fields, attempted: false });
+        this.emit({ type: "question", question: { id, method: "form", kind: "question", fields,
+          isBlocking: false, humanOnly: false, parentPolicy: { answers: true }, title: "Codex asynchronous task questions",
+          message: `Answers are task context sent once via turn/steer to this active turn, not an RPC response or permission grant. The request expires when this turn ends.\n${JSON.stringify(fields, null, 2)}` } });
+      }
     } else if (record.method === "turn/completed") {
       const turn = params.turn;
       const run = this.run!;
@@ -167,7 +180,7 @@ export class CodexAdapter implements CliAdapter {
         if (this.ending || this.failed || this.run !== run) return;
         const ids = new Set([...this.textByItem.keys(), ...this.completedItems.keys()]);
         const text = this.finalAnswerId ? this.completedItems.get(this.finalAnswerId) ?? "" :
-          [...ids].map(id => this.completedItems.get(id) ?? this.textByItem.get(id) ?? "").join("\n");
+          [...ids].filter(id => !this.asyncMessageIds.has(id)).map(id => this.completedItems.get(id) ?? this.textByItem.get(id) ?? "").join("\n");
         let result = text;
         if (!result && turn.status === "completed") {
           try {
@@ -175,7 +188,7 @@ export class CodexAdapter implements CliAdapter {
             if (reply.thread?.id !== this.thread!.threadId) throw new Error("thread/read returned a different thread");
             const saved = reply.thread.turns?.find((item: RecordValue) => item.id === turn.id);
             if (saved?.status !== "completed") throw new Error("Completed turn is absent from native history");
-            const messages = (saved.items ?? []).filter((item: RecordValue) => item.type === "agentMessage" && typeof item.text === "string");
+            const messages = (saved.items ?? []).filter((item: RecordValue) => item.type === "agentMessage" && item.delivery !== "async" && typeof item.text === "string");
             const final = messages.filter((item: RecordValue) => item.phase === "final_answer");
             result = (final.length ? final : messages).map((item: RecordValue) => item.text).join("\n");
           } catch (error) { this.emit({ type: "settled", status: "failed", text: "", error: `Could not verify Codex's empty completion: ${(error as Error).message}` }, run); return; }
@@ -199,7 +212,7 @@ export class CodexAdapter implements CliAdapter {
 
   private clearApproval(approval: Approval, error?: Error): void {
     if (!this.approvals.delete(approval.id)) return;
-    this.approvalByRpcId.delete(requestKey(approval.rpcId));
+    if (approval.rpcId !== undefined) this.approvalByRpcId.delete(requestKey(approval.rpcId));
     this.emit({ type: "resolved", id: approval.id });
     if (error) approval.rejected?.(error);
     else approval.resolved?.();
@@ -337,7 +350,7 @@ export class CodexAdapter implements CliAdapter {
     let resolve!: () => void;
     const done = new Promise<void>(r => { resolve = r; });
     this.run = { runId, settled: false, done, resolve };
-    this.textByItem.clear(); this.completedItems.clear(); this.finalAnswerId = undefined;
+    this.textByItem.clear(); this.completedItems.clear(); this.asyncMessageIds.clear(); this.finalAnswerId = undefined;
     this.approvalItems.clear(); this.approvals.clear(); this.approvalByRpcId.clear();
     this.staged = [];
     this.starting = (async () => {
@@ -387,6 +400,17 @@ export class CodexAdapter implements CliAdapter {
       if (Number(answer.cancelled === true) + Number(answer.answers !== undefined) !== 1 || answer.confirmed !== undefined || answer.value !== undefined)
         throw new Error("Codex task forms require answers or cancellation, not an approval");
       const answers = answer.cancelled ? {} : validateQuestionAnswers(approval.fields, answer.answers);
+      if (approval.rpcId === undefined) {
+        // Paseo's async-question reply (29db2b798..., Apache-2.0), adapted to
+        // active-run scope: never start an idle follow-up or retry uncertain steering.
+        approval.attempted = true;
+        if (!answer.cancelled) {
+          const text = "Answers to your questions:\n\n" + approval.fields.map(field => `${field.question}\n${answers[field.id][0]}`).join("\n\n");
+          await this.send(text, "steer");
+        }
+        this.clearApproval(approval);
+        return;
+      }
       result = { answers: Object.fromEntries(Object.entries(answers).map(([id, values]) => [id, { answers: values }])) };
     } else {
       if (answer.answers !== undefined || Number(answer.cancelled === true) + Number(typeof answer.confirmed === "boolean") + Number(typeof answer.value === "string") !== 1)

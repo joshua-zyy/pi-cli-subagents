@@ -1,6 +1,25 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readCodexQuestionFields, validateQuestionAnswers } from '../dist/codex-question.js';
+import * as questionContract from '../dist/codex-question.js';
+const { readCodexQuestionFields, readCodexAsyncQuestionFields, validateQuestionAnswers } = questionContract;
+
+test('Codex async messages become complete, single-answer forms without inventing native request IDs', () => {
+  assert.equal(typeof readCodexAsyncQuestionFields, 'function');
+  const fields = readCodexAsyncQuestionFields({ type: 'agentMessage', id: 'native-item', delivery: 'async',
+    questions: [{ title: 'Which check?', options: ['Unit', 'Integration'] }, { title: 'Context?', options: null }] });
+  assert.deepEqual(fields, [
+    { id: '0', header: 'Question 1', question: 'Which check?', options: [{ label: 'Unit', description: '' }, { label: 'Integration', description: '' }], allowOther: true, isSecret: false, multiSelect: false, required: true },
+    { id: '1', header: 'Question 2', question: 'Context?', options: [], allowOther: true, isSecret: false, multiSelect: false, required: true },
+  ]);
+  const answers = { '0': ['custom choice'], '1': ['literal, 雪\nanswer'] };
+  assert.deepEqual(validateQuestionAnswers(fields, answers), answers);
+  for (const values of [[], [' '], ['Unit', 'Integration']])
+    assert.throws(() => validateQuestionAnswers(fields, { ...answers, '0': values }), /required|one answer/i);
+  for (const patch of [{ delivery: null }, { type: 'mcpToolCall' }, { id: '' }, { questions: [] },
+    { questions: [{ title: '', options: null }] }, { questions: [{ title: 'Context?', options: 'Unit' }] },
+    { questions: [{ title: 'Context?', options: [1] }] }])
+    assert.equal(readCodexAsyncQuestionFields({ type: 'agentMessage', id: 'native-item', delivery: 'async', questions: [{ title: 'Context?', options: null }], ...patch }), undefined);
+});
 
 const questions = [
   { id: ' checks ', header: 'Context', question: 'Which check?', options: [{ label: 'Unit, fast', description: 'Exact punctuation' }] },

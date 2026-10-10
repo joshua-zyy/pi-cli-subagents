@@ -307,7 +307,7 @@ ${view(state)}`);
       questionId: Type.String({ description: "Exact current interaction ID" }),
       confirmed: Type.Optional(Type.Boolean({ description: "confirm only: native yes/no response; inspect the request to establish its effect before confirming" })),
       value: Type.Optional(Type.String({ description: "task question: an offered label or custom answer text, submitted once; other select: exact offered option; input/editor: response text" })),
-      answers: Type.Optional(Type.Record(Type.String(), Type.Array(Type.String()), { description: "form only: map every field ID to its answer strings; empty arrays skip individual fields. multiSelect:false takes at most one string; true permits choices plus one custom answer. Preserve exact text and respect offered choices/allowOther. Never invent authorization." })),
+      answers: Type.Optional(Type.Record(Type.String(), Type.Array(Type.String()), { description: "form only: map every field ID to its answer strings; empty arrays skip optional fields; required:true needs one non-blank string. multiSelect:false takes at most one string; true permits choices plus one custom answer. Preserve exact text and respect offered choices/allowOther. Never invent authorization." })),
       cancelled: Type.Optional(Type.Literal(true, { description: "Cancel instead of answering" })),
       reason: Type.String({ minLength: 1, description: "Why the decision is within the user's authorization, or why it is denied/cancelled" }),
     }, { additionalProperties: false }),

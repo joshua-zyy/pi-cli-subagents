@@ -23,10 +23,17 @@ Do not widen permission `mode`, edit global config, or silently launch a replace
 
 For a Codex or Claude `form` with `parentPolicy.answers: true`, read the full `fields` with `subagent_query get`.
 Submit one `answers` object mapping every exact field ID to a string array, respecting offered labels
-and `allowOther`. Use `[]` to skip a field, or `cancelled: true` to dismiss the whole form; never
+and `allowOther`. Use `[]` to skip an optional field; `required: true` needs one non-blank string.
+Use `cancelled: true` to dismiss the whole form; never
 guess a first choice or replace an ID with its display header. Do not mix `answers` with `value` or
 `confirmed`. Non-blocking questions permit continued work, but answers still expire with their
 original request/turn. Never retry an uncertain delivery or send the answer as a new prompt.
+
+Codex may ask through an asynchronous `agentMessage` before calling `requestUserInput`. A recognized
+async question reaches the parent immediately as a non-blocking form with indexed field IDs and
+`required: true`. Answer it through `subagent_reply`, not by sending a separate task: the adapter
+formats the context and steers the captured active turn once. Cancellation is local dismissal;
+turn end invalidates the request rather than starting an idle follow-up. It is not an RPC approval.
 
 Codex treats answers as trusted user input: provide only the user’s already-authorized context, not
 new authorization. A recognized `mcp_tool_call_approval_<callId>` tied to a live MCP action is a

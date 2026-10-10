@@ -104,6 +104,8 @@ Pi 子代理每次启动或恢复时会显式加载随包提供的 `subagent_ask
 
 Codex 的任务表单（`requestUserInput`，按 CLI 0.159.2 核对）可以包含多道问题。对 `method: "form"`、`parentPolicy.answers: true` 的请求，通过 `subagent_query get` 读取 `fields`，一次提交 `subagent_reply.answers`：每个字段 ID 对应一个字符串数组，如 `{ "<字段ID>": ["原样答案"] }`。遵守选项及 `allowOther`；`[]` 明确跳过该题，`cancelled: true` 取消整张表单。缺少字段会被拒绝，绝不猜选第一项。非阻塞问题不会让子代理进入等待状态，但答案仍绑定原请求和原 turn；已解决、已结束或投递不确定的答复不得重放。
 
+Codex 也会通过异步消息提问（`agentMessage` 带 `delivery: "async"` 和 `questions`），扩展会立即将其作为非阻塞表单通知父代理。字段 ID 为 `"0"`、`"1"` 等索引，`required: true` 要求每题一个非空白答案；适配器将答案文本一次通过 `turn/steer` 送回原活跃轮次。取消仅在本地关闭问题；轮次结束后请求失效，不自动启动空闲续聊或重试。沿用 Paseo 的异步问答映射，详见[契约与验证边界](docs/codex-async-questions.md)。
+
 Codex 将这些回答视为可信用户输入，因此只能提供用户已经授权的任务上下文，不能创造新授权。已识别的 `mcp_tool_call_approval_<callId>` 请求只有绑定当前活跃 MCP 操作时，才作为独立的单次许可处理：通过 `subagent_reply.value` 选择 `"Allow"` 或 `"Cancel"`（也可 `cancelled: true`），不能用 `answers`。即使原生提供持久选项，本扩展也只开放这两个选择。独立的 `mcpServer/elicitation/request` 入口只接受明确的 MCP 审批元数据、无输入字段的表单及无歧义的活跃操作关联：用 `confirmed: true` 接受、`confirmed: false` 拒绝，或 `cancelled: true` 取消，不能提交表单答案或持久许可。未知种类、数据／URL 表单和未关联请求仍按 fail-closed 处理；普通问题不得使用主机保留的 `mcp_tool_call_approval*` ID。人工可用 `/agent-reply` 逐题作答；敏感字段会提示输入可见且可能留在日志中，并非掩码输入。
 
 Claude 内置的 `AskUserQuestion`（按 2.1.283 核对）也使用同一个 `answers` 接口，支持 1–4 道选择、文本或数值问题。文本和数值题需要原生扩展提问特性已开启，本扩展不会替你开启。字段 ID 是**完整问题正文**，不是显示用的短标题。`multiSelect: false` 最多提交一个字符串；`true` 可提交多个选项及一个自定义答案；`[]` 跳题，不猜默认值。只有这类完整解析的问题卡片能承接原生 `requires_user_interaction: true`，不能用“批准一次”代替；明确的原生人工限制仍有效。取消会拒绝回答该问题，但不主动中断整轮；答案只是任务上下文，不创造新授权或持久权限。

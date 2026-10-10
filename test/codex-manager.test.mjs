@@ -130,6 +130,39 @@ test('Codex approval is visible to the parent and one reasoned decision is audit
   await assert.rejects(manager.reply(started.id, waiting.questions[0].id, { confirmed: true }), /exited|ended/);
 });
 
+test('Codex async messages reach the public reply tool before completion with one audit and captured-turn steer', { timeout: 20_000 }, async t => {
+  const { cwd, home, manager, done, parent } = setup(t);
+  const tools = new Map(), messages = [], notices = [];
+  const api = { registerTool: tool => tools.set(tool.name, tool), registerCommand() {}, registerShortcut() {}, registerMessageRenderer() {}, on() {},
+    sendMessage: (message, options) => messages.push({ message, options }) };
+  extension(api);
+  const ctx = { cwd, hasUI: true, sessionManager: { getSessionFile: () => parent, getEntries: () => [] }, ui: { notify: (...args) => notices.push(args), setStatus() {} } };
+  const invoke = (name, args) => tools.get(name).execute('fixture-parent', args, new AbortController().signal, () => {}, ctx);
+  const started = await manager.spawn('oracle', role, cwd, 'ASYNC_QUESTION_DUPLICATE');
+  const current = manager.get(started.id);
+  assert.equal(current.questions.length, 1, 'the parent must see the async question while the original run is active');
+  assert.equal(current.phase, 'running');
+  const q = current.questions[0]; assert.equal(q.fields.every(f => f.required === true), true);
+  deliverReports(manager, api, ctx, new Set(), Date.now(), manager.list());
+  assert.equal(notices.length, 0); assert.equal(messages.length, 1);
+  assert.equal(messages[0].options.deliverAs, 'steer'); assert.match(messages[0].message.content, /required.*non-blank/i);
+  const auditFile = path.join(manager.root, started.id, 'runs', started.runId, 'permissions.jsonl');
+  const base = { id: started.id, questionId: q.id, reason: 'Only the assigned non-sensitive task context' };
+  for (const invalid of [{ confirmed: true }, { answers: { '0': [], '1': ['context'] } }, { answers: { '0': [' '], '1': ['context'] } },
+    { answers: { '0': ['Unit', 'Integration'], '1': ['context'] } }])
+    await assert.rejects(invoke('subagent_reply', { ...base, ...invalid }), /response|answers|required|one answer/i);
+  assert.equal(fs.existsSync(auditFile), false);
+  await invoke('subagent_reply', { ...base, answers: { '0': ['custom choice'], '1': ['literal context'] } });
+  const final = await done(started.id);
+  assert.equal(final.text, 'Answers to your questions:\n\nWhich check?\ncustom choice\n\nWhat context is missing?\nliteral context');
+  assert.equal(final.runId, started.runId); assert.equal(final.runtimeId, started.runtimeId); assert.deepEqual(final.session, started.session);
+  const audit = fs.readFileSync(auditFile, 'utf8').trim().split('\n').map(JSON.parse);
+  assert.equal(audit.length, 1); assert.equal(audit[0].decision, 'answered'); assert.equal(audit[0].actor, 'parent');
+  const native = fs.readFileSync(path.join(home, 'requests.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  assert.equal(native.filter(r => r.method === 'turn/steer').length, 1); assert.equal(native.filter(r => r.method === 'turn/start').length, 1);
+  assert.equal(native.filter(r => !r.method).length, 0); assert.deepEqual(final.questions, []);
+});
+
 test('Codex forms reach the public parent reply tool with scoped answers, notifications, and non-blocking steer', { timeout: 30_000 }, async t => {
   const { cwd, home, manager, done, parent } = setup(t);
   const tools = new Map(), notices = [], messages = [], statuses = [];

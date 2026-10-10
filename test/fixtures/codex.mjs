@@ -16,7 +16,11 @@ const elicitations = new Map();
 const file = id => path.join(home, `${id}.json`);
 const save = () => fs.writeFileSync(file(thread.id), JSON.stringify(thread));
 function item(text, id = 'answer') {
-  return { type: 'agentMessage', id, text, phase: 'final_answer' };
+  return { type: 'agentMessage', id, text, phase: process.argv.includes('--no-final-phase') ? null : 'final_answer' };
+}
+function asyncMessage() {
+  return { type: 'agentMessage', id: 'async-ask', text: 'Please supply task context.', phase: 'final_answer', delivery: 'async',
+    questions: [{ title: 'Which check?', options: ['Unit', 'Integration'] }, { title: 'What context is missing?', options: null }] };
 }
 function finish(text, status = 'completed', mode = '') {
   turn.status = status;
@@ -29,6 +33,7 @@ function finish(text, status = 'completed', mode = '') {
     notify('item/agentMessage/delta', { threadId: thread.id, turnId: turn.id, itemId: 'answer', delta: text.slice(1) });
     notify('item/completed', { threadId: thread.id, turnId: turn.id, item: item(text) });
   }
+  if (mode === 'ASYNC_REPLY') notify('item/completed', { threadId: thread.id, turnId: turn.id, item: asyncMessage() });
   notify('turn/completed', { threadId: thread.id, turn: { ...turn, items: [], itemsView: 'summary' } });
 }
 function execute(message) {
@@ -42,6 +47,13 @@ function execute(message) {
     if (content !== undefined) { fs.mkdirSync(path.dirname(target), { recursive: true }); fs.writeFileSync(target, content); }
     return finish(fs.readFileSync(target, 'utf8'));
   }
+  if (message.startsWith('ASYNC_QUESTION')) {
+    notify('item/completed', { threadId: thread.id, turnId: turn.id, item: asyncMessage() });
+    if (message.includes('DUPLICATE')) notify('item/completed', { threadId: thread.id, turnId: turn.id, item: asyncMessage() });
+    if (message.includes('TURN_END')) finish('TURN-ENDED');
+    return;
+  }
+  if (message.startsWith('Answers to your questions:\n\n')) return finish(message, 'completed', 'ASYNC_REPLY');
   if (message.startsWith('HOLD')) return;
   if (message === 'CRASH') return process.exit(2);
   if (message === 'NOISE') return process.stdout.write('not-json\n');
@@ -314,6 +326,7 @@ function handle(cmd) {
     return response(cmd, { turn: initial });
   }
   if (cmd.method === 'turn/steer') {
+    if (process.argv.includes('--no-steer-response')) return;
     if (cmd.params.threadId !== thread.id || cmd.params.expectedTurnId !== turn.id) return error(cmd, 'Wrong active turn');
     const message = cmd.params.input[0].text;
     if (message === 'FAST_STEER') { finish('FAST_STEER'); response(cmd, { turnId: turn.id }); }

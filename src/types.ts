@@ -59,6 +59,8 @@ export interface QuestionField {
   options: { label: string; description: string; preview?: string }[];
   /** Explicit false limits a field to one answer; omitted preserves the older Codex contract. */
   multiSelect?: boolean;
+  /** Complete async-message answers require one non-blank string; ordinary forms may skip. */
+  required?: true;
   allowOther: boolean;
   isSecret: boolean;
 }

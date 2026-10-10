@@ -31,6 +31,23 @@ export function readCodexQuestionFields(input: unknown): QuestionField[] | undef
   return fields;
 }
 
+/**
+ * Async-message normalization adapted from Paseo's codex/async-questions.ts
+ * at 29db2b79809fc032860ff4e8ee360fbe0073c3e9 (Apache-2.0; copyright above).
+ * Reuse the existing form contract; indices identify questions, not native RPC requests.
+ */
+export function readCodexAsyncQuestionFields(item: unknown): QuestionField[] | undefined {
+  if (!object(item) || item.type !== "agentMessage" || item.delivery !== "async" ||
+    typeof item.id !== "string" || !item.id.trim() || !Array.isArray(item.questions) || !item.questions.length) return;
+  const questions = [];
+  for (const [index, question] of item.questions.entries()) {
+    if (!object(question) || question.options != null && !Array.isArray(question.options)) return;
+    questions.push({ id: String(index), header: `Question ${index + 1}`, question: question.title,
+      options: ((question.options ?? []) as unknown[]).map(label => ({ label, description: "" })), isOther: true });
+  }
+  return readCodexQuestionFields(questions)?.map(field => ({ ...field, multiSelect: false, required: true }));
+}
+
 /** Used before the worker's audit and again at the native reply boundary. */
 export function validateQuestionAnswers(fields: readonly QuestionField[], input: unknown): QuestionAnswers {
   if (!fields.length || !object(input) || Object.keys(input).length !== fields.length ||
@@ -38,6 +55,7 @@ export function validateQuestionAnswers(fields: readonly QuestionField[], input:
   return Object.fromEntries(fields.map(field => {
     const values = input[field.id];
     if (!Array.isArray(values) || values.some(value => typeof value !== "string")) throw new Error("Each field answer must be a string array");
+    if (field.required && (values.length !== 1 || !values[0].trim())) throw new Error(`Required field ${field.id} needs one non-blank answer`);
     if (field.multiSelect === false && values.length > 1) throw new Error(`Field ${field.id} accepts at most one answer`);
     if (field.multiSelect === true && values.length > field.options.length + Number(field.allowOther))
       throw new Error(`Too many answers for multi-select field ${field.id}`);
