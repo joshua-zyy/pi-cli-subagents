@@ -1,7 +1,7 @@
 import { open, stat } from "node:fs/promises";
 import { TranscriptReader, logSourceKey } from "./transcript.js";
 import type { TranscriptEntry, TranscriptPageBoundary, TranscriptPosition, TranscriptSnapshot, TranscriptUsage } from "./transcript.js";
-import type { Cli } from "../types.js";
+import type { Cli } from "./types.js";
 
 /** Bytes of older history read per page step. */
 export const WINDOW_PAGE_BYTES = 512 * 1024;
@@ -31,6 +31,8 @@ export interface TranscriptWindowOptions {
   maxEntries?: number;
   maxBytes?: number;
   maxTextBytes?: number;
+  omitClipMarkers?: boolean;
+  strictReads?: boolean;
 }
 
 interface SourceState { key: string; path: string; size: number; exists: boolean; ino: number; dev: number; mtimeMs: number; ctimeMs: number }
@@ -87,6 +89,8 @@ export class TranscriptWindow {
   private readonly maxEntries: number;
   private readonly maxBytes: number;
   private readonly maxText: number;
+  private readonly omitClipMarkers: boolean;
+  private readonly strictReads: boolean;
   private threadId?: string;
   private sources: SourceState[] = [];
   private reader?: TranscriptReader;
@@ -125,6 +129,59 @@ export class TranscriptWindow {
     this.maxEntries = options.maxEntries ?? WINDOW_MAX_ENTRIES;
     this.maxBytes = options.maxBytes ?? WINDOW_MAX_BYTES;
     this.maxText = options.maxTextBytes ?? WINDOW_TEXT_BYTES;
+    this.omitClipMarkers = options.omitClipMarkers ?? false;
+    this.strictReads = options.strictReads ?? false;
+  }
+
+  get nativeId(): string | undefined { return this.threadId; }
+
+  /**
+   * One-shot read, independent of cached UI state. Unlike UI pageUp, it opens at the byte boundary;
+   * unlike UI cancellation, it rejects. An exact range can recover siblings of an entry in one record.
+   */
+  async readPage(files: string[], options: { before?: TranscriptPosition; from?: TranscriptPosition; beforeEntry?: (entry: TranscriptEntry) => boolean; discoverIdentity?: boolean; signal?: AbortSignal } = {}): Promise<TranscriptSnapshot> {
+    const { signal } = options;
+    signal?.throwIfAborted();
+    const abort = (): void => this.cancel();
+    signal?.addEventListener("abort", abort, { once: true });
+    this.taskGeneration = this.generation;
+    try {
+      const sources = await this.statAll(files);
+      this.checkCancelled();
+      this.resetState();
+      this.sources = sources;
+      const index = lastReadable(sources);
+      if (index < 0) {
+        if (options.before) throw new Error("Invalid activity cursor: source unavailable.");
+        if (sources.some(source => !source.exists)) this.notice = "Event log unavailable: some run logs do not exist.";
+        return this.snapshot();
+      }
+      const end = options.before ?? { source: sources[index].key, offset: sources[index].size };
+      const source = this.sourceOf(end);
+      if (!source?.exists || !Number.isSafeInteger(end.offset) || end.offset < 0 || end.offset > source.size) throw new Error("Invalid activity cursor: byte position unavailable.");
+      if (this.cli !== "pi" && !this.threadId) {
+        if (options.discoverIdentity !== false) await this.learnIdentity(source);
+        else this.identityNotice = "Native session identity unavailable; records cannot be attributed.";
+      }
+      if (options.from) {
+        const distance = streamDistance(sources, options.from, end);
+        if (distance < 0 || distance > this.maxBytes) throw new Error("Invalid activity cursor: range unavailable.");
+        await this.replay(files, { from: options.from, to: end, truncated: false, fragment: false }, { kind: "newest" }, options.beforeEntry);
+        if (options.beforeEntry && !this.reader?.boundaryFound) throw new Error("Invalid activity cursor: entry anchor unavailable.");
+      } else if (options.before) {
+        const range = await this.planRange(sources, stepBack(sources, end, this.pageBytes), end, "head");
+        await this.replay(files, range, { kind: "newest" });
+      } else await this.replayTail(files, end, this.initialBytes);
+      this.checkCancelled();
+      if (sources.some(item => !item.exists)) this.notice = [this.notice, "Some historical event logs are unavailable."].filter(Boolean).join(" ");
+      return this.snapshot();
+    } catch (error) {
+      signal?.throwIfAborted();
+      throw error;
+    } finally {
+      signal?.removeEventListener("abort", abort);
+      this.taskGeneration = -1;
+    }
   }
 
   /** Attach to the run logs at a bounded tail, or read only the bytes appended since the last call. */
@@ -337,10 +394,10 @@ export class TranscriptWindow {
   }
 
   /** Fresh contiguous replay of one planned range; every entry is rebuilt, never merged. */
-  private async replay(files: string[], range: { from: TranscriptPosition; to: TranscriptPosition; truncated: boolean; fragment: boolean }, keep: Keep): Promise<void> {
-    const reader = this.newReader();
+  private async replay(files: string[], range: { from: TranscriptPosition; to: TranscriptPosition; truncated: boolean; fragment: boolean }, keep: Keep, beforeEntry?: (entry: TranscriptEntry) => boolean): Promise<void> {
+    const reader = this.newReader(beforeEntry);
     const before = reader.stats();
-    const snapshot = await reader.readRange(files, range.from, range.to, { fragmentStart: range.fragment, keepOldest: keep.kind === "oldest", cancelled: () => this.cancelled() });
+    const snapshot = await reader.readRange(files, range.from, range.to, { budget: this.maxBytes, fragmentStart: range.fragment, keepOldest: keep.kind === "oldest", cancelled: () => this.cancelled() });
     this.account(reader, before);
     // Commit only when the page is still open: a closed window keeps its last published state.
     this.checkCancelled();
@@ -414,9 +471,9 @@ export class TranscriptWindow {
     return selected;
   }
   /** Every build starts from a fresh reader so no state can leak between ranges. */
-  private newReader(): TranscriptReader {
+  private newReader(beforeEntry?: (entry: TranscriptEntry) => boolean): TranscriptReader {
     // Paged replays never adopt a native identity from their own records; only the head read may.
-    return new TranscriptReader(this.cli, this.threadId, { keys: "position", maxEntries: WINDOW_READER_ENTRIES, adoptIdentity: false });
+    return new TranscriptReader(this.cli, this.threadId, { keys: "position", maxEntries: WINDOW_READER_ENTRIES, adoptIdentity: false, omitClipMarkers: this.omitClipMarkers, strictReads: this.strictReads, beforeEntry });
   }
   private account(reader: TranscriptReader, before: { readBytes: number; readCalls: number }): number {
     const after = reader.stats();
@@ -429,9 +486,9 @@ export class TranscriptWindow {
   private async learnIdentity(source: SourceState): Promise<void> {
     const limit = Math.min(source.size, WINDOW_HEAD_BYTES);
     if (limit <= 0) return;
-    const reader = new TranscriptReader(this.cli, undefined, { keys: "position", maxEntries: 64 });
+    const reader = new TranscriptReader(this.cli, undefined, { keys: "position", maxEntries: 64, strictReads: this.strictReads });
     const before = reader.stats();
-    await reader.readRange([source.path], { source: source.key, offset: 0 }, { source: source.key, offset: limit });
+    await reader.readRange([source.path], { source: source.key, offset: 0 }, { source: source.key, offset: limit }, { cancelled: () => this.cancelled() });
     this.account(reader, before);
     this.checkCancelled();
     if (reader.nativeId) {

@@ -1,5 +1,5 @@
 import test from 'node:test';import assert from 'node:assert/strict';import fs from 'node:fs';import path from 'node:path';
-import {TranscriptReader} from '../dist/ui/transcript.js';
+import {TranscriptReader} from '../dist/transcript.js';
 import { tempDir } from './helpers/tmp.mjs';
 const session_id='native';const root=tempDir('claude-transcript');
 async function snapshot(records,more=[]){const files=[records,...more].map((rows,i)=>{const f=path.join(root,`${crypto.randomUUID()}-${i}.jsonl`);fs.writeFileSync(f,rows.map(JSON.stringify).join('\n')+'\n');return f;});const r=new TranscriptReader('claude',session_id);let s;do{s=await r.read(files);}while(s.loading);return s;}

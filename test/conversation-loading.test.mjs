@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { ConversationViewer } from '../dist/ui/conversation.js';
-import { TranscriptReader } from '../dist/ui/transcript.js';
+import { TranscriptReader } from '../dist/transcript.js';
 import { tempDir } from './helpers/tmp.mjs';
 
 const theme = { fg: (_color, text) => text, bold: text => text };

@@ -2,8 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { TranscriptWindow } from '../dist/ui/transcript-window.js';
-import { logSourceKey } from '../dist/ui/transcript.js';
+import { TranscriptWindow } from '../dist/transcript-window.js';
+import { logSourceKey } from '../dist/transcript.js';
 
 async function fixture(t, messages) {
   const root = path.resolve('.test-output'); await fs.mkdir(root, { recursive: true });

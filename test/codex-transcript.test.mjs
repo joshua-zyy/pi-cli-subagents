@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { TranscriptReader } from '../dist/ui/transcript.js';
+import { TranscriptReader } from '../dist/transcript.js';
 import { tempDir } from './helpers/tmp.mjs';
 function fixture(t) {
   const dir = tempDir('codex-transcript');

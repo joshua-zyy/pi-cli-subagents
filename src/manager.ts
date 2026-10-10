@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import path from "node:path";
 import os from "node:os";
 import { control } from "./control.js";
+import { readActivity } from "./activity.js";
 import { codexHome, codexLaunch } from "./codex-launch.js";
 import { CodexAdapter } from "./codex-adapter.js";
 import { inspectPiSession } from "./pi-adapter.js";
@@ -70,6 +71,15 @@ export class AgentManager {
       return report ? { ...report, ...shorten(report.text) } : undefined;
     });
   }
+  /** Read projected history without requiring a live or healthy runtime state. */
+  activity(id: string, options: { cursor?: string; limit?: number; maxBytes?: number; signal?: AbortSignal } = {}) {
+    options.signal?.throwIfAborted();
+    const spec = this.spec(id), cli = spec.cli ?? "pi";
+    const session = nativeSession(readJson<SessionHandle | NativeSession>(path.join(this.directory(id), "session.json")));
+    const threadId = session?.cli !== cli ? undefined : session.cli === "codex" ? session.threadId : session.sessionId;
+    return readActivity({ ...options, id, cli, threadId, files: this.eventLogs(id) });
+  }
+
   /** Read one persisted final report by identity, never via the current state's result pointer or cache. */
   getResult(id: string, runId: string): Report {
     this.spec(id);

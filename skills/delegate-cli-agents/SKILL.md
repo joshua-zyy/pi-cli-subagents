@@ -1,6 +1,6 @@
 ---
 name: delegate-cli-agents
-description: Handle CLI subagent task questions, approvals, truncated or missing results, managed-worktree baselines, and interrupted sessions. Use the tool descriptions for routine dispatch and parameters.
+description: Handle CLI subagent task questions, approvals, bounded activity/history pages, truncated or missing results, managed-worktree baselines, and interrupted sessions. Use the tool descriptions for routine dispatch and parameters.
 ---
 
 # CLI subagent operational reference
@@ -18,6 +18,8 @@ start a new turn. Continue other work or end the turn rather than polling or sle
 A notification or `subagent_query({ action: "get", id })` may contain only a preview. If it is truncated,
 read the missing text with `result` before claiming a complete review. Receiving a completed report is
 not the same as verifying its claims.
+
+Use `subagent_query({ action: "activity", id })` for bounded recent activity, then its opaque `cursor` for older pages. Do not poll this action for completion or treat projected activity as the full result. Read `notice` and truncation/partial markers; a stale cursor fails explicitly rather than silently resetting. This read works on retained logs without starting a native process.
 
 Queued notifications are not receipts until recorded in parent history. Reopening the original parent
 replays unrecorded reports with their original run IDs; recorded reports are not delivered again.

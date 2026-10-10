@@ -6,7 +6,7 @@ import fsPromises from 'node:fs/promises';
 import path from 'node:path';
 import { syncBuiltinESMExports } from 'node:module';
 import { TranscriptCache } from '../dist/ui/transcript-cache.js';
-import { TranscriptWindow } from '../dist/ui/transcript-window.js';
+import { TranscriptWindow } from '../dist/transcript-window.js';
 import { tempDir } from './helpers/tmp.mjs';
 
 const record = text => ({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text }], usage: { input: 1, output: 1, totalTokens: 2 } } });

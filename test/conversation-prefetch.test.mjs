@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { TranscriptWindow } from '../dist/ui/transcript-window.js';
+import { TranscriptWindow } from '../dist/transcript-window.js';
 import { ConversationViewer } from '../dist/ui/conversation.js';
 
 const up = '\x1b[A', down = '\x1b[B', pageUp = '\x1b[5~', home = '\x1b[H', end = '\x1b[F';

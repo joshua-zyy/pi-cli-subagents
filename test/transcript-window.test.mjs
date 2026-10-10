@@ -5,8 +5,8 @@ import fs from 'node:fs';
 import fsPromises from 'node:fs/promises';
 import path from 'node:path';
 import { syncBuiltinESMExports } from 'node:module';
-import { TranscriptWindow } from '../dist/ui/transcript-window.js';
-import { logSourceKey } from '../dist/ui/transcript.js';
+import { TranscriptWindow } from '../dist/transcript-window.js';
+import { logSourceKey } from '../dist/transcript.js';
 import { tempDir } from './helpers/tmp.mjs';
 
 const CHUNK = 512 * 1024;

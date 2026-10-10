@@ -86,11 +86,13 @@ pi --extension /absolute/path/to/pi-cli-subagents/dist/index.js \
 | 父代理可用工具 | 用途 |
 | --- | --- |
 | `subagent` | `start` 启动角色、`send` 向原实例发消息、`interrupt` 中断当前轮、`stop` 释放进程 |
-| `subagent_query` | `list` 查看元数据与工作区、`get` 查看实例详情、`result` 读取指定轮次结果 |
+| `subagent_query` | `list` 查看元数据与工作区、`get` 查看详情、`result` 读取精确结果、`activity` 翻阅活动 |
 | `subagent_reply` | 附具体理由，回答一个当前请求 |
 | `subagent_workspace` | 显式 `create` 托管工作树或 `integrate` 待集成改动 |
 
 `subagent_query({action: "list"})` 只返回元信息，不携带结果正文；传 `{action: "get", id}` 可查看当前详情与有界预览。终态报告通知提供 `subagent_query({action: "result", id, runId})` 入口，读取该轮的原始结果。长结果保持两个 ID 不变，将返回的 `nextOffset` 作为 `offset` 继续读取，直到其为 `null`（`limit` 默认及上限为 6000 个 UTF-16 代码单元）。读取结果不会唤醒或恢复代理。
+
+查看近期活动用 `subagent_query({action: "activity", id})`，再传回返回的 `cursor` 翻旧页。页内按时间正序；`limit` 为 1–100 条（默认 20），`maxBytes` 为整个 JSON 响应的 4096–65536 个 UTF-8 字节（默认 16384）。非法或已检测失效的 cursor 明确报错；`partial`、`truncated`/`omittedBytes` 和 `notice` 分别提示组边界、不完整文字及不可读证据。完整终答仍用 `result`；活动查询不启动 CLI、不改写日志，也不替代自动完成通知。
 
 TUI 报告跟随 Pi 的展开/折叠状态（默认 **Ctrl+O**，支持自定义按键）。折叠时只显示一行实例/状态摘要，失败和待处理请求保持醒目；展开后查看通知正文及精确轮次的结果读取入口。旧通知缺少展示元数据时标为 `status unavailable`，不猜测成功状态。待处理请求会持续显示在状态行中，答复后自动消失。常规请求显示“等待主 agent 审核”，不再催你接手；只有需要人工批准的请求才显示操作入口并弹出一条 warning 通知。折叠只改外观，父代理收到的内容和投递收据不变；展开文本会剥除 ANSI/终端控制序列，原始记录不变。
 
@@ -159,7 +161,7 @@ npm run test:list # 只列本地选集，不构建或执行测试
 
 - [Paseo](https://github.com/getpaseo/paseo)：[驻留生命周期及捕获轮次的取消语义](https://github.com/getpaseo/paseo/blob/29db2b79809fc032860ff4e8ee360fbe0073c3e9/docs/agent-lifecycle.md)来源，适配为扩展自有的 worker/control 协议；Pi 工具调用与对话的关联逻辑改编自其[固定版本的映射器](https://github.com/getpaseo/paseo/blob/99fc204c55c8c1666477282eeba562ba87a3135f/packages/server/src/server/agent/providers/pi/extensions/rpiv-ask-user-question/index.ts)（Apache-2.0）。Codex 问题归一化与答案映射也改编自其[固定版本的 Codex 适配器](https://github.com/getpaseo/paseo/blob/06fe97c9019c1db4a5264dfb9b369b93e5e2fba4/packages/server/src/server/agent/providers/codex-app-server-agent.ts)，改为按 ID 回答、严格校验，并去掉缺失答案默认选第一项的行为。
 - [Lody Codex ACP](https://github.com/LodyAI/acp-extension-codex/blob/60f1dc4bda7d503eb107a9875893a62d399fd97e/src/permissions/mcp.ts)：单次与持久许可分离及[无输入字段 elicitation 的识别](https://github.com/LodyAI/acp-extension-codex/blob/60f1dc4bda7d503eb107a9875893a62d399fd97e/src/CodexElicitationHandler.ts#L361)来源（Apache-2.0），按 [OpenAI Codex rust-v0.159.2](https://github.com/openai/codex/blob/rust-v0.159.2/codex-rs/core/src/mcp_tool_call.rs#L1460) 的 MCP 前缀问题和 elicitation 协议适配，增加活跃操作关联并禁用持久许可；不捆绑 Lody/ACP 运行时。
-- [Lody acknowledged steering](https://github.com/LodyAI/Lody/blob/6dc434952ab2e942291cc8392316bf760afbdaf0/apps/cli/src/agent/acknowledged-steer.ts)：操作回执中“接受与实际应用分离”的设计参考；不引入 ACP/Core，也不捏造已应用信号。
+- [Lody acknowledged steering](https://github.com/LodyAI/Lody/blob/6dc434952ab2e942291cc8392316bf760afbdaf0/apps/cli/src/agent/acknowledged-steer.ts)：操作回执中“接受与实际应用分离”的设计参考；其[历史分页合同](https://github.com/LodyAI/Lody/blob/6dc434952ab2e942291cc8392316bf760afbdaf0/apps/cli/src/mcp/session-history-page.ts)也是字节预算裁剪及旧条目可达性的来源（Apache-2.0），用本地字节 cursor 替换 Loro 索引。不引入 ACP/Core，也不捏造已应用信号。
 - [@juicesharp/rpiv-ask-user-question 2.12.0](https://www.npmjs.com/package/@juicesharp/rpiv-ask-user-question/v/2.12.0)：子 Pi 内置工具的单问题 RPC 选项／自定义回答流程来源（MIT）。
 - [pi-subagents](https://github.com/tintinweb/pi-subagents)：状态区与对话界面的设计参考。
 

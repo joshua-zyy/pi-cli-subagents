@@ -40,6 +40,46 @@ function harness() {
   return { cwd, parent, manager, tools, ctx, pi, invoke, add, sent, entries };
 }
 
+test('activity pages traverse real cross-run logs without execution, state dependence or history writes', async t => {
+  const h=harness(),a=h.add('Original full result');
+  const rows=Array.from({length:45},(_,i)=>`activity-${i}`);
+  const writeLog=(runId,texts)=>fs.writeFileSync(path.join(a.dir,'runs',runId,'events.jsonl'),[
+    {type:'response',id:'private-wire',success:true,data:{secret:'RAW_TRANSPORT_MUST_NOT_LEAK'}},
+    ...texts.map(text=>({type:'message_end',message:{role:'assistant',content:[{type:'text',text}]}})),
+  ].map(r=>JSON.stringify(r)+'\n').join(''));
+  writeLog(a.runId,rows.slice(0,25));const newer=a.publish('Newer result','completed',2);writeLog(newer.runId,rows.slice(25));
+  fs.unlinkSync(path.join(a.dir,'state.json'));
+  for(const method of ['spawn','send','close','reply','interrupt'])t.mock.method(AgentManager.prototype,method,()=>{throw Error('activity attempted execution');});
+  const snapshot=()=>fs.readdirSync(h.cwd,{recursive:true}).sort().map(file=>{
+    const full=path.join(h.cwd,file),s=fs.statSync(full);return [file,s.mtimeMs,s.isFile()?fs.readFileSync(full).toString('hex'):null];
+  });
+  const before=snapshot(),seen=[],cursors=new Set();let cursor;
+  for(let n=0;;n++){
+    assert(n<20,'bounded pages must make progress');
+    const page=await h.invoke({action:'activity',id:a.id,cursor,limit:7,maxBytes:4096});
+    assert.equal(page.id,a.id);assert(page.entries.length<=7);assert(Buffer.byteLength(JSON.stringify(page),'utf8')<=4096);
+    assert.doesNotMatch(JSON.stringify(page),/RAW_TRANSPORT_MUST_NOT_LEAK/);
+    for(const entry of page.entries)assert.equal(Object.hasOwn(entry,'span'),false);
+    seen.unshift(...page.entries.map(e=>e.text));
+    if(!page.hasMore){assert.equal(page.cursor,undefined);break;}
+    assert.equal(typeof page.cursor,'string');assert(!cursors.has(page.cursor));cursors.add(page.cursor);cursor=page.cursor;
+  }
+  assert.deepEqual(seen,rows);assert.deepEqual(snapshot(),before);
+  assert.equal((await h.invoke({action:'result',id:a.id,runId:a.runId})).text,'Original full result');
+});
+
+test('activity deduplicates a shared resident log and enforces parent scope and cancellation', async () => {
+  const h=harness(),a=h.add('Final');const file=path.join(a.dir,'runs',a.runId,'events.jsonl');
+  fs.writeFileSync(file,Array.from({length:12},(_,i)=>JSON.stringify({type:'message_end',message:{role:'assistant',content:[{type:'text',text:`shared-${i}`}]}})+'\n').join(''));
+  const next=a.publish('Next','completed',2),request=path.join(a.dir,'runs',next.runId,'request.json');
+  writeJson(request,{...readJson(request),logFile:file});
+  const page=await h.invoke({action:'activity',id:a.id,limit:100});
+  assert.equal(page.entries.length,12);assert.equal(page.hasMore,false);
+  await assert.rejects(harness().invoke({action:'activity',id:a.id}),/does not belong/);
+  const controller=new AbortController();controller.abort();
+  await assert.rejects(h.tools.get('subagent_query').execute('abort',{action:'activity',id:a.id},controller.signal,undefined,h.ctx),e=>e.name==='AbortError');
+});
+
 test('manager → notification preserves the true tail and advertises an exact run result', async () => {
   const h = harness(), a = h.add();
   const legacy = h.manager.get(a.id);

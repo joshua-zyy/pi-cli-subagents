@@ -1,5 +1,5 @@
-import { TranscriptWindow } from "./transcript-window.js";
-import { logSourceKey } from "./transcript.js";
+import { TranscriptWindow } from "../transcript-window.js";
+import { logSourceKey } from "../transcript.js";
 import type { Cli } from "../types.js";
 
 /** One viewer scope: a parent session plus one child instance and its native session identity. */

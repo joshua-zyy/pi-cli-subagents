@@ -14,7 +14,7 @@ import { RoleSettingsPanel, SETTINGS_MAX_ROWS, type RoleSettingsAction, type Rol
 import { canMessage, canResume, canSteer, canStop, hasFailure, oneLine, viewStatus } from "./ui/format.js";
 import { StatusWidget } from "./ui/status.js";
 import { FleetView } from "./ui/fleet.js";
-import { TranscriptWindow } from "./ui/transcript-window.js";
+import { TranscriptWindow } from "./transcript-window.js";
 import { TranscriptCache, type TranscriptIdentity } from "./ui/transcript-cache.js";
 import { ConversationViewer } from "./ui/conversation.js";
 import type { AgentView, Delivery, Launch, Question, QuestionAnswers, Role, Thinking } from "./types.js";
@@ -264,15 +264,22 @@ ${view(state)}`);
   registerSubagent("Role catalog loads at session start.");
   pi.registerTool({
     name: "subagent_query", label: "Query CLI subagents",
-    description: "Read-only inspection of this parent's instances. phase describes the runtime; idle still owns processes and closed retains the native session for resume. lastStatus is the last run's completed/failed/stopped outcome, not proof of release. list returns metadata and managed workspaces without report bodies; get requires id and includes current details and a bounded preview. result requires id and runId and pages that exact original final report; keep both IDs fixed and follow nextOffset until null. Missing results never fall back to another run. Does not resume agents or cross parent sessions. Completion notifications arrive automatically.",
+    description: "Read-only inspection of this parent's instances. phase describes the runtime; idle still owns processes and closed retains the native session for resume. lastStatus is the last run's completed/failed/stopped outcome, not proof of release. list returns metadata and managed workspaces without report bodies; get requires id and includes current details and a bounded preview. result requires id and runId and pages that exact original final report; keep both IDs fixed and follow nextOffset until null. Missing results never fall back to another run. activity requires id: read a bounded recent-tail projection, then follow its cursor for older pages; invalid/stale cursors fail rather than restarting. Activity is not the full final report. Does not resume agents or cross parent sessions. Completion notifications arrive automatically.",
     parameters: Type.Object({
-      action: Type.Union([Type.Literal("list"), Type.Literal("get"), Type.Literal("result")]),
-      id: Type.Optional(Type.String({ description: "get/result only, required: instance ID" })),
+      action: Type.Union([Type.Literal("list"), Type.Literal("get"), Type.Literal("result"), Type.Literal("activity")]),
+      id: Type.Optional(Type.String({ description: "get/result/activity only, required: instance ID" })),
       runId: Type.Optional(Type.String({ description: "result only, required: original run ID" })),
       offset: Type.Optional(Type.Integer({ minimum: 0, description: "result only: UTF-16 offset, default 0" })),
-      limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 6000, description: "result only: page size, default/max 6000" })),
+      limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 6000, description: "result: UTF-16 characters, default/max 6000; activity: entries, default 20/max 100" })),
+      cursor: Type.Optional(Type.String({ minLength: 1, description: "activity only: opaque next-older-page cursor from the previous response; do not edit" })),
+      maxBytes: Type.Optional(Type.Integer({ minimum: 4096, maximum: 65536, description: "activity only: total JSON UTF-8 byte budget, default 16384" })),
     }, { additionalProperties: false }),
     async execute(_id, args, _signal, _update, ctx) {
+      if (args.action === "activity") {
+        checkFields(args, ["action", "id"], ["cursor", "limit", "maxBytes"]);
+        return content(JSON.stringify(await parentManager(ctx, launch).activity(args.id!,
+          { cursor: args.cursor, limit: args.limit, maxBytes: args.maxBytes, signal: _signal })));
+      }
       if (args.action === "result") {
         checkFields(args, ["action", "id", "runId"], ["offset", "limit"]);
         const offset = args.offset ?? 0, limit = args.limit ?? 6000;
@@ -287,7 +294,7 @@ ${view(state)}`);
       }
       if (args.action === "get") checkFields(args, ["action", "id"]);
       else if (args.action === "list") checkFields(args, ["action"]);
-      else throw new Error("Unknown query action; use list, get or result");
+      else throw new Error("Unknown query action; use list, get, result or activity");
       const manager = parentManager(ctx, launch);
       return content(JSON.stringify({ agents: (args.action === "get" ? [manager.get(args.id!)] : manager.list()).map(state => visible(state, args.action === "get")), workspaces: await manager.workspaces.list() }));
     },

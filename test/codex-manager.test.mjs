@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { AgentManager } from '../dist/manager.js';
 import extension from '../dist/index.js';
 import { deliverReports } from '../dist/notifier.js';
-import { TranscriptReader } from '../dist/ui/transcript.js';
+import { TranscriptReader } from '../dist/transcript.js';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { readJson, waitUntil, processAlive, writeJson } from '../dist/storage.js';

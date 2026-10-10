@@ -86,11 +86,13 @@ Tools in the live viewer default to one-line summaries, including failures (mark
 | Tool available to the parent | Purpose |
 | --- | --- |
 | `subagent` | `start` a configured role, `send` to an existing instance, `interrupt` a current turn, or `stop`/release processes |
-| `subagent_query` | `list` metadata/workspaces, `get` instance details, or read an exact run with `result` |
+| `subagent_query` | `list` metadata/workspaces, `get` details, read an exact `result`, or page projected `activity` |
 | `subagent_reply` | Answer one current request with an explicit reason |
 | `subagent_workspace` | Explicitly `create` a managed worktree or `integrate` its pending changes |
 
 `subagent_query({action: "list"})` returns metadata without result bodies; `{action: "get", id}` adds the current bounded preview. Final notifications include a `subagent_query({action: "result", id, runId})` link to the original result for that exact run. For longer results, keep both IDs fixed and pass the returned `nextOffset` as `offset` until it is `null` (default/max `limit: 6000` UTF-16 code units). Reading results never resumes an agent.
+
+For recent activity use `subagent_query({action: "activity", id})`, then pass its `cursor` for older pages. Each page is chronological; `limit` is 1–100 entries (default 20), and `maxBytes` is 4096–65536 UTF-8 bytes for the whole JSON response (default 16384). Invalid/stale cursors fail explicitly. `partial`, `truncated`/`omittedBytes` and `notice` distinguish bounded or unavailable evidence; use `result` for the complete final answer. Activity does not start a CLI, rewrite logs or replace automatic completion notifications.
 
 In the TUI, reports follow Pi’s expand/collapse state (**Ctrl+O** by default, respecting custom keybindings). Collapsed cards show a one-line instance/status summary, with failures and pending requests highlighted; expand to see the notification body and exact-run result link. Old notifications without display metadata show `status unavailable` rather than an inferred success. Pending requests stay visible in a status line until answered. Routine requests show “waiting for parent review” without asking you to take over; requests that require human approval instead show an action link and one warning notice. Only presentation changes: parent-facing content and delivery receipts remain intact. Expanded text strips ANSI/terminal controls; original records are unchanged.
 
@@ -159,7 +161,7 @@ After code changes, rebuild and run `/reload` in Pi. Automated tests are not ful
 
 - [Paseo](https://github.com/getpaseo/paseo): [resident lifecycle and captured-run cancellation semantics](https://github.com/getpaseo/paseo/blob/29db2b79809fc032860ff4e8ee360fbe0073c3e9/docs/agent-lifecycle.md), adapted to the extension-owned worker/control protocol; plus Pi logical-question normalization, tool-call/dialog correlation and cached answer replay adapted from its [pinned mapper](https://github.com/getpaseo/paseo/blob/99fc204c55c8c1666477282eeba562ba87a3135f/packages/server/src/server/agent/providers/pi/extensions/rpiv-ask-user-question/index.ts) (Apache-2.0). Codex question normalization and answer mapping are also adapted from its [pinned Codex adapter](https://github.com/getpaseo/paseo/blob/06fe97c9019c1db4a5264dfb9b369b93e5e2fba4/packages/server/src/server/agent/providers/codex-app-server-agent.ts), with ID-keyed answers, stricter validation and no default-choice fallback.
 - [Lody Codex ACP](https://github.com/LodyAI/acp-extension-codex/blob/60f1dc4bda7d503eb107a9875893a62d399fd97e/src/permissions/mcp.ts): single-action versus persistent permission separation and [message-only elicitation identification](https://github.com/LodyAI/acp-extension-codex/blob/60f1dc4bda7d503eb107a9875893a62d399fd97e/src/CodexElicitationHandler.ts#L361) (Apache-2.0), adapted to the [OpenAI Codex rust-v0.159.2 MCP question/elicitation contracts](https://github.com/openai/codex/blob/rust-v0.159.2/codex-rs/core/src/mcp_tool_call.rs#L1460). This port binds the request to a live native action and exposes no persistent grants; it does not bundle Lody or its ACP runtime.
-- [Lody acknowledged steering](https://github.com/LodyAI/Lody/blob/6dc434952ab2e942291cc8392316bf760afbdaf0/apps/cli/src/agent/acknowledged-steer.ts): acceptance versus applied-notification design reference for operation receipts; no ACP/Core runtime is imported and no applied signal is invented.
+- [Lody acknowledged steering](https://github.com/LodyAI/Lody/blob/6dc434952ab2e942291cc8392316bf760afbdaf0/apps/cli/src/agent/acknowledged-steer.ts): acceptance versus applied-notification design reference for operation receipts; its [history-page contract](https://github.com/LodyAI/Lody/blob/6dc434952ab2e942291cc8392316bf760afbdaf0/apps/cli/src/mcp/session-history-page.ts) also informs byte-budget trimming and older-entry reachability (Apache-2.0), using local byte cursors rather than Loro indices. No ACP/Core runtime is imported and no applied signal is invented.
 - [@juicesharp/rpiv-ask-user-question 2.12.0](https://www.npmjs.com/package/@juicesharp/rpiv-ask-user-question/v/2.12.0): the single-question RPC choice/custom-answer flow used by the bundled child tool (MIT).
 - [pi-subagents](https://github.com/tintinweb/pi-subagents): inspiration for the status and conversation UI.
 
@@ -197,6 +199,10 @@ SOFTWARE.
 Copyright 2025 JetBrains s.r.o.
 
 The adapted permission policy retains the upstream Apache-2.0 license (full text below). Its legacy-question correlation and restricted response mapping are modified for this extension; source pointers and modification notes are retained in `src/codex-mcp-approval.ts`.
+
+### Lody CLI history pagination
+
+The bounded history-page contract is adapted from Lody under Apache-2.0 (full text below). Source pointers and changes are recorded in `src/activity.ts`; Loro indexing and the operation-store error dependency are not bundled.
 
 ### Paseo
 

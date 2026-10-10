@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { syncBuiltinESMExports } from 'node:module';
-import { TranscriptWindow } from '../dist/ui/transcript-window.js';
+import { TranscriptWindow } from '../dist/transcript-window.js';
 import { TranscriptCache } from '../dist/ui/transcript-cache.js';
 import { ConversationViewer } from '../dist/ui/conversation.js';
 import { waitUntil } from '../dist/storage.js';

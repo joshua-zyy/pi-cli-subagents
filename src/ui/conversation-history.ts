@@ -1,4 +1,4 @@
-import type { TranscriptEntry, TranscriptSnapshot, TranscriptWindowInfo } from "./transcript.js";
+import type { TranscriptEntry, TranscriptSnapshot, TranscriptWindowInfo } from "../transcript.js";
 
 /** A display list, not a disk cursor. Reading a page must not evict the text under the reader. */
 export class ConversationHistory<T extends TranscriptSnapshot = TranscriptSnapshot> {

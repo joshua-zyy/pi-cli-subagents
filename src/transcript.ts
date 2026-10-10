@@ -1,7 +1,7 @@
 import { open } from "node:fs/promises";
 import path from "node:path";
 import { StringDecoder } from "node:string_decoder";
-import type { Cli } from "../types.js";
+import type { Cli } from "./types.js";
 
 /** A byte offset inside one run log. `source` is the normalized log path, never a list position. */
 export interface TranscriptPosition { source: string; offset: number }
@@ -45,6 +45,8 @@ export interface TranscriptEntry {
   partial?: "head" | "tail";
   /** Records that produced this entry; present in paged windows, absent in sequential reads. */
   span?: TranscriptSpan;
+  /** Measured UTF-8 text/input bytes removed by entry clipping; excludes synthetic UI markers and unknown fragments. */
+  omittedBytes?: number;
 }
 export interface TranscriptPageBoundary { position: TranscriptPosition; id?: string }
 
@@ -73,6 +75,12 @@ export interface TranscriptReaderOptions {
   maxEntries?: number;
   /** Whether a parsed record may establish the native session identity; off for tail-window replays. */
   adoptIdentity?: boolean;
+  /** Machine projection omits synthetic display markers, but keeps measured omissions. */
+  omitClipMarkers?: boolean;
+  /** Machine queries surface read failures instead of the UI's retryable empty live tail. */
+  strictReads?: boolean;
+  /** Stop retaining newly-created entries at this anchor, including siblings in the same record. */
+  beforeEntry?: (entry: TranscriptEntry) => boolean;
 }
 /** Lifetime tokens reported by the child's assistant messages, plus the latest context size. */
 export interface TranscriptUsage { input: number; output: number; cacheRead: number; cacheWrite: number; cost: number; contextTokens?: number }
@@ -85,13 +93,24 @@ const MAX_TEXT = 24_000;
 const object = (value: unknown): Record<string, any> | undefined =>
   // pi-lens-ignore: no-unsafe-dictionary-any
   value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, any> : undefined;
-const bounded = (value: string): string => value.length <= MAX_TEXT ? value : `${value.slice(0, MAX_TEXT)}\n[Content clipped; see the original event log.]`;
-function textOf(content: unknown): string {
+const CLIP_MARKER = "\n[Content clipped; see the original event log.]";
+interface TextValue { text: string; omittedBytes: number }
+/** Counts original text at the point it is lost, before a display marker can enter the value. */
+function bounded(value: string, omittedBytes = 0): TextValue {
+  let end = Math.min(value.length, MAX_TEXT);
+  if (end < value.length && /[\uD800-\uDBFF]/.test(value[end - 1]) && /[\uDC00-\uDFFF]/.test(value[end])) end--;
+  const text = value.slice(0, end);
+  return { text, omittedBytes: omittedBytes + Buffer.byteLength(value) - Buffer.byteLength(text) };
+}
+function joined(values: TextValue[]): TextValue {
+  return bounded(values.map(value => value.text).join("\n"), values.reduce((n, value) => n + value.omittedBytes, 0));
+}
+function textOf(content: unknown): TextValue {
   if (typeof content === "string") return bounded(content);
-  if (!Array.isArray(content)) return "";
+  if (!Array.isArray(content)) return bounded("");
   return bounded(content.map(part => part?.type === "text" && typeof part.text === "string" ? part.text : part?.type === "image" ? "[Image omitted from terminal transcript]" : "").filter(Boolean).join("\n"));
 }
-function argumentsOf(value: unknown): string {
+function argumentsOf(value: unknown): TextValue {
   return bounded(typeof value === "string" ? value : JSON.stringify(value ?? {}, null, 2));
 }
 const zeroUsage = (): TranscriptUsage => ({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 });
@@ -110,8 +129,13 @@ export class TranscriptReader {
   private revision = 0;
   private assistant?: TranscriptEntry;
   private user?: TranscriptEntry;
-  private blocks = new Map<number, string>();
-  private calls = new Map<number, { id: string; name: string; args: string }>();
+  private blocks = new Map<number, TextValue>();
+  private calls = new Map<number, { id: string; name: string; args: TextValue }>();
+  private omissions = new WeakMap<TranscriptEntry, Partial<Record<"text" | "input", number>>>();
+  private readonly omitClipMarkers: boolean;
+  private readonly strictReads: boolean;
+  private readonly beforeEntry?: (entry: TranscriptEntry) => boolean;
+  private boundaryReached = false;
   private clipped = false;
   private malformed = false;
   private unavailableHistory = false;
@@ -152,6 +176,9 @@ export class TranscriptReader {
     this.keys = options.keys ?? "serial";
     this.maxEntries = options.maxEntries ?? MAX_ENTRIES;
     this.adoptIdentity = options.adoptIdentity ?? true;
+    this.omitClipMarkers = options.omitClipMarkers ?? false;
+    this.strictReads = options.strictReads ?? false;
+    this.beforeEntry = options.beforeEntry;
   }
 
   /**
@@ -230,6 +257,7 @@ export class TranscriptReader {
         if (this.offset >= size && this.fileIndex < toIndex) { this.nextFile(); continue; }
         if (this.fileIndex >= toIndex || this.offset >= limit) { bound = this.fileIndex >= toIndex && this.offset >= to.offset; if (want === 0 && !bound) break; continue; }
       } catch (error) {
+        if (this.strictReads && (error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
         if (this.fileIndex < toIndex) {
           this.add({ id: `${this.fileKey()}:unavailable`, kind: "notice", title: "Unavailable historical run", text: `${file}\nEvent log unavailable: ${(error as Error).message}`, status: "error" });
           this.unavailableHistory = true;
@@ -249,6 +277,7 @@ export class TranscriptReader {
 
   /** Native identity learned from a run head; a tail record can never establish it. */
   get nativeId(): string | undefined { return this.threadId; }
+  get boundaryFound(): boolean { return this.boundaryReached; }
 
   /**
    * Raw byte position after the last read, including a partially buffered record. Callers that append
@@ -286,7 +315,7 @@ export class TranscriptReader {
   }
   /** Records the byte span of the records behind an entry, so windows can be anchored on real offsets. */
   private mark(id: string): void {
-    if (this.keys !== "position") return;
+    if (this.keys !== "position" || (this.boundaryReached && !this.entries.has(id))) return;
     const source = this.fileKey();
     const span = this.spans.get(id);
     if (span && span.end.source === source && span.end.offset === this.recordEnd) return;
@@ -457,6 +486,7 @@ export class TranscriptReader {
     this.files = []; this.fileIndex = 0; this.offset = 0; this.buffer = ""; this.bufferStart = 0;
     this.decoder = new StringDecoder("utf8"); this.droppingLine = false;
     this.entries.clear(); this.spans.clear(); this.assistant = undefined; this.user = undefined;
+    this.boundaryReached = false;
     this.blocks.clear(); this.calls.clear(); this.clipped = false; this.malformed = false; this.unavailableHistory = false; this.error = undefined;
     this.usage = undefined; this.provider = undefined; this.model = undefined;
     this.rangeFrom = undefined; this.rangeTo = undefined; this.tailContinues = false; this.currentContinues = false; this.inRecord = false;
@@ -475,7 +505,21 @@ export class TranscriptReader {
       ...(this.usage ? { usage: { ...this.usage } } : {}), ...(this.provider ? { provider: this.provider } : {}), ...(this.model ? { model: this.model } : {}),
       ...(this.keys === "position" && from ? { window: { from: { ...from }, to: { ...(this.rangeTo ?? from) }, atStart: false, atEnd: false, entries: this.entries.size } } : {}) };
   }
+  private setText(entry: TranscriptEntry, value: TextValue, field: "text" | "input" = "text"): void {
+    const fields = this.omissions.get(entry) ?? {};
+    fields[field] = value.omittedBytes;
+    this.omissions.set(entry, fields);
+    entry[field] = value.text + (!this.omitClipMarkers && value.omittedBytes ? CLIP_MARKER : "");
+    const total = (fields.text ?? 0) + (fields.input ?? 0);
+    if (total) entry.omittedBytes = total; else delete entry.omittedBytes;
+  }
+  private textValue(entry: TranscriptEntry): TextValue {
+    const omittedBytes = this.omissions.get(entry)?.text ?? 0;
+    return { text: !this.omitClipMarkers && omittedBytes ? entry.text.slice(0, -CLIP_MARKER.length) : entry.text, omittedBytes };
+  }
   private add(entry: TranscriptEntry): TranscriptEntry {
+    if (this.beforeEntry?.(entry)) { this.boundaryReached = true; return entry; }
+    if (this.boundaryReached && !this.entries.has(entry.id)) return entry;
     this.revision++;
     if (this.keys === "position" && this.inRecord && this.currentContinues) entry.partial = "head";
     this.entries.set(entry.id, entry);
@@ -518,7 +562,7 @@ export class TranscriptReader {
     const entry = existing ?? this.add({ id: key, kind: "tool", title: name, text: "", status: "running" });
     if (existing) this.mark(key);
     if (name) entry.title = name;
-    if (args !== undefined) entry.input = argumentsOf(args);
+    if (args !== undefined) this.setText(entry, argumentsOf(args), "input");
     return entry;
   }
   // pi-lens-ignore: no-unsafe-dictionary-any
@@ -529,21 +573,26 @@ export class TranscriptReader {
         this.blocks.clear(); this.calls.clear();
       }
       if (!this.entries.has(this.assistant.id)) this.add(this.assistant);
-      this.assistant.text = textOf(message.content);
+      this.setText(this.assistant, textOf(message.content));
       for (const part of Array.isArray(message.content) ? message.content : []) {
         if (part?.type === "toolCall" && typeof part.id === "string") this.tool(part.id, part.name ?? "tool", part.arguments);
       }
-      if (typeof message.errorMessage === "string") this.assistant.text += `\n${bounded(message.errorMessage)}`;
+      if (typeof message.errorMessage === "string") {
+        const prior = this.textValue(this.assistant), error = bounded(message.errorMessage), displayed = this.assistant.text;
+        this.setText(this.assistant, { text: prior.text + "\n" + error.text, omittedBytes: prior.omittedBytes + error.omittedBytes });
+        // Keep the existing UI's separately-clipped error suffix, without counting its markers as source text.
+        if (!this.omitClipMarkers) this.assistant.text = displayed + "\n" + error.text + (error.omittedBytes ? CLIP_MARKER : "");
+      }
       this.mark(this.assistant.id);
       if (type === "message_end") { this.countUsage(message); this.assistant = undefined; }
     } else if (message.role === "user") {
       if (!this.user || type === "message_start") this.user = this.add({ id: this.key("user"), kind: "user", title: "User", text: "" });
-      this.user.text = textOf(message.content);
+      this.setText(this.user, textOf(message.content));
       this.mark(this.user.id);
       if (type === "message_end") this.user = undefined;
     } else if (message.role === "toolResult" && typeof message.toolCallId === "string") {
       const entry = this.tool(message.toolCallId, message.toolName ?? "tool");
-      entry.text = textOf(message.content); entry.status = message.isError ? "error" : "done";
+      this.setText(entry, textOf(message.content)); entry.status = message.isError ? "error" : "done";
       this.mark(entry.id);
     }
   }
@@ -594,30 +643,32 @@ export class TranscriptReader {
     }
     if (record.method === "item/agentMessage/delta" && typeof p.itemId === "string" && typeof p.delta === "string") {
       const entry = this.codexItem(p.itemId, "assistant", "Assistant");
-      entry.text = bounded(entry.text + p.delta);
+      const prior = this.textValue(entry);
+      this.setText(entry, bounded(prior.text + p.delta, prior.omittedBytes));
       this.mark(entry.id);
       return;
     }
     if (record.method === "item/commandExecution/outputDelta" && typeof p.itemId === "string" && typeof p.delta === "string") {
       const entry = this.codexItem(p.itemId, "tool", "Shell command");
-      entry.text = bounded(entry.text + p.delta);
+      const prior = this.textValue(entry);
+      this.setText(entry, bounded(prior.text + p.delta, prior.omittedBytes));
       this.mark(entry.id);
       return;
     }
     if (!item || typeof item.id !== "string") return;
     if (record.method === "item/completed" && item.type === "userMessage") {
-      const entry = this.codexItem(item.id, "user", "User"); entry.text = textOf(item.content); this.mark(entry.id);
+      const entry = this.codexItem(item.id, "user", "User"); this.setText(entry, textOf(item.content)); this.mark(entry.id);
     } else if (item.type === "agentMessage" && record.method === "item/completed") {
       const entry = this.codexItem(item.id, "assistant", "Assistant");
-      if (typeof item.text === "string") entry.text = bounded(item.text);
+      if (typeof item.text === "string") this.setText(entry, bounded(item.text));
       this.mark(entry.id);
     } else if (["item/started", "item/completed"].includes(record.method) && ["commandExecution", "fileChange"].includes(item.type)) {
       const command = item.type === "commandExecution";
       const entry = this.codexItem(item.id, "tool", command ? "Shell command" : "File change");
       const input = command ? { command: item.command, cwd: item.cwd } : item.changes;
-      if (input !== undefined) entry.input = argumentsOf(input);
+      if (input !== undefined) this.setText(entry, argumentsOf(input), "input");
       entry.status = record.method === "item/started" ? "running" : ["failed", "declined"].includes(item.status) ? "error" : "done";
-      if (command && record.method === "item/completed" && typeof item.aggregatedOutput === "string") entry.text = bounded(item.aggregatedOutput);
+      if (command && record.method === "item/completed" && typeof item.aggregatedOutput === "string") this.setText(entry, bounded(item.aggregatedOutput));
       this.mark(entry.id);
     }
   }
@@ -628,8 +679,8 @@ export class TranscriptReader {
     if (!this.threadId || record.session_id !== undefined && record.session_id !== this.threadId) return;
     if (record.type === "system" && record.subtype === "init" && typeof record.model === "string") this.model = record.model;
     if (record.type === "control_request" && record.request?.subtype === "can_use_tool") {
-      this.add({ id: this.scoped("claude-permission", String(record.request_id)), kind: "notice", title: "Claude tool permission",
-        text: argumentsOf(record.request) });
+      const entry = this.add({ id: this.scoped("claude-permission", String(record.request_id)), kind: "notice", title: "Claude tool permission", text: "" });
+      this.setText(entry, argumentsOf(record.request));
       return;
     }
     const message = object(record.message);
@@ -644,15 +695,16 @@ export class TranscriptReader {
       const index = event.index;
       if (event.type === "content_block_start" && event.content_block?.type === "tool_use") {
         const block = event.content_block;
-        this.calls.set(index, { id: block.id, name: block.name, args: "" }); this.tool(block.id, block.name, block.input);
+        this.calls.set(index, { id: block.id, name: block.name, args: bounded("") }); this.tool(block.id, block.name, block.input);
       }
       if (event.type === "content_block_delta" && event.delta?.type === "text_delta" && typeof event.delta.text === "string") {
-        this.blocks.set(index, bounded((this.blocks.get(index) ?? "") + event.delta.text));
-        this.assistant.text = bounded([...this.blocks].sort((a, b) => a[0] - b[0]).map(([, text]) => text).join("\n"));
+        const prior = this.blocks.get(index);
+        this.blocks.set(index, bounded((prior?.text ?? "") + event.delta.text, prior?.omittedBytes));
+        this.setText(this.assistant, joined([...this.blocks].sort((a, b) => a[0] - b[0]).map(([, text]) => text)));
       }
       if (event.type === "content_block_delta" && event.delta?.type === "input_json_delta") {
         const call = this.calls.get(index);
-        if (call && typeof event.delta.partial_json === "string") { call.args = bounded(call.args + event.delta.partial_json); this.tool(call.id, call.name, call.args); }
+        if (call && typeof event.delta.partial_json === "string") { call.args = bounded(call.args.text + event.delta.partial_json, call.args.omittedBytes); this.setText(this.tool(call.id, call.name), call.args, "input"); }
       }
       this.mark(this.assistant.id);
     }
@@ -661,25 +713,25 @@ export class TranscriptReader {
       const id = this.scoped("claude", message.id);
       this.assistant = this.entries.get(id) ?? this.add({ id, kind: "assistant", title: "Assistant", text: "" });
       const text = textOf(message.content);
-      if (text) this.assistant.text = text;
+      if (text.text) this.setText(this.assistant, text);
       for (const part of Array.isArray(message.content) ? message.content : []) if (part?.type === "tool_use" && typeof part.id === "string") this.tool(part.id, part.name ?? "tool", part.input);
       this.mark(this.assistant.id);
     }
     if (record.type === "user" && message) {
       const text = textOf(message.content);
-      if (text) this.add({ id: this.scoped("claude-user", String(record.uuid)), kind: "user", title: "User", text });
+      if (text.text) this.setText(this.add({ id: this.scoped("claude-user", String(record.uuid)), kind: "user", title: "User", text: "" }), text);
       for (const part of Array.isArray(message.content) ? message.content : []) if (part?.type === "tool_result" && typeof part.tool_use_id === "string") {
-        const tool = this.tool(part.tool_use_id, ""); tool.text = textOf(part.content); tool.status = part.is_error ? "error" : "done";
+        const tool = this.tool(part.tool_use_id, ""); this.setText(tool, textOf(part.content)); tool.status = part.is_error ? "error" : "done";
         this.mark(tool.id);
       }
     }
     if (record.type === "result") {
       const failed = record.is_error || record.subtype !== "success";
       const text = typeof record.result === "string" ? record.result : Array.isArray(record.errors) ? record.errors.filter((value: unknown) => typeof value === "string").join("\n") : "";
-      if (text && (failed || text !== this.assistant?.text)) this.add({
+      if (text && (failed || text !== this.assistant?.text)) this.setText(this.add({
         id: this.scoped("claude-result", String(record.uuid)), kind: failed ? "notice" : "assistant", title: failed ? "Claude error" : "Final response",
-        text: bounded(text), ...(failed ? { status: "error" } : {}),
-      });
+        text: "", ...(failed ? { status: "error" as const } : {}),
+      }), bounded(text));
       const models = object(record.modelUsage);
       if (!models) return;
       const total = zeroUsage();
@@ -711,15 +763,16 @@ export class TranscriptReader {
       const index = Number(update.contentIndex);
       if (!Number.isInteger(index) || index < 0) return;
       if (update.type === "text_delta" || update.type === "text_end") {
-        const text = update.type === "text_end" ? update.content : (this.blocks.get(index) ?? "") + (update.delta ?? "");
-        if (typeof text === "string") this.blocks.set(index, bounded(text));
-        this.assistant!.text = bounded([...this.blocks].sort((a, b) => a[0] - b[0]).map(([, text]) => text).join("\n"));
+        const prior = this.blocks.get(index);
+        const text = update.type === "text_end" ? update.content : (prior?.text ?? "") + (update.delta ?? "");
+        if (typeof text === "string") this.blocks.set(index, bounded(text, update.type === "text_end" ? 0 : prior?.omittedBytes));
+        this.setText(this.assistant!, joined([...this.blocks].sort((a, b) => a[0] - b[0]).map(([, text]) => text)));
       } else if (update.type === "toolcall_start" && typeof update.id === "string") {
-        this.calls.set(index, { id: update.id, name: update.toolName ?? "tool", args: "" });
+        this.calls.set(index, { id: update.id, name: update.toolName ?? "tool", args: bounded("") });
         this.tool(update.id, update.toolName ?? "tool");
       } else if (update.type === "toolcall_delta") {
         const call = this.calls.get(index);
-        if (call && typeof update.delta === "string") { call.args = bounded(call.args + update.delta); this.tool(call.id, call.name, call.args); }
+        if (call && typeof update.delta === "string") { call.args = bounded(call.args.text + update.delta, call.args.omittedBytes); this.setText(this.tool(call.id, call.name), call.args, "input"); }
       } else if (update.type === "toolcall_end" && object(update.toolCall)) {
         const call = update.toolCall;
         if (typeof call.id === "string") this.tool(call.id, call.name ?? "tool", call.arguments);
@@ -729,14 +782,15 @@ export class TranscriptReader {
     }
     if (["tool_execution_start", "tool_execution_update", "tool_execution_end"].includes(record.type) && typeof record.toolCallId === "string") {
       const entry = this.tool(record.toolCallId, record.toolName ?? "tool", record.args);
-      if (record.type === "tool_execution_update") entry.text = textOf(record.partialResult?.content);
-      if (record.type === "tool_execution_end") { entry.text = textOf(record.result?.content); entry.status = record.isError ? "error" : "done"; }
+      if (record.type === "tool_execution_update") this.setText(entry, textOf(record.partialResult?.content));
+      if (record.type === "tool_execution_end") { this.setText(entry, textOf(record.result?.content)); entry.status = record.isError ? "error" : "done"; }
       this.mark(entry.id);
     } else if (record.type === "extension_ui_request" && ["select", "confirm", "input", "editor"].includes(record.method)) {
-      this.add({ id: this.scoped("question", String(record.id)), kind: "notice", title: `Interaction request (${record.method})`,
-        text: bounded([record.title, record.message, Array.isArray(record.options) ? `Options: ${record.options.join(" | ")}` : undefined].filter(value => typeof value === "string").join("\n")) });
+      const entry = this.add({ id: this.scoped("question", String(record.id)), kind: "notice", title: `Interaction request (${record.method})`, text: "" });
+      this.setText(entry, bounded([record.title, record.message, Array.isArray(record.options) ? `Options: ${record.options.join(" | ")}` : undefined].filter(value => typeof value === "string").join("\n")));
     } else if (record.type === "extension_error" || record.type === "auto_retry_start") {
-      this.add({ id: this.key("notice"), kind: "notice", title: record.type === "extension_error" ? "Extension error" : "Retry", text: bounded(String(record.error ?? record.errorMessage ?? "")), status: "error" });
+      const entry = this.add({ id: this.key("notice"), kind: "notice", title: record.type === "extension_error" ? "Extension error" : "Retry", text: "", status: "error" });
+      this.setText(entry, bounded(String(record.error ?? record.errorMessage ?? "")));
     }
   }
 }

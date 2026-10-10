@@ -11,7 +11,7 @@ Use four tools with separate responsibilities, exposing the role catalog directl
 | New tool | Operations | Existing capability source |
 |---|---|---|
 | `subagent` | `start` / `send` / `interrupt` / `stop` | `spawn_agent` / `send_input` / `close_agent` |
-| `subagent_query` | `list` / `get` / `result` | The three reading modes of `list_agents` |
+| `subagent_query` | `list` / `get` / `result` / `activity` | Existing inventory/result reads plus bounded projected history |
 | `subagent_reply` | Answer one specific request; no action required | `respond_to_permission` |
 | `subagent_workspace` | `create` / `integrate` | `create_workspace` / `integrate_workspace` |
 
@@ -94,12 +94,21 @@ The example role name does not require the extension to provide that built-in ro
 | `list` | None | None | Compact metadata for this parent's instances and the managed-workspace inventory, without report bodies |
 | `get` | `id` | None | State, recent task history, pending requests and a bounded result preview for the specified instance |
 | `result` | `id`, `runId` | `offset`, `limit` | Pages of the specified run's original final report |
+| `activity` | `id` | `cursor`, `limit`, `maxBytes` | Recent projected entries, then older pages via the returned cursor |
 
 Keep the workspace inventory in `list` so reusable workspaces and their occupation can be discovered without a fifth listing tool. `get` may include necessary information about the instance's associated workspace; do not add cross-parent-session scanning.
 
 The result action retains the current pagination contract: offset defaults to 0; limit defaults to and cannot exceed 6000 UTF-16 code units. Return `agentId`, `runId`, `status`, `time`, `error`, `offset`, `totalLength`, `nextOffset` and `text`. Keep id/runId fixed and follow nextOffset until null.
 
 Reject missing, corrupt, cross-instance or cross-parent-session results. A missing original report cannot be replaced with the current latest result. Reading must not start, wake or stop an instance, or approve an operation. Neither a result preview nor terminal state proves acceptance of the business outcome.
+
+### Activity paging
+
+Activity uses the same pure transcript reader as the viewer, not a raw transport dump. It returns `{ id, entries, hasMore, cursor?, notice? }`; entries are chronological within each page and only recognized messages, tool activity and notices are projected. `limit` defaults to 20 and must be 1–100. `maxBytes` defaults to 16384 and must be 4096–65536; the limit covers the entire JSON response in UTF-8, including cursor and metadata. Invalid limits are errors, not silently clamped values.
+
+The first call reads a bounded recent tail. Pass the returned opaque cursor unchanged to read older entries; no cursor means a new recent-tail query. Versioned cursors bind the instance/backend and a real log byte position with a bounded file-identity/anchor witness. Foreign, malformed or detected stale cursors fail rather than silently jumping to the tail. Normal append-only growth remains valid. This is not a whole-history integrity check: arbitrary far-away in-place edits outside the witness are not guaranteed detectable. No cursor store, CLI startup/resume, native-history rewrite or background scan is introduced.
+
+Byte trimming keeps dropped older entries reachable through the next cursor, following [Lody's pinned history-page contract](https://github.com/LodyAI/Lody/blob/6dc434952ab2e942291cc8392316bf760afbdaf0/apps/cli/src/mcp/session-history-page.ts) with local byte positions instead of Loro indices. Long entries carry `truncated`/`omittedBytes`: measured UTF-8 losses from normalized text/formatted input, plus page-level title/text/input clipping. Synthetic markers, unknown fragments and skipped records are not counted as measured source loss; machine pages omit UI clip markers. `partial` identifies a group cut by a read boundary, while `notice` separately exposes skipped, malformed or unavailable records. A long group may recur on intermediate pages with the same entry ID and `partial: "head"`; group duplicates by ID and prefer a complete version when available, but do not concatenate fragments and claim a reconstructed full result. A bounded activity page is not a complete final answer; use `result` with the original run identity for that. Cancellation rejects instead of publishing a partial success page.
 
 ## 4. `subagent_reply`: answer a specific request
 

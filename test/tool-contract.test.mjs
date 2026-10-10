@@ -9,7 +9,7 @@ function harness() {
   const tools = new Map();
   extension({ on() {}, registerTool: tool => tools.set(tool.name, tool), registerCommand() {}, registerShortcut() {}, registerMessageRenderer() {} });
   const ctx = { cwd: process.cwd(), isProjectTrusted: () => false, sessionManager: { getSessionFile: () => '/fixture/parent.jsonl' } };
-  return { tools, invoke: (name, args) => tools.get(name).execute('contract', args, undefined, undefined, ctx) };
+  return { tools, ctx, invoke: (name, args) => tools.get(name).execute('contract', args, undefined, undefined, ctx) };
 }
 
 test('only four root-object tools are exposed; old command names are not aliases', () => {
@@ -35,6 +35,11 @@ test('action validation refuses missing, irrelevant and unknown fields before ru
     ['subagent_query', { action: 'list', id: 'old' }, /id/],
     ['subagent_query', { action: 'get', id: 'old', runId: 'old-run' }, /runId/],
     ['subagent_query', { action: 'result', id: 'old' }, /runId/],
+    ['subagent_query', { action: 'activity' }, /id/],
+    ['subagent_query', { action: 'activity', id: 'old', runId: 'run' }, /runId/],
+    ['subagent_query', { action: 'activity', id: 'old', offset: 0 }, /offset/],
+    ['subagent_query', { action: 'get', id: 'old', cursor: 'cursor' }, /cursor/],
+    ['subagent_query', { action: 'result', id: 'old', runId: 'run', maxBytes: 4096 }, /maxBytes/],
     ['subagent_query', { action: 'other' }, /action/],
     ['subagent_workspace', { action: 'create', workspace: 'old' }, /workspace/],
     ['subagent_workspace', { action: 'integrate' }, /workspace/],
@@ -67,6 +72,17 @@ test('the stop and workspace actions retain the existing runtime operation and t
     ['create', process.cwd(), { includeUncommitted: { reason: 'explicit authorization' } }],
     ['integrate', 'workspace'],
   ]);
+});
+
+test('activity tool forwards the exact query and cancellation signal without adding an envelope', async t => {
+  const {tools,ctx}=harness(),controller=new AbortController(),expected={id:'a',entries:[],hasMore:false};
+  const args={action:'activity',id:'a',cursor:'opaque',limit:3,maxBytes:4096};
+  assert.deepEqual(validateToolArguments(tools.get('subagent_query'),{id:'read',name:'subagent_query',arguments:args}),args);
+  t.mock.method(AgentManager.prototype,'activity',async(id,options)=>{
+    assert.equal(id,'a');assert.deepEqual(options,{cursor:'opaque',limit:3,maxBytes:4096,signal:controller.signal});return expected;
+  });
+  const result=await tools.get('subagent_query').execute('read',args,controller.signal,undefined,ctx);
+  assert.deepEqual(JSON.parse(result.content[0].text),expected);
 });
 
 test('query actions are read-only projections and result uses exact run identity', async t => {

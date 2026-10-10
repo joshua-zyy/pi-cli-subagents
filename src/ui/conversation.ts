@@ -1,7 +1,7 @@
 import { Input, Markdown, matchesKey, stripTerminalSequences, truncateToWidth, visibleWidth, type KeyId, type KeybindingsManager } from "@earendil-works/pi-tui";
 import type { AgentView } from "../types.js";
 import type { PanelAction } from "./panel.js";
-import type { TranscriptEntry, TranscriptPageBoundary, TranscriptSnapshot } from "./transcript.js";
+import type { TranscriptEntry, TranscriptPageBoundary, TranscriptSnapshot } from "../transcript.js";
 import { ConversationHistory } from "./conversation-history.js";
 import { canInterrupt, canMessage, canResume, canStop, formatElapsed, formatTokens, hasFailure, isActive, oneLine, rightAlign, shortId, viewElapsed, viewStatus } from "./format.js";
 

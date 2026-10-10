@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { ConversationViewer } from '../dist/ui/conversation.js';
-import { TranscriptWindow } from '../dist/ui/transcript-window.js';
+import { TranscriptWindow } from '../dist/transcript-window.js';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 
