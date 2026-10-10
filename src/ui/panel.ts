@@ -6,6 +6,7 @@ export type PanelAction =
   | { kind: "view"; id: string }
   | { kind: "message"; id: string; resume: boolean; message?: string }
   | { kind: "stop"; id: string }
+  | { kind: "close-idle"; targets: AgentView[] }
   | { kind: "interrupt"; id: string }
   | { kind: "reply"; id: string; questionId: string };
 
@@ -43,6 +44,7 @@ const isText = (value: string | undefined): value is string => typeof value === 
  */
 export class AgentsPanel {
   private readonly agents: AgentView[];
+  private readonly idleTargets: AgentView[];
   private readonly now: number;
   private readonly maxRows: number;
   private readonly rowLimit: () => number;
@@ -63,6 +65,8 @@ export class AgentsPanel {
   ) {
     this.agents = [...(Array.isArray(agents) ? agents : [])]
       .sort((a, b) => (a.startedAt ?? a.updatedAt) - (b.startedAt ?? b.updatedAt));
+    this.idleTargets = this.agents.filter(agent => agent.phase === "idle" && agent.protocolVersion === 2
+      && !!agent.runtimeId && agent.questions.length === 0);
     this.now = options.now ?? Date.now();
     this.maxRows = options.maxRows ?? PANEL_MAX_ROWS;
     this.frameColor = options.frameColor;
@@ -92,6 +96,7 @@ export class AgentsPanel {
     const agent = this.agents[this.index];
     if (agent && matchesKey(data, "t") && canInterrupt(agent)) { this.finish({ kind: "interrupt", id: agent.id }); return; }
     if (this.view === "list") {
+      if (matchesKey(data, "c") && this.idleTargets.length) { this.finish({ kind: "close-idle", targets: this.idleTargets }); return; }
       if (matchesKey(data, "up")) this.index = Math.max(0, this.index - 1);
       else if (matchesKey(data, "down")) this.index = Math.min(this.agents.length - 1, this.index + 1);
       else if (agent && (matchesKey(data, "return") || matchesKey(data, "v"))) this.finish({ kind: "view", id: agent.id });
@@ -160,6 +165,7 @@ export class AgentsPanel {
     const selected = Math.min(this.index, this.agents.length - 1);
     const hints: [string, string][] = [["↑↓", "select"], ["enter/v", "conversation"], ["i", "details"], ["esc", "close"]];
     if (canInterrupt(this.agents[selected])) hints.unshift(["t", "interrupt"]);
+    if (this.idleTargets.length) hints.unshift(["c", `release idle (${this.idleTargets.length})`]);
     lines.push(this.hint(hints));
     const room = this.room;
     // Title and hints are fixed; the two "more" indicators give way to agents when the pane is short.

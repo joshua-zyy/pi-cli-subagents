@@ -549,6 +549,34 @@ ${view(state)}`);
               if (epoch !== sessionEpoch) return;
               if (!action || action.kind === "view") { if (fromFleet) return; continue; }
             }
+            if (action.kind === "close-idle") {
+              const targets = action.targets;
+              if (!targets.length) continue;
+              const confirmed = await ctx.ui.confirm("Release idle subagent processes?", targets
+                .map(target => `${oneLine(target.role, 120)} ${target.id} (run ${target.runId})`).join("\n")
+                + "\n\nRelease only these captured idle runtimes. This can stop background work; sessions, files and completed results are retained. Changed or busy targets are refused, not retried.");
+              if (!confirmed || epoch !== sessionEpoch) continue;
+              const outcomes: string[] = [];
+              let uncertain = false;
+              for (const target of targets) {
+                if (epoch !== sessionEpoch) return;
+                let result = target, message: string;
+                try {
+                  result = await manager.close(target.id, true, { runId: target.runId, runtimeId: target.runtimeId! });
+                  message = receiptText(result);
+                  if (result.receipt?.status !== "released") uncertain = true;
+                } catch (error) {
+                  uncertain = true;
+                  message = `Idle release request unconfirmed: ${(error as Error).message}\nInspect before retrying.`;
+                }
+                // Use the captured target on refusal, not a later run from a fresh list.
+                recordHumanAction(ctx, manager, result, `Batch idle release: ${message}`, epoch);
+                outcomes.push(`${oneLine(target.role, 120)} ${target.id}: ${message}`);
+              }
+              if (epoch !== sessionEpoch) return;
+              ctx.ui.notify(outcomes.join("\n"), uncertain ? "warning" : "info");
+              continue;
+            }
             // Re-read state before acting: the list is a snapshot, not an authorization or lifecycle guarantee.
             const state = manager.get(action.id);
             if (action.kind === "reply") { await replyPrompt(ctx, manager, action.id, action.questionId); if (fromFleet) return; continue; }
@@ -597,7 +625,7 @@ ${view(state)}`);
       }
   }
   pi.registerCommand("agents", {
-    description: "Manage subagents: view conversations and last run outcomes, message, start an idle task, resume, reply, interrupt a turn or release processes",
+    description: "Manage subagents: view conversations and last run outcomes, message, start an idle task, resume, reply, interrupt a turn or release processes (including a confirmed idle-only batch)",
     handler: (_args, ctx) => openAgents(ctx),
   });
 

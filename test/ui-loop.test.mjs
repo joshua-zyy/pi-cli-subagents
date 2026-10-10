@@ -231,6 +231,38 @@ test('roster pane resumes the original session, confirms stops, and rejects non-
   assert.match(h.notices.at(-1).message, /TUI/);
 });
 
+test('idle batch refuses a newly busy captured target, releases its idle sibling and preserves every original report', { timeout: 35000 }, async t => {
+  const h = harness(t); h.start();
+  const a = await h.spawn('first result'), first = await waitForIdle(h.manager, a.id);
+  const b = await h.spawn('second result'), second = await waitForIdle(h.manager, b.id);
+  const active = await h.spawn('HOLD active'), waiting = await h.spawn('WAIT');
+  await waitUntil('mixed running and waiting roster', () => h.manager.get(active.id).phase === 'running' && h.manager.get(waiting.id).phase === 'waiting');
+  const results = [first, second].map(state => JSON.stringify(h.manager.getResult(state.id, state.runId)));
+  h.ctx.ui.confirm = async (title, message) => {
+    h.state.confirms.push({ title, message });
+    assert.match(title, /idle/i); assert(message.includes(a.id)); assert(message.includes(b.id));
+    assert(!message.includes(active.id)); assert(!message.includes(waiting.id));
+    // New work starts only after the UI has captured and displayed its candidate set.
+    await h.manager.send(a.id, 'HOLD new run after list');
+    return true;
+  };
+  const pane = await h.openAgents();
+  assert.match(pane.render(140), /c.*release idle/i);
+  await pane.press('c'); await pane.press(keys.escape); await pane.running;
+  assert.equal(h.confirms.length, 1);
+  const current = h.manager.get(a.id);
+  assert.equal(current.phase, 'running'); assert.notEqual(current.runId, first.runId); assert.equal(current.runtimeId, first.runtimeId);
+  assert.equal(h.manager.get(b.id).phase, 'closed');
+  assert.equal(h.manager.get(active.id).phase, 'running'); assert.equal(h.manager.get(waiting.id).phase, 'waiting');
+  assert.deepEqual([first, second].map(state => JSON.stringify(h.manager.getResult(state.id, state.runId))), results);
+  const human = h.messages.filter(entry => entry.message.customType === 'cli-subagents-human-action');
+  assert.equal(human.length, 2); assert(human.every(entry => entry.options.triggerTurn === false));
+  assert.equal(human.find(entry => entry.message.details.agentId === a.id).message.details.runId, first.runId);
+  assert.match(human.find(entry => entry.message.details.agentId === a.id).message.content, /unconfirmed/i);
+  assert.match(human.find(entry => entry.message.details.agentId === b.id).message.content, /Native processes released/);
+  assert(h.notices.some(notice => notice.type === 'warning' && notice.message.includes(a.id) && notice.message.includes(b.id)));
+});
+
 function commands0(h) { return h.commands.get('agents').handler('', h.ctx); }
 
 test('direct human actions are recorded for the parent without interrupting it', { timeout: 30_000 }, async (t) => {

@@ -267,8 +267,7 @@ export class AgentManager {
     return new Error(`${operation} for subagent ${id}${state ? `, run ${state.runId}, runtime ${state.runtimeId ?? "legacy"}` : ""}: ${error instanceof Error ? error.message : String(error)}`);
   }
 
-  private async request(id: string, input: Control): Promise<ControlResult> {
-    const state = this.get(id);
+  private async request(id: string, input: Control, state: AgentView = this.get(id)): Promise<ControlResult> {
     try {
       if (!processAlive(state.workerPid)) throw new Error("Worker has exited; inspect the final state");
       const endpoint = readJson<Endpoint>(path.join(this.directory(id), "endpoint.json"));
@@ -372,14 +371,21 @@ export class AgentManager {
     } catch (error) { throw this.diagnostic(id, "interrupt", error, state); }
   }
 
-  async close(id: string, onlyIdle = false): Promise<AgentView> {
+  async close(id: string, onlyIdle = false, expected?: { runId: string; runtimeId: string }): Promise<AgentView> {
     const state = this.get(id);
     try {
       if (state.phase === "unreachable" && (!state.runtimeId || !processAlive(state.workerPid))) throw new Error(state.error);
+      if (expected && (!onlyIdle || state.protocolVersion !== 2 || state.runId !== expected.runId || state.runtimeId !== expected.runtimeId))
+        throw new Error(`Captured idle run ${expected.runId}, runtime ${expected.runtimeId} no longer matches; it was not closed`);
       if (onlyIdle && state.phase !== "idle") throw new Error("Runtime is no longer idle; it was not closed");
-      if (!["completed", "failed", "stopped", "stopping", "closed"].includes(state.phase)) await this.request(id, { type: "close", ...(onlyIdle ? { onlyIdle: true } : {}) });
+      // Keep the checked idle snapshot bound through endpoint selection; the worker
+      // rechecks its token and idle state inside the existing control queue.
+      if (!["completed", "failed", "stopped", "stopping", "closed"].includes(state.phase))
+        await this.request(id, { type: "close", ...(onlyIdle ? { onlyIdle: true } : {}) }, onlyIdle ? state : undefined);
       await this.waitForRelease(state, "Subagent shutdown", 30_000);
       const result = this.get(id);
+      if (onlyIdle && (result.runId !== state.runId || result.runtimeId !== state.runtimeId))
+        throw new Error("Idle release confirmation identity changed; inspect before retrying");
       const confirmed = result.protocolVersion === 2 && result.runtimeId === state.runtimeId && result.runtimeClosed === true && result.phase === "closed";
       return { ...result, receipt: { operation: "stop", status: confirmed ? "released" : "unconfirmed", runId: result.runId,
         ...(result.runtimeId ? { runtimeId: result.runtimeId } : {}) } };

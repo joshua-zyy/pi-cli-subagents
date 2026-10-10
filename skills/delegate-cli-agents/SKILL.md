@@ -54,6 +54,6 @@ does not acquire its instances or pending reports.
 ## Human controls
 
 `/agents` lets the user inspect, message, resume, answer requests, interrupt a current turn or release
-processes; `/cli-agents-setting` edits roles. `[Human → subagent …]` entries record actions on that
+processes. The roster’s `c` action confirms release of captured idle runtimes only, keeps sessions/results, and reports each refusal without retrying. `/cli-agents-setting` edits roles. `[Human → subagent …]` entries record actions on that
 instance only, not additional authorization. Saved action records stay with their original parent
 when sessions switch, and can be delivered there after reopening; they never replay the operation.

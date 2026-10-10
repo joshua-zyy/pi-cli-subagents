@@ -18,6 +18,35 @@ function panel(agents, options = {}) {
 }
 const text = rows => rows.join('\n');
 
+test('c captures only eligible idle runtimes even while an active row is selected', () => {
+  const eligible = view({ id: 'idle', phase: 'idle', protocolVersion: 2, runtimeId: 'runtime' });
+  const agents = [view(), eligible, view({ phase: 'closed', protocolVersion: 2, runtimeId: 'closed' }),
+    view({ phase: 'idle' }), view({ phase: 'idle', protocolVersion: 2 }),
+    view({ phase: 'waiting', protocolVersion: 2, runtimeId: 'waiting' }),
+    view({ phase: 'idle', protocolVersion: 2, runtimeId: 'question', questions: [{ id: 'q', isBlocking: false }] })];
+  const p = panel(agents);
+  assert.match(text(p.render()), /c release idle/);
+  p.instance.handleInput('c'); p.instance.handleInput('c'); p.instance.handleInput(keys.escape);
+  assert.deepEqual(p.actions, [{ kind: 'close-idle', targets: [eligible] }]);
+});
+
+test('c is absent without eligible targets and never acts inside details', () => {
+  const empty = panel([view({ phase: 'idle' })]);
+  assert.doesNotMatch(text(empty.render()), /c release idle/); empty.instance.handleInput('c'); assert.equal(empty.actions.length, 0);
+  const p = panel([view({ phase: 'idle', protocolVersion: 2, runtimeId: 'runtime' })]);
+  p.instance.handleInput('i'); p.instance.handleInput('c'); assert.equal(p.actions.length, 0);
+  p.instance.handleInput(keys.escape); p.instance.handleInput('q'); assert.deepEqual(p.actions, [undefined]);
+});
+
+test('idle batch hint keeps selection and small-pane dimensions intact', () => {
+  for (const width of [26, 40, 80]) for (const rows of [6, 8, 12]) {
+    const p = panel([view(), view({ phase: 'idle', protocolVersion: 2, runtimeId: 'runtime' })], { rows });
+    const rendered = p.framed(width);
+    assert(rendered.length <= rows); assert(rendered.every(row => visibleWidth(row) <= width && !row.includes('\n')));
+    assert.match(text(rendered), /c release idle/); assert.match(text(rendered), /›/);
+  }
+});
+
 test('the pane is framed like the role editor, in every view', () => {
   const p = panel([view()]);
   for (const rows of [p.framed(100), p.framed(40)]) {

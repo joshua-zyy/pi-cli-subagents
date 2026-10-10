@@ -180,6 +180,54 @@ test('v2 rejects legacy control and stale runtime/run identities without stoppin
   assert.equal(m.get(child.id).phase, 'running');
 });
 
+test('captured idle release refuses a newer run or runtime and preserves completed reports', { timeout: 20000 }, async t => {
+  const { cwd, m } = setup(t); const child = await m.spawn('worker', role, cwd, 'REMEMBER original');
+  const first = await idle(m, child.id), expected = { runId: first.runId, runtimeId: first.runtimeId };
+  const report = JSON.stringify(m.getResult(child.id, first.runId));
+  await m.send(child.id, 'HOLD newer');
+  await assert.rejects(m.close(child.id, true, expected), /idle|captured/i);
+  assert.equal(m.get(child.id).phase, 'running');
+  await m.interrupt(child.id); const next = await idle(m, child.id, 'stopped');
+  await assert.rejects(m.close(child.id, true, expected), /captured.*no longer matches/i);
+  await assert.rejects(m.close(child.id, true, { runId: next.runId, runtimeId: randomUUID() }), /captured.*no longer matches/i);
+  assert.equal(m.get(child.id).phase, 'idle'); assert(processAlive(next.cliPid));
+  receipt(await m.close(child.id, true, { runId: next.runId, runtimeId: next.runtimeId }), 'stop', 'released');
+  assert.equal(JSON.stringify(m.getResult(child.id, first.runId)), report);
+  await m.send(child.id, 'REMEMBER replacement'); const replacement = await idle(m, child.id);
+  assert.notEqual(replacement.runtimeId, first.runtimeId);
+  await assert.rejects(m.close(child.id, true, expected), /captured.*no longer matches/i);
+  assert.equal(m.get(child.id).phase, 'idle'); assert(processAlive(replacement.cliPid));
+});
+
+test('idle release keeps the checked snapshot bound when work changes before the control request', { timeout: 15000 }, async t => {
+  const { cwd, m } = setup(t); const child = await m.spawn('worker', role, cwd, 'REMEMBER first');
+  const first = await idle(m, child.id), request = m.request.bind(m); let changed = false;
+  t.mock.method(m, 'request', async (id, input, captured) => {
+    if (input.type === 'close' && !changed) {
+      changed = true; await m.send(id, 'REMEMBER new turn'); await idle(m, id);
+    }
+    return request(id, input, captured);
+  });
+  await assert.rejects(m.close(child.id, true, { runId: first.runId, runtimeId: first.runtimeId }), /stale|identity/i);
+  const current = m.get(child.id);
+  assert(changed); assert.equal(current.phase, 'idle'); assert.notEqual(current.runId, first.runId);
+  assert.equal(current.runtimeId, first.runtimeId); assert(processAlive(current.cliPid));
+});
+
+test('idle release cannot report a later runtime as the captured release result', async t => {
+  const { m, id, state } = await peer(t, 2, (res, prior) => {
+    const result = { ...prior, phase: 'completed', runtimeClosed: true, lastStatus: 'completed' };
+    writeJson(path.join(m.root, id, 'state.json'), { ...result, runId: randomUUID(), runtimeId: randomUUID() });
+    fs.unlinkSync(path.join(m.root, id, 'owner.lock'));
+    res.end(JSON.stringify({ ...result, receipt: { operation: 'stop', status: 'released', runId: prior.runId, runtimeId: prior.runtimeId } }));
+  });
+  state.phase = 'idle'; writeJson(path.join(m.root, id, 'state.json'), state);
+  await assert.rejects(m.close(id, true, { runId: state.runId, runtimeId: state.runtimeId }), error => {
+    assert.match(error.message, /release confirmation.*changed/i);
+    assert(error.message.includes(state.runId)); assert(error.message.includes(state.runtimeId)); return true;
+  });
+});
+
 test('resident log references are instance-contained and cannot expose arbitrary files', { timeout: 20000 }, async t => {
   const { cwd, m } = setup(t); const child = await m.spawn('worker', role, cwd, 'REMEMBER logs'); await idle(m, child.id);
   await m.send(child.id, 'RECALL'); const second = await idle(m, child.id);

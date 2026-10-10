@@ -57,6 +57,84 @@ function harness(t, beforePhase = 'completed', decision = 'none') {
       if(oldHome===undefined)delete process.env.PI_CODING_AGENT_DIR;else process.env.PI_CODING_AGENT_DIR=oldHome;},
   };
 }
+function idleBatch(t, count = 3) {
+  const h = harness(t, 'idle');
+  Object.assign(h.before, { protocolVersion: 2, runtimeId: randomUUID(), accepted: true, lastStatus: 'completed' });
+  const targets = [h.before, ...Array.from({ length: count - 1 }, () => ({ ...h.before, id: randomUUID(), runId: randomUUID(), runtimeId: randomUUID() }))];
+  for (const target of targets.slice(1)) {
+    const dir = path.join(h.originalParent + '.subagents', target.id); fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'spec.json'), JSON.stringify({ id: target.id, parentFile: h.originalParent }));
+  }
+  t.mock.method(AgentManager.prototype, 'list', () => targets);
+  const released = target => ({ ...target, phase: 'closed', runtimeClosed: true,
+    receipt: { operation: 'stop', status: 'released', runId: target.runId, runtimeId: target.runtimeId } });
+  return { h, targets, released };
+}
+
+test('idle batch cancellation performs no release and writes no action record', { timeout: 5000 }, async t => {
+  const { h } = idleBatch(t); let confirms = 0, calls = 0;
+  h.ctx.ui.confirm = async () => { confirms++; return false; };
+  t.mock.method(AgentManager.prototype, 'close', async () => { calls++; });
+  try {
+    h.open(); h.press('c'); await new Promise(setImmediate);
+    assert.equal(confirms, 1); assert.equal(calls, 0); assert.equal(h.messages.length, 0);
+  } finally { await h.close(); }
+});
+
+test('idle batch reports partial failure per captured target without retrying successful releases', { timeout: 5000 }, async t => {
+  const { h, targets, released } = idleBatch(t), calls = []; let confirmation;
+  h.ctx.ui.confirm = async (title, message) => { confirmation = { title, message }; return true; };
+  t.mock.method(AgentManager.prototype, 'close', async (id, onlyIdle, expected) => {
+    calls.push({ id, onlyIdle, expected }); const target = targets.find(value => value.id === id);
+    if (id === targets[0].id) throw Error('fixture target changed before release');
+    const result = released(target);
+    if (id === targets[2].id) result.receipt.status = 'unconfirmed';
+    return result;
+  });
+  try {
+    h.open(); h.press('c'); await waitUntil('three idle action records', () => h.messages.length === 3, 2000);
+    assert.match(confirmation.title, /idle/i);
+    for (const target of targets) assert(confirmation.message.includes(target.id));
+    assert.deepEqual(calls, targets.map(({ id, runId, runtimeId }) => ({ id, onlyIdle: true, expected: { runId, runtimeId } })));
+    assert(h.messages.every(entry => entry.options.triggerTurn === false && entry.message.details.ids === undefined));
+    assert.deepEqual(h.messages.map(entry => entry.message.details.runId), targets.map(target => target.runId));
+    assert.match(h.messages[0].message.content, /fixture target changed/);
+    assert.match(h.messages[1].message.content, /Native processes released/);
+    assert.match(h.messages[2].message.content, /unconfirmed/i);
+    const summary = h.notices.find(notice => targets.every(target => notice.message.includes(target.id)));
+    assert(summary); assert.equal(summary.type, 'warning');
+  } finally { await h.close(); }
+});
+
+test('parent switch during idle batch stops further releases and retains the in-flight action for its original parent', { timeout: 5000 }, async t => {
+  const { h, targets, released } = idleBatch(t, 2), started = Promise.withResolvers(), finish = Promise.withResolvers(), calls = [];
+  t.mock.method(AgentManager.prototype, 'close', async id => { calls.push(id); started.resolve(); return finish.promise; });
+  try {
+    h.open(); h.press('c'); await started.promise;
+    h.events.get('session_shutdown')(); h.activate(path.join(h.root, 'other-parent.jsonl'));
+    finish.resolve(released(targets[0])); await h.wait();
+    assert.deepEqual(calls, [targets[0].id]); assert.equal(h.messages.length, 0);
+    const first = path.join(h.originalParent + '.subagents', targets[0].id, 'human-actions');
+    assert.equal(fs.readdirSync(first).filter(file => file.endsWith('.json')).length, 1);
+    assert.equal(fs.existsSync(path.join(h.originalParent + '.subagents', targets[1].id, 'human-actions')), false);
+    h.activate(h.originalParent); await waitUntil('original idle-release record', () => h.messages.length === 1, 2000);
+    assert.equal(h.messages[0].parent, h.originalParent); assert.equal(h.messages[0].options.triggerTurn, false);
+    assert.deepEqual(calls, [targets[0].id], 'reopening the parent never replays the batch');
+  } finally { finish.resolve(released(targets[0])); await h.close(); }
+});
+
+test('parent switch while confirming idle batch prevents every release', { timeout: 5000 }, async t => {
+  const { h } = idleBatch(t), entered = Promise.withResolvers(), finish = Promise.withResolvers(); let calls = 0;
+  h.ctx.ui.confirm = async () => { entered.resolve(); return finish.promise; };
+  t.mock.method(AgentManager.prototype, 'close', async () => { calls++; });
+  try {
+    h.open(); h.press('c'); await entered.promise;
+    h.events.get('session_shutdown')(); h.activate(path.join(h.root, 'other-parent.jsonl'));
+    finish.resolve(true); await h.wait();
+    assert.equal(calls, 0); assert.equal(h.messages.length, 0);
+  } finally { finish.resolve(false); await h.close(); }
+});
+
 test('an input finishing after a parent switch is durably delivered only when its original parent returns', async t => {
   const h = harness(t), started = Promise.withResolvers(), finished = Promise.withResolvers();
   const sending = t.mock.method(AgentManager.prototype,'send',async()=>{started.resolve();return finished.promise;});
