@@ -151,7 +151,16 @@ export interface Report {
   resultFile?: string;
   logFile: string;
 }
+/** Evidence for this operation response only; never persisted in state or reports. */
+export interface OperationReceipt {
+  operation: "start" | "send" | "interrupt" | "stop";
+  status: "accepted" | "queued" | "unconfirmed" | "settled" | "released" | "not_running";
+  runId: string;
+  runtimeId?: string;
+}
+export type ControlResult = AgentState & { receipt?: OperationReceipt };
 export interface AgentView extends AgentState {
+  receipt?: OperationReceipt;
   cli?: Cli;
   role: string;
   cwd: string;

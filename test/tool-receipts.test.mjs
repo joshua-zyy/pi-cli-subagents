@@ -135,3 +135,39 @@ test('tool receipts report observed state without equating initial acceptance wi
     }
   }
 });
+
+test('public input and release receipts preserve actual operation evidence rather than infer it from phase', async t => {
+  const { cwd, invoke } = setup(t);
+  const base = { id:randomUUID(), runId:randomUUID(), runtimeId:randomUUID(), protocolVersion:2,
+    role:'worker', cli:'pi', cwd, workerPid:0, updatedAt:1, questions:[], logFile:'fixture', phase:'running', accepted:true };
+  for (const [method, operation, status] of [['spawn','start','accepted'],['spawn','start','unconfirmed'],
+    ['send','send','accepted'],['send','send','queued'],['send','send','unconfirmed'],['close','stop','released']]) {
+    const receipt = { operation, status, runId:base.runId, runtimeId:base.runtimeId };
+    const mock = t.mock.method(AgentManager.prototype, method, async () => ({ ...base, phase:method === 'close'?'closed':'running', receipt }));
+    try {
+      const args = operation === 'start' ? {action:operation,role:'worker',task:'fixture'} : {action:operation,id:base.id,...(operation === 'send'?{message:'fixture'}:{})};
+      const text = (await invoke('subagent',args)).content[0].text;
+      assert.deepEqual(stateFrom(text).receipt,receipt);
+      assert.doesNotMatch(text,/model has (read|executed)|task succeeded/i);
+      if(status === 'unconfirmed') assert.match(text,/unconfirmed|not confirmed/i);
+      if(status === 'queued') assert.match(text,/queued/i);
+    } finally { mock.mock.restore(); }
+  }
+});
+
+test('public interrupt ends the captured turn without release, and query has no synthetic delivery receipt', {timeout:15000}, async t => {
+  const { manager, invoke } = setup(t);
+  const initial = stateFrom((await invoke('subagent',{action:'start',role:'worker',task:'HOLD'})).content[0].text);
+  await assert.rejects(invoke('subagent',{action:'interrupt',id:initial.id,message:'forbidden extra'}),/not allowed/);
+  const interrupted = stateFrom((await invoke('subagent',{action:'interrupt',id:initial.id})).content[0].text);
+  assert.equal(interrupted.receipt.status,'settled'); assert.equal(interrupted.receipt.operation,'interrupt');
+  assert.equal(interrupted.phase,'idle'); assert.equal(interrupted.runtimeId,initial.runtimeId); assert.equal(interrupted.runId,initial.runId);
+  assert(fs.existsSync(path.join(manager.root,initial.id,'owner.lock')));
+  const noop = stateFrom((await invoke('subagent',{action:'interrupt',id:initial.id})).content[0].text);
+  assert.equal(noop.receipt.status,'not_running');
+  const inspected = stateFrom((await invoke('subagent_query',{action:'get',id:initial.id})).content[0].text);
+  assert.equal(inspected.receipt,undefined); assert.equal(readJson(path.join(manager.root,initial.id,'state.json')).receipt,undefined);
+  const closed = stateFrom((await invoke('subagent',{action:'stop',id:initial.id})).content[0].text);
+  assert.equal(closed.receipt.status,'released'); assert.equal(closed.phase,'closed');
+  assert.equal(manager.getResult(initial.id,initial.runId).status,'stopped');
+});

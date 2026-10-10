@@ -1,9 +1,10 @@
 import { Type } from "@earendil-works/pi-ai";
-import { Key } from "@earendil-works/pi-tui";
+import { Key, matchesKey } from "@earendil-works/pi-tui";
 import { getAgentDir, getMarkdownTheme, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { AgentManager } from "./manager.js";
 import { WorkspaceDecisionRequired, type ResumeOptions } from "./workspace.js";
 import { customType as reportType, deliverReports } from "./notifier.js";
+import { deliverHumanActions, saveHumanAction } from "./human-actions.js";
 import { renderReportMessage } from "./ui/report.js";
 import { CLI_CHOICES, loadRoles, mergeRoles } from "./roles.js";
 import { detectClis, probeCatalog, type ModelCatalog } from "./cli-discovery.js";
@@ -27,9 +28,21 @@ export function parentManager(ctx: Pick<ExtensionContext, "sessionManager">, lau
 function visible(state: AgentView, includeText = true) {
   // `task`, `history` and `startedAt` let the parent match an instance to its assignments
   // after its own context is compacted, without reading the child's transcript.
-  const { id, cli, role, phase, protocolVersion, runtimeId, lastStatus, task, history, runCount, runId, sessionId, session, cwd, startedAt, updatedAt, lastActivity, questions, text, truncated, error, logFile } = state;
-  return { id, cli, role, phase, protocolVersion, runtimeId, lastStatus, runId, sessionId, ...(session?.cli === "codex" ? { threadId: session.threadId } : {}), cwd, updatedAt, lastActivity, questions, ...(includeText ? { text, truncated } : {}), error, logFile, history, runCount,
+  const { id, cli, role, phase, protocolVersion, runtimeId, lastStatus, receipt, task, history, runCount, runId, sessionId, session, cwd, startedAt, updatedAt, lastActivity, questions, text, truncated, error, logFile } = state;
+  return { id, cli, role, phase, protocolVersion, runtimeId, lastStatus, ...(receipt ? { receipt } : {}), runId, sessionId, ...(session?.cli === "codex" ? { threadId: session.threadId } : {}), cwd, updatedAt, lastActivity, questions, ...(includeText ? { text, truncated } : {}), error, logFile, history, runCount,
     ...(state.workspace ? { workspace: state.workspace, workspaceBaseline: state.workspaceBaseline } : {}), ...(task ? { task } : {}), ...(startedAt ? { startedAt } : {}) };
+}
+
+/** Only describe the actual operation receipt, never infer delivery from an old phase/accepted bit. */
+function receiptText(state: AgentView): string {
+  switch (state.receipt?.status) {
+    case "accepted": return "Native input request acknowledged; this is not proof of model consumption or task success.";
+    case "queued": return "Input queued by the native CLI; model consumption and execution are not confirmed.";
+    case "settled": return "The captured turn has ended; its actual outcome is retained. The runtime was not released.";
+    case "released": return "Native processes released; the original session, history and completed results are retained.";
+    case "not_running": return "No captured active turn to interrupt; pending startup is not cancelled. History is retained.";
+    default: return "Operation confirmation is unconfirmed. Inspect the instance before retrying; work may already have run.";
+  }
 }
 
 /** Action-specific requirements supplement the flat provider-compatible object schemas. */
@@ -60,7 +73,7 @@ export function inheritParentModel(role: Role, ctx: Pick<ExtensionContext, "mode
   };
 }
 /** Separate from report receipts: these entries record what the human did, not what a child reported. */
-export const humanActionType = "cli-subagents-human-action";
+export { humanActionType } from "./human-actions.js";
 
 export default function extension(pi: ExtensionAPI): void {
   // Explicit child marker prevents an auto-discovered copy of this extension from recursively spawning agents.
@@ -70,27 +83,56 @@ export default function extension(pi: ExtensionAPI): void {
   const launch: Launch = { command: process.execPath, args: [cli] };
   let dismissPanel: (() => void) | undefined;
   let sessionEpoch = 0;
+  const humanPending = new Set<string>();
 
   /**
    * The parent coordinates this instance, so a direct human action must not be invisible to it.
    * It is recorded without starting a turn: routine additions should not interrupt sibling work,
    * and the entry is already in context when the child's own report arrives.
    */
-  function recordHumanAction(ctx: ExtensionContext, agent: AgentView, action: string): void {
+  function recordHumanAction(ctx: ExtensionContext, manager: AgentManager, agent: AgentView, action: string, epoch: number): void {
     const text = `[Human → subagent ${agent.id} · ${agent.role}] ${action}\n`
+      + (agent.receipt ? `Operation receipt: ${JSON.stringify(agent.receipt)}\n` : "")
       + "The user acted on this instance directly. Re-check your plan for it before integrating or dispatching related work. This does not widen the task's original authorization.";
-    try { pi.sendMessage({ customType: humanActionType, content: text, display: true, details: { agentId: agent.id, role: agent.role } }, { triggerTurn: false }); }
-    catch (error) { ctx.ui.notify(`The parent agent was not told about this action: ${(error as Error).message}`, "warning"); }
+    try {
+      // The plain manager identity survives a Pi context replacement; old ctx/pi do not.
+      saveHumanAction(manager, agent.receipt ? { ...agent, runId: agent.receipt.runId } : agent, text);
+      if (epoch === sessionEpoch) deliverHumanActions(manager, pi, ctx, humanPending);
+    } catch (error) {
+      console.error("[pi-cli-subagents] Human action recording/delivery failed:", error);
+      if (epoch === sessionEpoch) try {
+        if (ctx.sessionManager.getSessionFile() === manager.parentFile)
+          ctx.ui.notify(`The parent action receipt is not confirmed: ${(error as Error).message}`, "warning");
+      } catch { /* The old UI may already have been invalidated by Pi. */ }
+    }
   }
 
-  /** A resolved send can still have failed; both UI paths must report the observed phase. */
-  function recordHumanInput(ctx: ExtensionContext, agent: AgentView, input: string, action: string): void {
+  /** A resolved send can still have failed; both UI paths report the same receipt and phase. */
+  function recordHumanInput(ctx: ExtensionContext, manager: AgentManager, agent: AgentView, input: string, action: string, epoch: number): void {
     if (hasFailure(agent)) {
       const error = new Error(`Subagent input failed: ${agent.error ?? "No error details available"}\nInstance: ${agent.id}\nRun: ${agent.runId}\nInspect the instance before retrying; work may already have run.`);
-      recordHumanAction(ctx, agent, `Input request failed: ${input}\n${error.message}`);
+      recordHumanAction(ctx, manager, agent, `Input request failed: ${input}\n${error.message}\n${receiptText(agent)}`, epoch);
       throw error;
     }
-    recordHumanAction(ctx, agent, `${action}: ${input}\nObserved ${viewStatus(agent).label}; instance: ${agent.id}; run: ${agent.runId}.`);
+    recordHumanAction(ctx, manager, agent, `${action}: ${input}\n${receiptText(agent)}\nObserved ${viewStatus(agent).label}; instance: ${agent.id}; run: ${agent.runId}.`, epoch);
+  }
+
+  async function sendAndRecord(ctx: ExtensionContext, manager: AgentManager, id: string, message: string, epoch: number, action: string, options: ResumeOptions = {}): Promise<AgentView> {
+    if (epoch !== sessionEpoch) throw new Error("Parent session changed before input request; no input sent.");
+    const before = manager.get(id);
+    const input = `"${oneLine(message, 400)}"${options.baseline ? ` (workspace baseline: ${options.baseline})` : ""}`;
+    let state: AgentView;
+    try { state = await manager.send(id, message, "steer", options); }
+    catch (error) {
+      if (!(error instanceof WorkspaceDecisionRequired)) {
+        let observed = before;
+        try { observed = manager.get(id); } catch { /* Retain the last known identity. */ }
+        recordHumanAction(ctx, manager, observed, `Input request unconfirmed: ${input}\n${(error as Error).message}\nInspect the instance before retrying; work may already have run.`, epoch);
+      }
+      throw error;
+    }
+    recordHumanInput(ctx, manager, state, input, action, epoch);
+    return state;
   }
 
   let active: { file: string; ctx: ExtensionContext; manager: AgentManager; pending: Set<string>; timer: NodeJS.Timeout; agents: AgentView[]; widget?: StatusWidget; fleet?: FleetView } | undefined;
@@ -100,6 +142,7 @@ export default function extension(pi: ExtensionAPI): void {
   function pump(): void {
     if (!active || active.ctx.sessionManager.getSessionFile() !== active.file) return;
     try {
+      deliverHumanActions(active.manager, pi, active.ctx, humanPending);
       active.agents = active.manager.list();
       deliverReports(active.manager, pi, active.ctx, active.pending, Date.now(), active.agents);
     }
@@ -108,7 +151,11 @@ export default function extension(pi: ExtensionAPI): void {
     catch (error) { console.error("[pi-cli-subagents] Status refresh failed; retrying:", error); }
   }
   function stopMonitor(): void {
+    // Clear the old pane while its context is still valid; late finalizers must
+    // not remove a replacement session's pane.
+    if (active?.ctx.mode === "tui") active.ctx.ui.setWidget(AGENTS_PANEL_KEY, undefined);
     sessionEpoch++;
+    humanPending.clear();
     dismissPanel?.(); dismissPanel = undefined;
     if (active) { clearInterval(active.timer); active.widget?.dispose(); active.fleet?.dispose(); }
     active = undefined;
@@ -171,14 +218,14 @@ export default function extension(pi: ExtensionAPI): void {
   });
   const registerSubagent = (catalog: string): void => pi.registerTool({
     name: "subagent", label: "CLI subagent",
-    description: `Start, message or stop a persistent CLI subagent. start requires role and task; choose cwd or workspace, never both. send requires id and message and continues that exact instance: idle starts a new run in the resident runtime; closed resumes the original native session. Pi supports running steer/followUp, Codex running steer only, Claude must finish first; waiting/stopping do not accept ordinary messages. stop requires id and releases processes, including idle runtimes, while retaining history and the last run outcome. Never silently replaces a session. Workspace continuation may require explicit keep/sync; sync closes only the target's confirmed idle runtime before syncing and refuses other resident writers, active, staged or unintegrated work. Results return automatically. Query existing instances with subagent_query.\n\nDelegate outcomes, not implementation recipes. Give the goal, essential context (relevant paths and confirmed facts), authorized scope, and acceptance or return needs. A new instance has not seen this conversation. Let the child investigate, choose an approach and verify its work; prescribe implementation details only when the user, compatibility or shared-work constraints require them.\n\n${catalog}`,
+    description: `Start, message, interrupt or stop a persistent CLI subagent. interrupt requires id: end only the captured current turn without releasing a usable runtime; unsupported backends reject. Receipts distinguish acknowledged input, native queueing, unconfirmed input, ended turns and released resources; none proves model consumption or task success. start requires role and task; choose cwd or workspace, never both. send requires id and message and continues that exact instance: idle starts a new run in the resident runtime; closed resumes the original native session. Pi supports running steer/followUp, Codex running steer only, Claude must finish first; waiting/stopping do not accept ordinary messages. stop requires id and releases processes, including idle runtimes, while retaining history and the last run outcome. Never silently replaces a session. Workspace continuation may require explicit keep/sync; sync closes only the target's confirmed idle runtime before syncing and refuses other resident writers, active, staged or unintegrated work. Results return automatically. Query existing instances with subagent_query.\n\nDelegate outcomes, not implementation recipes. Give the goal, essential context (relevant paths and confirmed facts), authorized scope, and acceptance or return needs. A new instance has not seen this conversation. Let the child investigate, choose an approach and verify its work; prescribe implementation details only when the user, compatibility or shared-work constraints require them.\n\n${catalog}`,
     parameters: Type.Object({
-      action: Type.Union([Type.Literal("start"), Type.Literal("send"), Type.Literal("stop")]),
+      action: Type.Union([Type.Literal("start"), Type.Literal("send"), Type.Literal("interrupt"), Type.Literal("stop")]),
       role: Type.Optional(Type.String({ description: "start only, required: configured role name" })),
       task: Type.Optional(Type.String({ description: "start only, required: task and authorized scope" })),
       cwd: Type.Optional(Type.String({ description: "start only: defaults to parent cwd; mutually exclusive with workspace" })),
       workspace: Type.Optional(Type.String({ description: "start only: managed workspace ID; mutually exclusive with cwd" })),
-      id: Type.Optional(Type.String({ description: "send/stop only, required: existing instance ID" })),
+      id: Type.Optional(Type.String({ description: "send/interrupt/stop only, required: existing instance ID" })),
       message: Type.Optional(Type.String({ description: "send only, required: follow-up goal, new context and changed constraints; repeat the full task only when needed" })),
       mode: Type.Optional(Type.Union([Type.Literal("steer"), Type.Literal("followUp")], { description: "send only: running delivery; defaults to steer" })),
       baseline: Type.Optional(Type.Union([Type.Literal("keep"), Type.Literal("sync")], { description: "send only: explicit workspace baseline decision after integration or another instance's sync; keep preserves current files, not remembered files" })),
@@ -192,7 +239,8 @@ export default function extension(pi: ExtensionAPI): void {
         if (!Object.hasOwn(roles, args.role!)) throw new Error(`Unknown role: ${args.role}; available: ${Object.keys(roles).join(", ")}`);
         const resolved = roles[args.role!];
         const state = await parentManager(ctx, launch).spawn(args.role!, inheritParentModel(resolved, ctx), args.cwd ?? ctx.cwd, args.task!, args.workspace);
-        const result = `Subagent ${state.phase}: ${view(state)}`;
+        const result = `Subagent ${state.phase}: ${view(state)}
+${receiptText(state)}`;
         if (hasFailure(state)) throw new Error(`${result}\nInspect the instance before retrying; work may already have run.`);
         return content(`${result}\nCompletion and waiting reports return to this parent session.`);
       }
@@ -200,13 +248,17 @@ export default function extension(pi: ExtensionAPI): void {
         checkFields(args, ["action", "id", "message"], ["mode", "baseline", "includeUncommitted"]);
         const state = await parentManager(ctx, launch).send(args.id!, args.message!, (args.mode ?? "steer") as Delivery,
           { baseline: args.baseline, includeUncommitted: args.includeUncommitted });
-        const result = `Subagent ${state.phase} after input request: ${view(state)}`;
+        const result = `Subagent ${state.phase} after input request: ${view(state)}
+${receiptText(state)}`;
         if (hasFailure(state)) throw new Error(`${result}\nInspect the instance before retrying; work may already have run.`);
         return content(result);
       }
-      if (args.action !== "stop") throw new Error("Unknown subagent action; use start, send or stop");
+      if (args.action !== "stop" && args.action !== "interrupt") throw new Error("Unknown subagent action; use start, send, interrupt or stop");
       checkFields(args, ["action", "id"]);
-      return content(`Processes stopped; original session retained: ${view(await parentManager(ctx, launch).close(args.id!))}`);
+      const manager = parentManager(ctx, launch);
+      const state = args.action === "interrupt" ? await manager.interrupt(args.id!) : await manager.close(args.id!);
+      return content(`${receiptText(state)}
+${view(state)}`);
     },
   });
   registerSubagent("Role catalog loads at session start.");
@@ -268,6 +320,7 @@ export default function extension(pi: ExtensionAPI): void {
     return `replied "${oneLine(answer.value, 200)}"`;
   };
   async function replyPrompt(ctx: ExtensionContext, manager: AgentManager, id: string, questionId: string): Promise<void> {
+    const epoch = sessionEpoch;
     if (!ctx.hasUI) throw new Error("Interaction requires a TUI or an RPC client with dialogs");
     const q: Question | undefined = manager.get(id).questions.find((entry) => entry.id === questionId);
     if (!q) throw new Error("This request has ended or does not belong to this session");
@@ -280,6 +333,7 @@ export default function extension(pi: ExtensionAPI): void {
       const entries: [string, string[]][] = [];
       let cancelled = false;
       for (const field of q.fields) {
+        if (epoch !== sessionEpoch) return;
         const previews = field.options.flatMap(option => option.preview === undefined ? [] :
           [`\nPreview (plain text): ${JSON.stringify({ label: option.label, preview: option.preview })}`]).join("");
         const title = display(`${q.title ? `${q.title}\n` : ""}${q.humanOnly ? "Human response required by native policy.\n" : ""}${field.isSecret ? "Sensitive question: input is visible in Pi and saved history.\n" : ""}[${field.header}] ${field.question}${field.description ? `\n${field.description}` : ""}${previews}`);
@@ -287,11 +341,13 @@ export default function extension(pi: ExtensionAPI): void {
           const selected = new Set<number>();
           let other: string | undefined;
           for (;;) {
+            if (epoch !== sessionEpoch) return;
             const choices = field.options.map((option, index) => display(`${index + 1}. [${selected.has(index) ? "x" : " "}] ${option.label} — ${option.description}`));
             const custom = `${choices.length + 1}. ${other === undefined ? "Type something." : "Edit other answer."}`;
             const finish = `${choices.length + (field.allowOther ? 2 : 1)}. Finish selection.`;
             const choice = await ctx.ui.select(display(`${title}${other === undefined ? "" : `\nOther answer: ${JSON.stringify(other)}`}`),
               [...choices, ...(field.allowOther ? [custom] : []), finish]);
+            if (epoch !== sessionEpoch) return;
             if (choice === undefined) { cancelled = true; break; }
             if (choice === finish) break;
             if (choice === custom && field.allowOther) {
@@ -312,6 +368,7 @@ export default function extension(pi: ExtensionAPI): void {
           const choices = field.options.map((option, index) => display(`${index + 1}. ${option.label} — ${option.description}`));
           const custom = `${choices.length + 1}. Type something.`;
           const selected = await ctx.ui.select(title, field.allowOther ? [...choices, custom] : choices);
+          if (epoch !== sessionEpoch) return;
           value = selected === custom && field.allowOther ? await ctx.ui.input(title, "") :
             field.options[choices.indexOf(selected ?? "")]?.label;
         } else value = await ctx.ui.input(title, "");
@@ -324,6 +381,7 @@ export default function extension(pi: ExtensionAPI): void {
       const freeText = q.kind === "question" && q.parentPolicy?.text === true && q.humanOnly !== true;
       const options = q.options ?? [];
       let value = await ctx.ui.select(q.message ? `${q.title}\n\n${q.message}` : q.title, freeText ? [...options, "Type something."] : options);
+      if (epoch !== sessionEpoch) return;
       if (freeText && value === "Type something.") value = await ctx.ui.input(q.title, "");
       answer = value === undefined ? { cancelled: true } : { value };
     } else if (q.method === "editor") {
@@ -333,43 +391,46 @@ export default function extension(pi: ExtensionAPI): void {
       const value = await ctx.ui.input(q.title, q.placeholder);
       answer = value === undefined ? { cancelled: true } : { value };
     }
-    await manager.reply(id, questionId, answer);
-    recordHumanAction(ctx, manager.get(id), `Answered pending request ${questionId}: ${describeAnswer(answer)}.`);
-    ctx.ui.notify(`Human response accepted for subagent ${id}`, "info");
+    if (epoch !== sessionEpoch) return;
+    const answered = await manager.reply(id, questionId, answer);
+    recordHumanAction(ctx, manager, answered, `Answered pending request ${questionId}: ${describeAnswer(answer)}.`, epoch);
+    if (epoch === sessionEpoch) ctx.ui.notify(`Human response accepted for subagent ${id}`, "info");
   }
 
   pi.registerCommand("agent-reply", {
     description: "Answer a child interaction: /agent-reply <agentId> <questionId>",
     handler: async (args, ctx) => {
+      const epoch = sessionEpoch;
       try {
         const [id, questionId] = args.trim().split(/\s+/);
         if (!id || !questionId) throw new Error("Usage: /agent-reply <agentId> <questionId>");
         await replyPrompt(ctx, parentManager(ctx, launch), id, questionId);
-      } catch (error) { ctx.ui.notify((error as Error).message, "error"); }
+      } catch (error) { if (epoch === sessionEpoch) ctx.ui.notify((error as Error).message, "error"); }
     },
   });
 
   async function sendHuman(ctx: ExtensionContext, manager: AgentManager, id: string, message: string, epoch: number, action: string): Promise<AgentView | undefined> {
     let state: AgentView;
     let options: ResumeOptions = {};
-    try { state = await manager.send(id, message); }
+    try { state = await sendAndRecord(ctx, manager, id, message, epoch, action); }
     catch (error) {
       if (!(error instanceof WorkspaceDecisionRequired) || error.decision !== "baseline") throw error;
+      if (epoch !== sessionEpoch) return;
       ctx.ui.notify(error.message, "warning");
       const choice = await ctx.ui.select("Choose workspace baseline", ["keep — current workspace, no parent sync", "sync — update workspace from parent"]);
       if (!choice || epoch !== sessionEpoch) return;
       options = { baseline: choice.startsWith("keep") ? "keep" : "sync", expectedRevision: error.workspace.revision };
-      try { state = await manager.send(id, message, "steer", options); }
+      try { state = await sendAndRecord(ctx, manager, id, message, epoch, action, options); }
       catch (error) {
         if (!(error instanceof WorkspaceDecisionRequired) || error.decision !== "inherit") throw error;
+        if (epoch !== sessionEpoch) return;
         const confirmed = await ctx.ui.confirm("Inherit these uncommitted parent changes?", `${error.parentChanges.join("\n")}\n\nConfirm only if ALL these changes are authorized for this task. The parent index, HEAD and branches will not change.`);
         if (!confirmed || epoch !== sessionEpoch) return;
         options = { ...options, expectedParentTree: error.parentTree,
           includeUncommitted: { reason: "The human explicitly confirmed the displayed parent changes in the TUI." } };
-        state = await manager.send(id, message, "steer", options);
+        state = await sendAndRecord(ctx, manager, id, message, epoch, action, options);
       }
     }
-    recordHumanInput(ctx, state, `"${oneLine(message, 400)}"${options.baseline ? ` (workspace baseline: ${options.baseline})` : ""}`, action);
     return state;
   }
 
@@ -397,13 +458,21 @@ export default function extension(pi: ExtensionAPI): void {
       const fromFleet = selectedId !== undefined;
       let panel: AgentsPanel | undefined;
       let widget: PaneWidget | undefined;
+      let overlayActive = false;
       // Unset while a host dialog or the conversation overlay owns the keyboard, so this listener
       // never swallows a dialog's input.
       let deliver: ((data: string) => void) | undefined;
       const refresh = () => widget?.requestRender();
-      // Ctrl+C stays with Pi so the host can still interrupt while the roster is open.
+      // A modal overlay does not bubble input to Pi's editor. Route Ctrl+C to
+      // the public parent abort API, never to the selected child's interrupt.
       const stopInput = ctx.ui.onTerminalInput((data) => {
-        if (!deliver || data === "\u0003") return undefined;
+        if (epoch !== sessionEpoch) return undefined;
+        if (matchesKey(data, "ctrl+c")) {
+          if (!overlayActive) return undefined;
+          if (ctx.isIdle()) dismissPanel?.(); else ctx.abort();
+          return { consume: true };
+        }
+        if (!deliver) return undefined;
         deliver(data); refresh(); return { consume: true };
       });
       ctx.ui.setWidget(AGENTS_PANEL_KEY, (tui) => {
@@ -446,6 +515,7 @@ export default function extension(pi: ExtensionAPI): void {
               let viewer: ConversationViewer | undefined;
               try {
                 action = await ctx.ui.custom<PanelAction | undefined>((tui, theme, keybindings, done) => {
+                  overlayActive = true;
                   dismissPanel = () => { viewer?.dispose(); done(undefined); };
                   const files = () => manager.eventLogs(id);
                   viewer = new ConversationViewer(tui, theme, done, async () => ({
@@ -455,7 +525,10 @@ export default function extension(pi: ExtensionAPI): void {
                       newer: async (boundary) => ({ agent: manager.get(id), ...await lease.window.pageDown(files(), boundary) }),
                       latest: async () => ({ agent: manager.get(id), ...await lease.window.toTail(files()) }) },
                     onSend: async (message) => {
-                      try { recordHumanInput(ctx, await manager.send(id, message), `"${oneLine(message, 400)}"`, "Sent an instruction"); }
+                      try {
+                        const sent = await sendAndRecord(ctx, manager, id, message, epoch, "Requested input");
+                        return sent;
+                      }
                       catch (error) {
                         if (error instanceof WorkspaceDecisionRequired) return { kind: "message", id, resume: true, message };
                         throw error;
@@ -465,20 +538,31 @@ export default function extension(pi: ExtensionAPI): void {
                     frameColor: (text) => ctx.ui.theme.getThinkingBorderColor(ctx.thinkingLevel ?? "off")(text) });
                   return viewer;
                 }, { overlay: true, overlayOptions: { width: "96%", maxHeight: "100%", margin: 1 } });
-              } finally { viewer?.dispose(); lease.release(); dismissPanel = undefined; }
+              } finally { overlayActive = false; viewer?.dispose(); lease.release(); dismissPanel = undefined; }
               if (epoch !== sessionEpoch) return;
               if (!action || action.kind === "view") { if (fromFleet) return; continue; }
             }
             // Re-read state before acting: the list is a snapshot, not an authorization or lifecycle guarantee.
             const state = manager.get(action.id);
             if (action.kind === "reply") { await replyPrompt(ctx, manager, action.id, action.questionId); if (fromFleet) return; continue; }
-            if (action.kind === "stop") {
-              if (!canStop(state.phase)) { ctx.ui.notify(`${state.role} has no releasable runtime (${state.phase}); nothing to stop.`, "info"); continue; }
-              const idle = state.phase === "idle";
-              const confirmed = await ctx.ui.confirm(idle ? "Release idle subagent?" : "Stop subagent?", `${state.role} ${action.id.slice(0, 8)}: stop any active or background work and release processes. The native session, last run outcome and results remain available for later continuation.`);
+            if (action.kind === "stop" || action.kind === "interrupt") {
+              const release = action.kind === "stop";
+              if (release && !canStop(state.phase)) { ctx.ui.notify(`${state.role} has no releasable runtime (${state.phase}); nothing to stop.`, "info"); continue; }
+              const confirmed = await ctx.ui.confirm(release ? state.phase === "idle" ? "Release idle subagent?" : "Stop subagent?" : "Interrupt the current subagent turn?", release
+                ? `${state.role} ${action.id.slice(0, 8)}: stop active or background work and release processes. Keep the native session, last run outcome and results.`
+                : `${state.role} ${action.id.slice(0, 8)}: end only the current turn, retaining the runtime and native session. This does not undo file changes.`);
               if (!confirmed || epoch !== sessionEpoch) continue;
-              recordHumanAction(ctx, await manager.close(action.id), idle ? "Released idle processes; the original session, last run outcome and results remain available." : "Stopped active work and released processes; the original session and results remain available.");
-              ctx.ui.notify("Processes stopped; original session retained.", "info");
+              let result: AgentView;
+              try { result = release ? await manager.close(action.id) : await manager.interrupt(action.id); }
+              catch (error) {
+                let observed = state;
+                try { observed = manager.get(action.id); } catch { /* Preserve the pre-request identity. */ }
+                recordHumanAction(ctx, manager, observed, `${release ? "Release" : "Interrupt"} request unconfirmed: ${(error as Error).message}\nInspect before retrying.`, epoch);
+                throw error;
+              }
+              recordHumanAction(ctx, manager, result, receiptText(result), epoch);
+              if (epoch !== sessionEpoch) return;
+              ctx.ui.notify(receiptText(result), result.receipt?.status === "unconfirmed" ? "warning" : "info");
               if (fromFleet) return;
               continue;
             }
@@ -490,22 +574,23 @@ export default function extension(pi: ExtensionAPI): void {
             if (!message?.trim() || epoch !== sessionEpoch) continue;
             if (!steerable) ctx.ui.notify("Starting a new turn in the original session; this can take up to about 60 seconds...", "info");
             const sent = await sendHuman(ctx, manager, action.id, message, epoch,
-              steerable ? "Sent an instruction" : resuming ? "Resumed the original session with" : "Started a new task in the resident runtime with");
+              steerable ? "Requested input" : resuming ? "Requested original-session continuation with" : "Requested a new resident task with");
+            if (epoch !== sessionEpoch) return;
             if (!sent) { if (fromFleet) return; continue; }
-            ctx.ui.notify(steerable ? "Instructions accepted; a completion report will follow." : "New turn accepted in the original session; a completion report will follow.", "info");
+            ctx.ui.notify(receiptText(sent), sent.receipt?.status === "unconfirmed" ? "warning" : "info");
             if (fromFleet) return;
-          } catch (error) { ctx.ui.notify((error as Error).message, "error"); if (fromFleet) return; }
+          } catch (error) { if (epoch !== sessionEpoch) return; ctx.ui.notify((error as Error).message, "error"); if (fromFleet) return; }
         }
-      } catch (error) { ctx.ui.notify((error as Error).message, "error"); }
+      } catch (error) { if (epoch === sessionEpoch) ctx.ui.notify((error as Error).message, "error"); }
       finally {
         panel = undefined; widget = undefined; deliver = undefined;
         stopInput();
-        ctx.ui.setWidget(AGENTS_PANEL_KEY, undefined);
+        if (epoch === sessionEpoch) ctx.ui.setWidget(AGENTS_PANEL_KEY, undefined);
         dismissPanel = undefined; panelBusy = false;
       }
   }
   pi.registerCommand("agents", {
-    description: "Manage subagents: view conversations and last run outcomes, message, start an idle task, resume, reply or release processes",
+    description: "Manage subagents: view conversations and last run outcomes, message, start an idle task, resume, reply, interrupt a turn or release processes",
     handler: (_args, ctx) => openAgents(ctx),
   });
 

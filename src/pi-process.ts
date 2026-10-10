@@ -43,7 +43,7 @@ export class PiProcess {
   private closing = false;
   private poisoned?: Error;
   private interrupting?: Promise<void>;
-  private run?: { started: boolean; validating: boolean; done: Promise<void>; resolve: () => void };
+  private run?: { started: boolean; validating: boolean; inFlightInputs: number; deferredTerminal?: WireRecord; done: Promise<void>; resolve: () => void };
 
   constructor(launch: Launch, args: string[], cwd: string, logFile: string, private readonly onRecord: (record: WireRecord) => void, private readonly timeout = 30_000) {
     const output = createWriteStream(logFile, { flags: "a", mode: 0o600 });
@@ -97,21 +97,37 @@ export class PiProcess {
     const run = this.run;
     if (record.type === "agent_start" && run) run.started = true;
     if (record.type === "agent_settled") {
-      if (!run?.started || run.validating) return;
-      run.validating = true;
-      // Pi events have no native turn ID. Fence the captured local token with an
-      // idle state response on the same ordered stream; stale terminals cannot
-      // settle a later streaming run. agent_end alone is never a terminal.
-      void this.request<{ isStreaming?: boolean; isCompacting?: boolean; pendingMessageCount?: number }>({ type: "get_state" }).then(state => {
-        if (this.run !== run) return;
-        if (state.isStreaming !== false || state.isCompacting || state.pendingMessageCount) { run.validating = false; return; }
-        this.run = undefined;
-        this.onRecord(record);
-        run.resolve();
-      }).catch(error => { this.poisoned = error; void this.kill(); });
+      if (!run?.started) return;
+      run.deferredTerminal = record;
+      this.validateTerminal(run);
       return;
     }
     this.onRecord(record);
+  }
+
+  private validateTerminal(run = this.run): void {
+    if (!run || this.run !== run || this.poisoned || this.exitError || run.validating || run.inFlightInputs || !run.deferredTerminal) return;
+    const terminal = run.deferredTerminal;
+    run.validating = true;
+    // Pi 1.1.0 prompt awaits input handlers before acknowledging preflight. Its
+    // get_state cannot see those inputs, which may start another internal turn.
+    // Keep one host assignment until every input has an outcome and native is idle.
+    void this.request<{ isStreaming?: boolean; isCompacting?: boolean; pendingMessageCount?: number }>({ type: "get_state" }).then(state => {
+      run.validating = false;
+      if (this.run !== run || this.poisoned || this.exitError) return;
+      // A newer terminal can arrive while this snapshot is in flight. Validate
+      // that event once, rather than publishing an older snapshot or polling.
+      if (run.deferredTerminal !== terminal) { this.validateTerminal(run); return; }
+      run.deferredTerminal = undefined;
+      if (state.isStreaming !== false || state.isCompacting || state.pendingMessageCount) return;
+      this.run = undefined;
+      this.onRecord(terminal);
+      run.resolve();
+    }).catch(error => {
+      run.validating = false;
+      if (this.run && this.run !== run) return;
+      this.poisoned ??= error; void this.kill();
+    });
   }
 
   /** Check before an adapter resets its run-local buffers as well as before writing. */
@@ -132,10 +148,12 @@ export class PiProcess {
       if (!command.streamingBehavior) {
         let resolve!: () => void;
         const done = new Promise<void>(r => { resolve = r; });
-        this.run = { started: false, validating: false, done, resolve };
+        this.run = { started: false, validating: false, inFlightInputs: 0, done, resolve };
       }
     }
     const id = `cli-subagents-${++this.nextId}`, reserved = this.run;
+    const input = command.type === "prompt" ? reserved : undefined;
+    if (input) input.inFlightInputs++;
     let nativeRejected = false;
     return new Promise<T>((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -151,13 +169,16 @@ export class PiProcess {
       });
     }).catch(error => {
       if (command.type === "prompt") {
-        // An explicit refusal before agent_start did not admit this run. Preserve the
-        // existing RPC ability to submit different work; ambiguous/started failures poison.
-        if (nativeRejected && !command.streamingBehavior && reserved && this.run === reserved && !reserved.started) {
+        // success:false is a preflight refusal for this input, not evidence that
+        // another input in this assignment failed or that an old run restarted.
+        if (nativeRejected && command.streamingBehavior) { /* No acceptance to undo or replay. */ }
+        else if (nativeRejected && reserved && this.run === reserved && !reserved.started && reserved.inFlightInputs === 1) {
           this.run = undefined; reserved.resolve();
         } else this.poisoned = error;
       }
       throw error;
+    }).finally(() => {
+      if (input) { input.inFlightInputs--; this.validateTerminal(input); }
     });
   }
 

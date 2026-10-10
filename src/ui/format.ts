@@ -42,6 +42,10 @@ export const isTerminal = (phase: Phase): boolean => ["completed", "failed", "st
 export const canStop = (phase: Phase): boolean => isActive(phase) || phase === "idle";
 export const canResume = (phase: Phase): boolean => ["completed", "failed", "stopped", "closed"].includes(phase);
 
+/** Only resident v2 backends expose current-run interruption; closing is a different operation. */
+export const canInterrupt = (view: Pick<AgentView, "protocolVersion" | "cli" | "phase">): boolean =>
+  view.protocolVersion === 2 && (view.cli === "pi" || view.cli === "codex") && ["starting", "running", "waiting"].includes(view.phase);
+
 /** Waiting children do not accept messages; their questions must go through /agent-reply. */
 export const canSteer = (phase: Phase): boolean => phase === "starting" || phase === "running";
 

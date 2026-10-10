@@ -162,7 +162,7 @@ test('viewer shows lifetime tokens and the child model, and sends inline without
   viewer.handleInput('\r'); viewer.handleInput('p'); viewer.handleInput('\r');
   assert.deepEqual(sent, ['p']);
   await wait(20);
-  assert.match(viewer.render(80).join('\n'), /Message accepted/);
+  assert.match(viewer.render(80).join('\n'), /without a delivery receipt/);
   assert.ok(viewer.render(80).every(line => visibleWidth(line) <= 80));
 });
 
@@ -175,13 +175,15 @@ test('the composer is unavailable for a read-only child and reports send failure
   assert.doesNotMatch(viewer.render(60).join('\n'), /Enter message|Enter resume/);
   viewer.handleInput('\r');
   assert.doesNotMatch(viewer.render(60).join('\n'), /✎ message/, 'a non-resumable child gets no composer');
-  const resumable = new ConversationViewer(tui, theme, () => {}, async () => ({ agent: { ...state, phase: 'completed' }, entries: [entry(1)], loading: false }), { intervalMs: 10, onSend: async () => { throw Error('worker has exited'); } });
+  let failedSends = 0;
+  const resumable = new ConversationViewer(tui, theme, () => {}, async () => ({ agent: { ...state, phase: 'completed' }, entries: [entry(1)], loading: false }), { intervalMs: 10, onSend: async () => { failedSends++; throw Error('worker has exited'); } });
   t.after(() => resumable.dispose());
   await wait(20);
   assert.match(resumable.render(60).join('\n'), /Enter resume/);
   resumable.handleInput('\r'); resumable.handleInput('x'); resumable.handleInput('\r');
   await wait(20);
   assert.match(resumable.render(60).join('\n'), /Send failed: worker has exited/);
+  assert.equal(failedSends, 1, 'the viewer must not retry a rejected host send');
 });
 
 test('multiline interaction notices occupy physical rows without escaping the viewer frame', async t => {
@@ -219,4 +221,159 @@ test('a loading snapshot followed by failure uses the normal retry interval', as
   await wait(80);
   assert.equal(calls, 2, 'a stale loading=true snapshot must not cause immediate retries');
   assert.match(viewer.render(80).join('\n'), /read failed/);
+});
+
+test('viewer offers t only for v2 Pi/Codex active runs, including while history loads', async () => {
+  for (const cli of ['pi', 'codex', 'claude', undefined]) for (const protocolVersion of [undefined, 2]) {
+    for (const phase of ['starting', 'running', 'waiting', 'stopping', 'idle', 'closed', 'completed', 'failed', 'stopped', 'unreachable']) {
+      const agent = { ...state, cli, protocolVersion, phase };
+      const allowed = protocolVersion === 2 && ['pi', 'codex'].includes(cli) && ['starting', 'running', 'waiting'].includes(phase);
+      const h = harness(async () => ({ agent, entries: [], loading: true }));
+      try {
+        await new Promise(setImmediate);
+        assert.equal(h.viewer.render(160).join('\n').includes('t interrupt'), allowed, JSON.stringify(agent));
+        h.viewer.handleInput('t');
+        assert.deepEqual(h.actions, allowed ? [{ kind: 'interrupt', id: state.id }] : []);
+        h.viewer.handleInput('t'); assert.equal(h.actions.length, allowed ? 1 : 0);
+      } finally { h.viewer.dispose(); }
+    }
+  }
+});
+
+test('viewer leaves Ctrl+C unhandled and preserves k scrolling, composer typing and x release', async t => {
+  const actions = [], sent = [];
+  const agent = { ...state, cli: 'pi', protocolVersion: 2 };
+  const tui = { terminal: { rows: 16, columns: 80 }, requestRender() {} };
+  const viewer = new ConversationViewer(tui, theme, action => actions.push(action), async () => ({ agent,
+    entries: Array.from({ length: 30 }, (_, i) => entry(i)), loading: false }), { intervalMs: 1000, onSend: message => { sent.push(message); } });
+  t.after(() => viewer.dispose()); await new Promise(setImmediate);
+  viewer.render(80); viewer.handleInput('k'); assert.match(viewer.render(80).join('\n'), /Paused/);
+  viewer.handleInput('\x03'); assert.deepEqual(actions, [], 'Ctrl+C is not a child control or viewer dismissal');
+  viewer.handleInput('\r'); viewer.handleInput('t'); viewer.handleInput('x'); viewer.handleInput('i'); viewer.handleInput('\x03');
+  assert.deepEqual(actions, []); viewer.handleInput('\r'); await new Promise(setImmediate);
+  assert.deepEqual(sent, ['txi'], 'the composer owns ordinary letters');
+  viewer.handleInput('x'); assert.deepEqual(actions, [{ kind: 'stop', id: agent.id }]);
+});
+
+test('narrow viewer retains both interrupt and release while preserving idle failure visibility', async () => {
+  for (const phase of ['running', 'waiting', 'idle']) for (const width of [40, 80]) for (const rows of [8, 16]) {
+    const agent = { ...state, cli: 'codex', protocolVersion: 2, phase, lastStatus: 'failed', error: 'failure evidence '.repeat(20) };
+    const viewer = new ConversationViewer({ terminal: { rows, columns: width }, requestRender() {} }, theme, () => {},
+      async () => ({ agent, entries: [], loading: false, model: 'long-model-name-for-state-visibility', usageComplete: false }), { onSend() {}, intervalMs: 1000 });
+    try {
+      await new Promise(setImmediate); const frame = viewer.render(width), text = frame.join('\n');
+      assert.ok(frame.length <= rows); assert.ok(frame.every(line => visibleWidth(line) <= width && !/[\r\n]/.test(line)));
+      if (phase === 'idle') { assert.match(text, /Idle.*Failed/); assert.match(text, /x release/); assert.doesNotMatch(text, /t interrupt/); }
+      else { assert.match(text, /t interrupt/); assert.match(text, /x stop/); }
+    } finally { viewer.dispose(); }
+  }
+});
+
+test('inline feedback uses the single onSend response receipt, not live phase or prior acceptance', async () => {
+  for (const [status, expected, color] of [['accepted', /Input accepted for delivery/, 'success'], ['queued', /Input queued/, 'warning'],
+    ['unconfirmed', /Delivery unconfirmed/, 'warning'], ['settled', /Run settled/, 'success'], ['released', /Processes released/, 'success'], ['not_running', /No active run/, 'dim']]) {
+    const response = { ...state, phase: 'idle', lastStatus: 'completed', accepted: true,
+      receipt: { operation: 'send', status, runId: 'receipt-run', runtimeId: 'receipt-runtime' } };
+    const actions = [], sent = [], paints = [];
+    const capture = { ...theme, fg: (fg, text) => { paints.push({ fg, text }); return text; } };
+    const viewer = new ConversationViewer({ terminal: { rows: 20, columns: 400 }, requestRender() {} }, capture, action => actions.push(action),
+      async () => ({ agent: { ...state, runId: 'newer-live-run' }, entries: [], loading: false }),
+      { intervalMs: 1000, onSend: async message => { sent.push(message); return response; } });
+    try {
+      await new Promise(setImmediate); viewer.handleInput('\r'); viewer.handleInput('instruction'); viewer.handleInput('\r'); await new Promise(setImmediate);
+      const text = viewer.render(400).join('\n'); assert.match(text, expected); assert.match(text, /receipt-run/);
+      assert.deepEqual(actions, [], 'an AgentView result is not a panel action');
+      assert.deepEqual(sent, ['instruction']);
+      assert.ok(paints.some(paint => paint.fg === color && expected.test(paint.text)), status);
+      assert.doesNotMatch(text, /model (?:has read|read|executed)|child continues|report will follow/i);
+      if (status === 'queued' || status === 'unconfirmed') assert.doesNotMatch(text, /(?:Message|Turn|Input) accepted/);
+    } finally { viewer.dispose(); }
+  }
+});
+
+test('missing receipts do not invent delivery, and failed results remain visible', async () => {
+  for (const response of [undefined, { ...state, accepted: true }, { ...state, phase: 'idle', lastStatus: 'failed', error: 'runtime failed',
+    receipt: { operation: 'send', status: 'settled', runId: state.runId } }]) {
+    const sent = [], actions = [];
+    const viewer = new ConversationViewer({ terminal: { rows: 20, columns: 200 }, requestRender() {} }, theme, action => actions.push(action),
+      async () => ({ agent: state, entries: [], loading: false }), { intervalMs: 1000,
+        onSend: async message => { sent.push(message); return response; } });
+    try {
+      await new Promise(setImmediate); viewer.handleInput('\r'); viewer.handleInput('input'); viewer.handleInput('\r'); await new Promise(setImmediate);
+      const text = viewer.render(200).join('\n');
+      assert.match(text, response?.lastStatus === 'failed' ? /Send failed:.*runtime failed/ : /without a.*receipt|Delivery unconfirmed/i);
+      assert.doesNotMatch(text, /Message accepted|Turn accepted|report will follow/); assert.deepEqual(actions, []);
+      assert.deepEqual(sent, ['input']);
+    } finally { viewer.dispose(); }
+  }
+});
+
+test('same-run accepted and unconfirmed receipts remain visible alongside immediate failure', async () => {
+  for (const status of ['accepted', 'unconfirmed']) for (const phase of ['idle', 'closed']) {
+    const response = { ...state, phase, lastStatus: 'failed', error: 'immediate runtime failure',
+      receipt: { operation: 'send', status, runId: state.runId, runtimeId: 'runtime' } };
+    const paints = [], sent = [];
+    const capture = { ...theme, fg: (color, text) => { paints.push({ color, text }); return text; } };
+    // The live snapshot has not caught up yet: the response alone must reveal the failure.
+    const viewer = new ConversationViewer({ terminal: { rows: 20, columns: 200 }, requestRender() {} }, capture, () => {},
+      async () => ({ agent: state, entries: [], loading: false }),
+      { intervalMs: 1000, onSend: async message => { sent.push(message); return response; } });
+    try {
+      await new Promise(setImmediate); viewer.handleInput('\r'); viewer.handleInput('once'); viewer.handleInput('\r'); await new Promise(setImmediate);
+      const text = viewer.render(200).join('\n');
+      assert.match(text, /Send failed:.*immediate runtime failure/); assert.match(text, new RegExp(`receipt: ${status}`, 'i'));
+      assert.ok(paints.some(paint => paint.color === 'error' && /immediate runtime failure/.test(paint.text)));
+      assert.match(text, new RegExp(state.runId)); assert.deepEqual(sent, ['once']);
+      const narrow = viewer.render(80).join('\n'); assert.match(narrow, /Send failed/); assert.match(narrow, new RegExp(`receipt: ${status}`, 'i'));
+    } finally { viewer.dispose(); }
+  }
+});
+
+test('a delivery receipt cannot inherit failure or outcome from a different live run', async () => {
+  for (const status of ['accepted', 'queued', 'unconfirmed', 'settled']) {
+    const response = { ...state, phase: 'idle', lastStatus: 'failed', error: 'previous run failed',
+      receipt: { operation: 'send', status, runId: 'different-run' } };
+    const viewer = new ConversationViewer({ terminal: { rows: 20, columns: 200 }, requestRender() {} }, theme, () => {},
+      async () => ({ agent: response, entries: [], loading: false }), { intervalMs: 1000, onSend: async () => response });
+    try {
+      await new Promise(setImmediate); viewer.handleInput('\r'); viewer.handleInput('input'); viewer.handleInput('\r'); await new Promise(setImmediate);
+      const text = viewer.render(200).join('\n');
+      assert.match(text, /Idle.*Failed/); assert.match(text, /different-run/);
+      assert.doesNotMatch(text, /Send failed:|Run settled \(failed\)/);
+      if (status === 'unconfirmed') assert.match(text, /Delivery unconfirmed/);
+      if (status === 'settled') assert.match(text, /Run settled \(outcome unknown\)/);
+    } finally { viewer.dispose(); }
+  }
+});
+
+test('baseline decision actions are returned untouched without a successful delivery notice', async () => {
+  const action = { kind: 'message', id: state.id, resume: true, message: 'original text' }, actions = [], sent = [];
+  const viewer = new ConversationViewer({ terminal: { rows: 20, columns: 80 }, requestRender() {} }, theme, value => actions.push(value),
+    async () => ({ agent: state, entries: [], loading: false }), { intervalMs: 1000,
+      onSend: async message => { sent.push(message); return action; } });
+  try {
+    await new Promise(setImmediate); viewer.handleInput('\r'); viewer.handleInput('original text'); viewer.handleInput('\r'); await new Promise(setImmediate);
+    assert.deepEqual(actions, [action]); assert.equal(actions[0], action); assert.deepEqual(sent, ['original text']);
+    assert.doesNotMatch(viewer.render(80).join('\n'), /Input accepted|Input queued|Run settled/);
+  } finally { viewer.dispose(); }
+});
+
+test('viewer disposal leaves host onSend completion intact without repainting or retrying', async () => {
+  let finish, renders = 0, sends = 0;
+  const pending = new Promise(resolve => { finish = resolve; }), records = [], actions = [];
+  const response = { ...state, receipt: { operation: 'send', status: 'unconfirmed', runId: 'captured-run', runtimeId: 'captured-runtime' } };
+  const viewer = new ConversationViewer({ terminal: { rows: 20, columns: 100 }, requestRender() { renders++; } }, theme, action => actions.push(action),
+    async () => ({ agent: state, entries: [], loading: false }), { intervalMs: 1000, onSend: async message => {
+      sends++;
+      const observed = await pending;
+      records.push({ message, observed }); // Host-owned work completes even after the viewer closes.
+      return observed;
+    } });
+  try {
+    await new Promise(setImmediate); viewer.handleInput('\r'); viewer.handleInput('once'); viewer.handleInput('\r');
+    viewer.dispose(); const before = renders;
+    finish(response); await new Promise(setImmediate);
+    assert.equal(sends, 1); assert.deepEqual(actions, []); assert.equal(renders, before);
+    assert.deepEqual(records, [{ message: 'once', observed: response }]); assert.equal(records[0].observed, response);
+  } finally { viewer.dispose(); }
 });

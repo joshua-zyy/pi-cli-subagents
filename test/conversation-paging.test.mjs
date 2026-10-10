@@ -113,7 +113,7 @@ test('paging state keeps the existing keys working', async t => {
   const actions = [];
   const tui = { terminal: { rows: 24, columns: 100 }, requestRender() {} };
   const viewer = new ConversationViewer(tui, theme, action => actions.push(action), async () => ({ agent, entries, loading: false, revision: 1, window: info(true) }),
-    { intervalMs: 20, onSend: async () => {} });
+    { intervalMs: 20, onSend: async () => ({ ...agent, receipt: { operation: 'send', status: 'accepted', runId: agent.runId } }) });
   t.after(() => viewer.dispose());
   await wait(40);
   assert.doesNotMatch(viewer.render(100).join('\n'), /TOOL_SECRET/);
@@ -122,7 +122,7 @@ test('paging state keeps the existing keys working', async t => {
   viewer.handleInput('\x0f');
   assert.doesNotMatch(viewer.render(100).join('\n'), /TOOL_SECRET/);
   viewer.handleInput('\r'); viewer.handleInput('hi'); viewer.handleInput('\r');
-  await until(() => viewer.render(100).join('\n').includes('Message accepted'));
+  await until(() => viewer.render(100).join('\n').includes('Input accepted'));
   viewer.handleInput('x');
   assert.deepEqual(actions, [{ kind: 'stop', id: agent.id }]);
 });
@@ -131,14 +131,14 @@ test('a page move is not new output and does not clear a pending delivery notice
   const entries = Array.from({ length: 30 }, (_, i) => entry(`E${i}`, `MESSAGE_${i}`));
   let revision = 1;
   const h = view(async () => ({ agent, entries, loading: false, revision, outputRevision: 1, window: info(true, false, 30) }),
-    { onSend: async () => {}, paging: { older: async () => ({ agent, entries, loading: false, revision: ++revision, outputRevision: 1, window: info(true, false, 30) }),
+    { onSend: async () => ({ ...agent, receipt: { operation: 'send', status: 'accepted', runId: agent.runId } }), paging: { older: async () => ({ agent, entries, loading: false, revision: ++revision, outputRevision: 1, window: info(true, false, 30) }),
       newer: async () => ({ agent, entries, loading: false, revision, outputRevision: 1, window: info(true) }),
       latest: async () => ({ agent, entries, loading: false, revision, outputRevision: 1, window: info(true) }) } });
   t.after(() => h.viewer.dispose());
   await until(() => h.frames.length > 0);
   h.viewer.handleInput('\r'); h.viewer.handleInput('hello'); h.viewer.handleInput('\r');
-  await until(() => h.text().includes('Message accepted'));
+  await until(() => h.text().includes('Input accepted'));
   h.viewer.handleInput('\x1b[H');
   await until(() => h.text().includes('HISTORY') || h.frames.length > 3);
-  assert.match(h.text(), /Message accepted/, 'an older page is not new child output');
+  assert.match(h.text(), /Input accepted/, 'an older page is not new child output');
 });

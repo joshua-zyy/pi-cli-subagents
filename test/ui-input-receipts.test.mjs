@@ -2,6 +2,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
+import { tempDir } from './helpers/tmp.mjs';
 import extension from '../dist/index.js';
 import { AgentManager } from '../dist/manager.js';
 import { WorkspaceDecisionRequired } from '../dist/workspace.js';
@@ -9,12 +12,20 @@ import { waitUntil } from '../dist/storage.js';
 
 const theme = {fg:(_,text)=>text, bg:(_,text)=>text, bold:text=>text, getThinkingBorderColor:()=>text=>text};
 function harness(t, beforePhase = 'completed', decision = 'none') {
+  const root = tempDir('ui-input-receipts'), originalParent = path.join(root,'parent.jsonl');
+  let parent = originalParent; fs.writeFileSync(parent,'{}\n');
+  const oldHome = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = path.join(root,'agent-home'); fs.mkdirSync(process.env.PI_CODING_AGENT_DIR);
+  const entriesByParent = new Map([[parent,[]]]);
   const before = {id:randomUUID(), runId:randomUUID(), cli:'pi', role:'worker', phase:beforePhase, questions:[], cwd:process.cwd(), updatedAt:1, logFile:'fixture'};
+  const instance = path.join(parent+'.subagents',before.id);fs.mkdirSync(instance,{recursive:true});
+  fs.writeFileSync(path.join(instance,'spec.json'),JSON.stringify({id:before.id,parentFile:parent}));
   const failed = {...before, runId:beforePhase === 'running' ? before.runId : randomUUID(), phase:'failed', accepted:beforePhase === 'running', error:'fixture native identity mismatch'};
   const notices = [], messages = [], calls = [], commands = new Map(), events = new Map();
   const ws = {id:randomUUID(), revision:3};
   const mocks = [
     t.mock.method(AgentManager.prototype, 'list', () => [before]),
+    t.mock.method(AgentManager.prototype, 'reports', () => []),
     t.mock.method(AgentManager.prototype, 'get', id => {assert.equal(id,before.id);return before;}),
     t.mock.method(AgentManager.prototype, 'eventLogs', () => []),
     t.mock.method(AgentManager.prototype, 'spawn', () => {throw Error('UI must not create a replacement instance');}),
@@ -25,23 +36,61 @@ function harness(t, beforePhase = 'completed', decision = 'none') {
       return failed;
     }),
   ];
-  let listener, viewer, running;
-  const ctx = {cwd:process.cwd(), mode:'tui', isProjectTrusted:()=>false,
-    sessionManager:{getSessionFile:()=>'/fixture/ui-parent.jsonl',getEntries:()=>[]},
-    ui:{theme, notify:(message,type)=>notices.push({message,type}), setWidget(){},
+  let listener, viewer, running, ticks = 0;
+  const ctx = {cwd:root, mode:'tui', isProjectTrusted:()=>false,isIdle:()=>true,abort(){throw Error('unexpected parent abort');},
+    sessionManager:{getSessionFile:()=>parent,getEntries:()=>entriesByParent.get(parent) ?? []},
+    ui:{theme, notify:(message,type)=>notices.push({message,type}), setWidget(){}, setStatus(){ticks++;},
       onTerminalInput(fn){listener=fn;return()=>{listener=undefined;};},
       editor:async()=> 'FOLLOW_UP', select:async()=> 'sync — update workspace from parent', confirm:async()=>true,
       custom(factory){return new Promise(resolve=>{viewer=factory({terminal:{rows:35,columns:400},requestRender(){}},theme,{},resolve);});},
     }};
   extension({on:(name,handler)=>events.set(name,handler), registerTool(){}, registerCommand:(name,command)=>commands.set(name,command), registerShortcut(){}, registerMessageRenderer(){},
-    sendMessage:(message,options)=>messages.push({message,options})});
-  return {before,failed,notices,messages,calls,ctx,commands,
+    sendMessage:(message,options)=>{messages.push({message,options,parent});entriesByParent.get(parent).push({type:'custom_message',customType:message.customType,details:message.details});}});
+  return {before,failed,notices,messages,calls,ctx,commands,root,originalParent,events,
+    wait:()=>running,ticks:()=>ticks,
+    input:key=>listener(key),
+    activate(file){parent=file;if(!entriesByParent.has(parent))entriesByParent.set(parent,[]);ctx.mode='rpc';events.get('session_start')({},ctx);ctx.mode='tui';},
     open(){running=commands.get('agents').handler('',ctx);},
     press(key){assert.deepEqual(listener(key),{consume:true});},
     viewer:()=>viewer,
-    async close(){events.get('session_shutdown')();await running;for(const mock of mocks)mock.mock.restore();},
+    async close(){events.get('session_shutdown')();await running;for(const mock of mocks)mock.mock.restore();
+      if(oldHome===undefined)delete process.env.PI_CODING_AGENT_DIR;else process.env.PI_CODING_AGENT_DIR=oldHome;},
   };
 }
+test('an input finishing after a parent switch is durably delivered only when its original parent returns', async t => {
+  const h = harness(t), started = Promise.withResolvers(), finished = Promise.withResolvers();
+  const sending = t.mock.method(AgentManager.prototype,'send',async()=>{started.resolve();return finished.promise;});
+  try {
+    h.open();h.press('i');h.press('s');await started.promise;
+    h.events.get('session_shutdown')();
+    h.activate(path.join(h.root,'other-parent.jsonl'));
+    finished.resolve(h.failed);await h.wait();
+    assert.equal(h.messages.length,0,'an old request must not write to the new parent');
+    const folder = path.join(h.originalParent+'.subagents',h.before.id,'human-actions');
+    assert.equal(fs.readdirSync(folder).filter(f=>f.endsWith('.json')).length,1);
+    await waitUntil('other parent monitor',()=>h.ticks()>0,2000);assert.equal(h.messages.length,0);
+    h.activate(h.originalParent);
+    await waitUntil('original parent action',()=>h.messages.length===1,2000);
+    assert.equal(h.messages.length,1);assert.equal(h.messages[0].parent,h.originalParent);
+    assert.match(h.messages[0].message.content,/FOLLOW_UP/);assert.match(h.messages[0].message.details.actionId,/^ha-/);
+    assert.equal(h.messages[0].options.triggerTurn,false);
+    const ticks=h.ticks();h.activate(h.originalParent);await waitUntil('reopened parent monitor',()=>h.ticks()>ticks,2000);
+    assert.equal(h.messages.length,1,'persisted action receipt survives monitor restart');
+  } finally {finished.resolve(h.failed);sending.mock.restore();await h.close();}
+});
+
+test('viewer Ctrl+C routes only to the busy parent; roster still yields to Pi', async t => {
+  const h = harness(t,'running');let aborts=0,childInterrupts=0;
+  h.ctx.isIdle=()=>false;h.ctx.abort=()=>aborts++;
+  const interrupt = t.mock.method(AgentManager.prototype,'interrupt',async()=>{childInterrupts++;return h.before;});
+  try {
+    h.open();assert.equal(h.input('\u0003'),undefined);assert.equal(aborts,0);
+    h.press('v');await waitUntil('viewer',()=>h.viewer(),2000);
+    h.press('\u0003');assert.equal(aborts,1);assert.equal(childInterrupts,0);
+    assert.equal(h.messages.length,0,'parent interruption is not a child action');
+  } finally {interrupt.mock.restore();await h.close();}
+});
+
 function assertFailureEvidence(h, text) {
   assert.match(text, /failed/i);
   for (const value of [h.failed.id,h.failed.runId,h.failed.error]) assert.ok(text.includes(value), `missing evidence: ${value}`);
@@ -69,6 +118,34 @@ test('roster reports failed input with original evidence after direct or confirm
       assert.equal(h.calls.length,decision === 'inherit' ? 3 : decision === 'baseline' ? 2 : 1,'no automatic retry after failure');
     } finally {await h.close();}
   }
+});
+
+test('both human input paths preserve unconfirmed receipts without claiming acceptance', async t => {
+  for (const inline of [false,true]) {
+    const h = harness(t,'completed');
+    Object.assign(h.failed,{phase:'waiting',error:undefined,receipt:{operation:'send',status:'unconfirmed',runId:h.failed.runId}});
+    try {
+      h.open();
+      if(inline){h.press('v');await waitUntil('viewer',()=>h.viewer(),2000);await new Promise(setImmediate);h.viewer().handleInput('\r');h.viewer().handleInput('FOLLOW_UP');h.viewer().handleInput('\r');}
+      else {h.press('i');h.press('s');}
+      await waitUntil('human receipt',()=>h.messages.length===1,2000);
+      assert.match(h.messages[0].message.content,/unconfirmed/i);
+      assert.doesNotMatch(h.messages[0].message.content,/(?:Instructions|New turn|Message) accepted/);
+      assert(!h.notices.some(n=>/(?:Instructions|New turn|Message) accepted/.test(n.message)));
+    } finally {await h.close();}
+  }
+});
+
+test('human t action interrupts rather than releases and records the actual receipt', async t => {
+  const h = harness(t,'running');h.before.protocolVersion=2;
+  let calls=0;
+  const interrupt = t.mock.method(AgentManager.prototype,'interrupt',async()=>{calls++;return {...h.before,phase:'idle',lastStatus:'stopped',receipt:{operation:'interrupt',status:'settled',runId:h.before.runId}};});
+  const close = t.mock.method(AgentManager.prototype,'close',async()=>{throw Error('interrupt must not release');});
+  try {
+    h.open();h.press('t');await waitUntil('interrupt receipt',()=>h.messages.length===1,2000);
+    assert.equal(calls,1);assert.match(h.messages[0].message.content,/captured turn has ended/);
+    assert.equal(h.messages[0].options.triggerTurn,false);
+  } finally {close.mock.restore();interrupt.mock.restore();await h.close();}
 });
 
 test('human task answers collect custom text locally and submit one logical reply', async t => {

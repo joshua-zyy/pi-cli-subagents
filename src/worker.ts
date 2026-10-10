@@ -9,7 +9,7 @@ import { ClaudeAdapter } from "./claude-adapter.js";
 import { claudeQuestionAnswers } from "./claude-question.js";
 import { nativeSession, type CliAdapter, type AdapterEvent } from "./cli-adapter.js";
 import { readJson, writeJson } from "./storage.js";
-import type { AgentSpec, AgentState, Control, Question, Report, StartRequest } from "./types.js";
+import type { AgentSpec, AgentState, Control, ControlResult, OperationReceipt, Question, Report, StartRequest } from "./types.js";
 
 async function run(dir: string, runId: string): Promise<void> {
   let runDir = path.join(dir, "runs", runId);
@@ -147,11 +147,15 @@ async function run(dir: string, runId: string): Promise<void> {
     }
   }
 
-  async function dispatch(input: Control): Promise<AgentState> {
+  async function dispatch(input: Control): Promise<ControlResult> {
+    let receipt: OperationReceipt | undefined;
     if (input.type === "status") return state;
     if (input.type === "close") {
       if (input.onlyIdle && (state.phase !== "idle" || runOpen || state.questions.length)) throw new Error("Runtime is no longer idle; it was not closed");
-      await release(true); return { ...state };
+      const captured = runId;
+      await release(true);
+      if (!released || !state.runtimeClosed) throw new Error("Runtime release is still pending; shutdown is not confirmed");
+      return { ...state, receipt: { operation: "stop", status: "released", runId: captured, runtimeId } };
     }
     if (ending || !rpc) throw new Error("Not accepted: worker is starting or shutting down; inspect its state first.");
     if (state.phase === "unreachable") throw new Error("Runtime execution is uncertain; release it before any new work");
@@ -165,21 +169,33 @@ async function run(dir: string, runId: string): Promise<void> {
       state.runId = next; state.startedAt = request.createdAt; state.accepted = false; state.phase = "starting";
       delete state.error; delete state.resultFile; delete state.lastStatus; delete state.lastActivity;
       save(); endpoint();
-      try { runCaptured = true; await rpc.start(input.message, runId); state.accepted = true; refreshPhase(); save(); }
+      try {
+        runCaptured = true; await rpc.start(input.message, runId); state.accepted = true; refreshPhase(); save();
+        receipt = { operation: "start", status: "accepted", runId, runtimeId };
+      }
       catch (error) { await release(true, { status: "failed", text: finalText, error: (error as Error).message }); throw error; }
     } else if (input.type === "interrupt") {
-      if (!runOpen) return { ...state };
-      if (!runCaptured) throw new Error("No captured turn to interrupt during startup; use close/release instead");
+      if (!runOpen || !runCaptured) return { ...state, receipt: { operation: "interrupt", status: "not_running", runId, runtimeId } };
+      if (spec.cli === "claude") throw new Error("Claude interrupt without resource release is not supported; use stop");
       const captured = runId;
       try {
         await rpc.interrupt();
         if (runId === captured && runOpen) settle({ status: "stopped", text: finalText, error: "Parent interrupted the current turn" });
+        // A natural terminal may beat the interrupt. Acknowledge settlement, not
+        // a claim that interruption caused the outcome or released the runtime.
+        receipt = { operation: "interrupt", status: "settled", runId: captured, runtimeId };
       } catch (error) { state.phase = "unreachable"; state.error = `Interrupt outcome uncertain: ${(error as Error).message}`; save(); throw error; }
     } else if (input.type === "send") {
+      if (!runOpen) throw new Error("No active run; use start for a new assignment");
       if (!state.accepted) throw new Error("Initial task has not been accepted; resolve any startup interaction first.");
       if (state.questions.some(q => q.isBlocking !== false)) throw new Error("The child has an unresolved interaction. Use subagent_reply or /agent-reply; a message is not an approval.");
       if (typeof input.message !== "string" || !input.message.trim() || !["steer", "followUp"].includes(input.mode)) throw new Error("Invalid message or delivery mode");
+      const captured = runId;
       await rpc.send(input.message, input.mode);
+      // Adapter success acknowledges this native request. In Pi, prompt with
+      // streamingBehavior can be handled/started at the settle boundary; the mode
+      // name alone is not queue or applied evidence (Pi 1.1.0 AgentSession.prompt).
+      receipt = { operation: "send", status: "accepted", runId: captured, runtimeId };
     } else if (input.type === "reply") {
       const q = state.questions.find((q) => q.id === input.id);
       if (!q || (q.expiresAt !== undefined && q.expiresAt <= Date.now())) throw new Error("The interaction has ended or does not exist");
@@ -217,7 +233,7 @@ async function run(dir: string, runId: string): Promise<void> {
       forgetQuestion(q.id);
       if (!ending) { refreshPhase(); save(); }
     } else throw new Error("Unknown control operation");
-    return { ...state, questions: [...state.questions] };
+    return { ...state, questions: [...state.questions], ...(receipt ? { receipt } : {}) };
   }
 
   try {
@@ -239,7 +255,7 @@ async function run(dir: string, runId: string): Promise<void> {
         commandQueue = operation.then(() => {}, () => {});
         const result = await operation;
         res.end(JSON.stringify(result));
-      } catch (error) { res.writeHead(400).end(JSON.stringify({ error: (error as Error).message })); }
+      } catch (error) { res.writeHead(400).end(JSON.stringify({ error: `Subagent ${spec.id}, run ${runId}, runtime ${runtimeId}: ${(error as Error).message}` })); }
     });
     server.requestTimeout = 40_000;
     await new Promise<void>((resolve, reject) => { server!.once("error", reject); server!.listen(0, "127.0.0.1", resolve); });

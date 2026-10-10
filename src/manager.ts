@@ -12,9 +12,9 @@ import { claudeLaunch } from "./claude-launch.js";
 import { inspectClaudeSession } from "./claude-adapter.js";
 import { nativeSession } from "./cli-adapter.js";
 import { modeError } from "./roles.js";
-import { WorkspaceStore, type ResumeOptions } from "./workspace.js";
+import { WorkspaceDecisionRequired, WorkspaceStore, type ResumeOptions } from "./workspace.js";
 import { directories, jsonFiles, processAlive, readJson, shorten, waitUntil, writeJson } from "./storage.js";
-import type { AgentSpec, AgentState, AgentView, Control, Delivery, Endpoint, Launch, NativeSession, Report, Role, SessionHandle, StartRequest, TaskRun } from "./types.js";
+import type { AgentSpec, AgentState, AgentView, Control, ControlResult, Delivery, Endpoint, Launch, NativeSession, OperationReceipt, Report, Role, SessionHandle, StartRequest, TaskRun } from "./types.js";
 
 const workerFile = fileURLToPath(new URL("./worker.js", import.meta.url));
 const idPattern = /^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/;
@@ -87,9 +87,11 @@ export class AgentManager {
   get(id: string): AgentView {
     return this.view(id, readJson<AgentState>(path.join(this.directory(id), "state.json")));
   }
-  private view(id: string, snapshot: AgentState | undefined): AgentView {
+  private view(id: string, snapshot: AgentState | undefined, receipt?: OperationReceipt): AgentView {
     const spec = this.spec(id), dir = this.directory(id);
-    let state = snapshot;
+    let state = snapshot ? { ...snapshot } : undefined;
+    // Operation acknowledgements are response-local, never part of a query view.
+    if (state) delete (state as ControlResult).receipt;
     if (!state) throw new Error(`Subagent ${id} has no runtime state yet; inspect ${dir}`);
     if (state.id !== id || !idPattern.test(state.runId) || !["starting", "running", "waiting", "stopping", "completed", "failed", "stopped", "idle", "closed", "unreachable"].includes(state.phase)
       || !Number.isInteger(state.workerPid) || state.workerPid < 0 || !Number.isFinite(state.updatedAt) || typeof state.accepted !== "boolean"
@@ -129,7 +131,7 @@ export class AgentManager {
     });
     const latest = history.at(-1);
     return { ...state, cli: spec.cli ?? "pi", role: spec.roleName, cwd: spec.cwd, ...(spec.workspace ? { workspace: spec.workspace, workspaceBaseline: spec.workspaceBaseline } : {}), history, runCount: runs.length,
-      ...(latest?.runId === current && latest.task ? { task: latest.task } : {}), ...(report ? { text: report.text, truncated: report.truncated } : {}) };
+      ...(latest?.runId === current && latest.task ? { task: latest.task } : {}), ...(report ? { text: report.text, truncated: report.truncated } : {}), ...(receipt ? { receipt } : {}) };
   }
   list(): AgentView[] {
     return directories(this.root).filter((id) => idPattern.test(id)).map((id) => {
@@ -211,7 +213,7 @@ export class AgentManager {
     return start(cwd);
   }
 
-  private async start(id: string, message: string, session?: NativeSession | SessionHandle): Promise<AgentView> {
+  private async start(id: string, message: string, session?: NativeSession | SessionHandle, operation: "start" | "send" = "start"): Promise<AgentView> {
     const dir = this.directory(id);
     if (existsSync(path.join(dir, "owner.lock"))) throw new Error("The previous worker still owns this session or a stale lock remains. Inspect it before resuming; concurrent owners are not allowed.");
     if (session && "sessionFile" in session && !existsSync(session.sessionFile)) throw new Error(`Original session file is missing: ${session.sessionFile}; will not silently create a new session.`);
@@ -228,28 +230,46 @@ export class AgentManager {
       child.on("error", (error) => writeJson(path.join(runDir, "error.json"), { error: error.message }));
       child.unref();
     } finally { closeSync(fd); }
+    let observed: AgentState | undefined;
     try {
-      return await waitUntil(`Subagent ${id} startup`, () => {
+      const result = await waitUntil(`Subagent ${id} startup`, () => {
         const failure = readJson<{ error: string }>(path.join(runDir, "error.json"));
         if (failure) throw new Error(failure.error);
         const state = readJson<AgentState>(path.join(dir, "state.json"));
         if (!state || state.runId !== runId) return undefined;
-        const view = this.get(id);
+        observed = state;
+        const view = this.view(id, state);
         if (view.phase === "unreachable") throw new Error(view.error);
         return view.accepted || ["waiting", "failed", "stopped", "completed", "idle", "closed"].includes(view.phase) ? view : undefined;
       }, 45_000);
+      return { ...result, receipt: { operation, status: result.accepted ? "accepted" : "unconfirmed", runId, ...(result.runtimeId ? { runtimeId: result.runtimeId } : {}) } };
     } catch (error) {
-      throw new Error(`Subagent ${id}: ${(error as Error).message}; records retained at ${dir}`);
+      throw this.diagnostic(id, operation, `${(error as Error).message}; records retained at ${dir}`, { runId, runtimeId: observed?.runtimeId });
     }
   }
 
-  private async request(id: string, input: Control): Promise<AgentState> {
+  private diagnostic(id: string, operation: string, error: unknown, state?: Pick<AgentState, "runId" | "runtimeId">): Error {
+    // Workspace choices carry revision/inheritance proof needed by the human UI.
+    if (error instanceof WorkspaceDecisionRequired) return error;
+    // Transport/server errors may already carry the actual captured identity.
+    if (error instanceof Error && (error.message.startsWith(`Subagent ${id},`) || error.message.includes(`for subagent ${id},`))) return error;
+    if (!state) { try { state = this.get(id); } catch { /* Do not hide the original failure with a diagnostic read. */ } }
+    return new Error(`${operation} for subagent ${id}${state ? `, run ${state.runId}, runtime ${state.runtimeId ?? "legacy"}` : ""}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+
+  private async request(id: string, input: Control): Promise<ControlResult> {
     const state = this.get(id);
-    if (!processAlive(state.workerPid)) throw new Error("Worker has exited; inspect the final state");
-    const endpoint = readJson<Endpoint>(path.join(this.directory(id), "endpoint.json"));
-    if (!endpoint || endpoint.runId !== state.runId || (state.protocolVersion === 2 &&
-      (endpoint.protocolVersion !== 2 || endpoint.runtimeId !== state.runtimeId))) throw new Error("Worker is not ready, or the connection record is stale");
-    return control(endpoint, input);
+    try {
+      if (!processAlive(state.workerPid)) throw new Error("Worker has exited; inspect the final state");
+      const endpoint = readJson<Endpoint>(path.join(this.directory(id), "endpoint.json"));
+      if (!endpoint || endpoint.runId !== state.runId || (state.protocolVersion === 2 &&
+        (endpoint.protocolVersion !== 2 || endpoint.runtimeId !== state.runtimeId))) throw new Error("Worker is not ready, or the connection record is stale");
+      const result = await control(endpoint, input);
+      const operation = input.type === "close" ? "stop" : input.type === "start" || input.type === "send" || input.type === "interrupt" ? input.type : undefined;
+      // A pre-P3 worker's accepted flag describes its initial task, not this command.
+      return operation ? { ...result, receipt: result.receipt ?? { operation, status: "unconfirmed", runId: result.runId,
+        ...(result.runtimeId ? { runtimeId: result.runtimeId } : {}) } } : result;
+    } catch (error) { throw this.diagnostic(id, input.type, error, state); }
   }
 
   async send(id: string, message: string, mode: Delivery = "steer", options: ResumeOptions = {}): Promise<AgentView> {
@@ -281,10 +301,14 @@ export class AgentManager {
       const prompt = notice ? `${message}\n\n[Workspace baseline]\n${notice}` : message;
       let state = this.get(id);
       if (state.phase === "unreachable") throw new Error(state.error);
-      if (state.phase === "idle") return this.view(id, await this.request(id, { type: "start", message: prompt }));
+      if (state.phase === "idle") {
+        const result = await this.request(id, { type: "start", message: prompt });
+        return this.view(id, result, result.receipt && { ...result.receipt, operation: "send" });
+      }
       if (["starting", "running", "waiting"].includes(state.phase)) {
         if (spec.cli === "codex" && mode === "followUp") throw new Error("Codex followUp while running is not supported; wait for this run to finish");
-        return this.view(id, await this.request(id, { type: "send", message: prompt, mode }));
+        const result = await this.request(id, { type: "send", message: prompt, mode });
+        return this.view(id, result, result.receipt);
       }
       await this.waitForRelease(state, "Previous worker release", 15_000);
       state = this.get(id);
@@ -292,16 +316,18 @@ export class AgentManager {
       if (!session || session.cli !== (spec.cli ?? "pi")) throw new Error("No resumable original session; will not silently create a new session");
       if (session.cli === "codex" && session.codexHome !== spec.codexHome) throw new Error("Codex native home changed; refusing to resume a different session store");
       if (session.cli === "claude") inspectClaudeSession(spec, session);
-      return this.start(id, prompt, session);
+      return this.start(id, prompt, session, "send");
     };
-    if (!spec.workspace) return send();
-    return this.workspaces.runAgent(spec.workspace, id, async (ws, notice) => {
-      const state = await send(notice);
-      if (state.accepted || state.phase === "completed" || state.lastStatus === "completed") writeJson(path.join(this.directory(id), "spec.json"), {
-        ...spec, workspaceBaseline: { commit: ws.baseCommit, revision: ws.revision },
-      });
-      return this.get(id);
-    }, options, beforeSync);
+    try {
+      if (!spec.workspace) return await send();
+      return await this.workspaces.runAgent(spec.workspace, id, async (ws, notice) => {
+        const state = await send(notice);
+        if (state.accepted || state.phase === "completed" || state.lastStatus === "completed") writeJson(path.join(this.directory(id), "spec.json"), {
+          ...spec, workspaceBaseline: { commit: ws.baseCommit, revision: ws.revision },
+        });
+        return this.view(id, state, state.receipt);
+      }, options, beforeSync);
+    } catch (error) { throw this.diagnostic(id, "send", error); }
   }
 
   /** Lock release follows CLI reaping; a terminal PID may already belong to another process. */
@@ -316,13 +342,34 @@ export class AgentManager {
     }, timeout);
   }
 
+  async interrupt(id: string): Promise<AgentView> {
+    const state = this.get(id);
+    try {
+      if (state.phase === "unreachable") throw new Error(state.error);
+      if (["completed", "failed", "stopped", "closed"].includes(state.phase)) {
+        await this.waitForRelease(state, "Interrupt closed runtime", 15_000);
+        return { ...state, receipt: { operation: "interrupt", status: "not_running", runId: state.runId,
+          ...(state.runtimeId ? { runtimeId: state.runtimeId } : {}) } };
+      }
+      // Even an observed idle runtime can become busy. The worker decides against
+      // its serialized, captured run; do not manufacture a verdict from this view.
+      const result = await this.request(id, { type: "interrupt" });
+      return this.view(id, result, result.receipt);
+    } catch (error) { throw this.diagnostic(id, "interrupt", error, state); }
+  }
+
   async close(id: string, onlyIdle = false): Promise<AgentView> {
     const state = this.get(id);
-    if (state.phase === "unreachable" && (!state.runtimeId || !processAlive(state.workerPid))) throw new Error(state.error);
-    if (onlyIdle && state.phase !== "idle") throw new Error("Runtime is no longer idle; it was not closed");
-    if (!["completed", "failed", "stopped", "stopping", "closed"].includes(state.phase)) await this.request(id, { type: "close", ...(onlyIdle ? { onlyIdle: true } : {}) });
-    await this.waitForRelease(state, "Subagent shutdown", 30_000);
-    return this.get(id);
+    try {
+      if (state.phase === "unreachable" && (!state.runtimeId || !processAlive(state.workerPid))) throw new Error(state.error);
+      if (onlyIdle && state.phase !== "idle") throw new Error("Runtime is no longer idle; it was not closed");
+      if (!["completed", "failed", "stopped", "stopping", "closed"].includes(state.phase)) await this.request(id, { type: "close", ...(onlyIdle ? { onlyIdle: true } : {}) });
+      await this.waitForRelease(state, "Subagent shutdown", 30_000);
+      const result = this.get(id);
+      const confirmed = result.protocolVersion === 2 && result.runtimeId === state.runtimeId && result.runtimeClosed === true && result.phase === "closed";
+      return { ...result, receipt: { operation: "stop", status: confirmed ? "released" : "unconfirmed", runId: result.runId,
+        ...(result.runtimeId ? { runtimeId: result.runtimeId } : {}) } };
+    } catch (error) { throw this.diagnostic(id, "stop", error, state); }
   }
 
   async reply(id: string, questionId: string, answer: Pick<Extract<Control, { type: "reply" }>, "value" | "answers" | "confirmed" | "cancelled">, decision: { actor: "human" | "parent"; reason?: string } = { actor: "human" }): Promise<AgentView> {

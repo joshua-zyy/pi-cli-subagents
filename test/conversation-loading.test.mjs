@@ -131,7 +131,7 @@ test('a send notice created during loading survives the first content publicatio
     t.after(() => h.viewer.dispose());
     await until(() => calls === 2);
     h.viewer.handleInput('\r'); h.viewer.handleInput('hello'); h.viewer.handleInput('\r');
-    const notice = failure ? /Send failed: child gone/ : /Message accepted/;
+    const notice = failure ? /Send failed: child gone/ : /without a delivery receipt/;
     await until(() => notice.test(h.text()));
     finish();
     await until(() => h.text().includes('FIRST_CONTENT'));

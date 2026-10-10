@@ -32,8 +32,10 @@ Inspect the retained applied-sync journal and the native error, preserve the ori
 explicitly choose `keep` or `sync` before trying again. Do not roll back the files or start a
 replacement thread automatically — see [workspaces.md](workspaces.md) for what each baseline means.
 
-## Stopping versus finishing
+## Interrupting, releasing and reading receipts
 
-`subagent({ action: "stop", id })` stops active work but keeps the native session for later continuation; never use it merely
-because a task finished. A malformed request from a child that has already ended cannot be answered
-again — inspect the current state instead.
+Use `subagent({ action: "interrupt", id })` to end only the captured Pi/Codex turn while retaining its runtime. A `not_running` receipt does not cancel a pending initial task; use `stop` when startup must be cancelled or native resources must be released. Unsupported interruption fails explicitly.
+
+`subagent({ action: "stop", id })` releases active or idle native processes but keeps the session/history; do not stop merely because a task finished. Release an idle writer when integration, synchronization or handoff actually needs it. A completed report alone is not release proof.
+
+Read the operation receipt, not an old `accepted` bit: `accepted` is native acknowledgement, not model consumption; `settled` does not claim that interrupt caused the outcome; only `released` confirms release. On `unconfirmed`, inspect before any retry. A request already resolved or expired cannot be answered again. Human intervention records belong to the original parent session and can be delivered there after it is reopened; they never authorize repeating the child operation.

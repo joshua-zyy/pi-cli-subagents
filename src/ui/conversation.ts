@@ -3,10 +3,10 @@ import type { AgentView } from "../types.js";
 import type { PanelAction } from "./panel.js";
 import type { TranscriptEntry, TranscriptPageBoundary, TranscriptSnapshot } from "./transcript.js";
 import { ConversationHistory } from "./conversation-history.js";
-import { canMessage, canResume, canStop, formatElapsed, formatTokens, isActive, oneLine, rightAlign, shortId, viewElapsed, viewStatus } from "./format.js";
+import { canInterrupt, canMessage, canResume, canStop, formatElapsed, formatTokens, hasFailure, isActive, oneLine, rightAlign, shortId, viewElapsed, viewStatus } from "./format.js";
 
 export interface ConversationSnapshot extends TranscriptSnapshot {
-  agent: Pick<AgentView, "id" | "role" | "phase" | "runId"> & Partial<Pick<AgentView, "startedAt" | "updatedAt" | "lastStatus" | "error">>;
+  agent: Pick<AgentView, "id" | "role" | "phase" | "runId"> & Partial<Pick<AgentView, "startedAt" | "updatedAt" | "lastStatus" | "error" | "cli" | "protocolVersion">>;
 }
 /** Structural subset of Pi's theme; tests can pass a minimal object. */
 export interface ViewerTheme {
@@ -39,8 +39,8 @@ export interface ConversationViewerOptions {
   markdownTheme?: ViewerMarkdownTheme;
   /** Frame color, normally Pi's editor border so the overlay matches the input box. */
   frameColor?: (text: string) => string;
-  /** Deliver inline, or return an action to close the overlay before opening a decision dialog. */
-  onSend?: (message: string) => Promise<void | PanelAction> | void | PanelAction;
+  /** The host sends and records in the original parent; return its response or a decision-dialog action. */
+  onSend?: (message: string) => Promise<void | PanelAction | AgentView> | void | PanelAction | AgentView;
   /** On-demand history: called only while the reader walks past a loaded edge, never in the background. */
   paging?: {
     older(boundary?: TranscriptPageBoundary): Promise<ConversationSnapshot>;
@@ -356,9 +356,28 @@ export class ConversationViewer {
     this.notice = { text: newRun ? "Starting a new turn in the original session..." : "Delivering to the running child...", color: "dim", revision: this.snapshot?.outputRevision ?? this.snapshot?.revision };
     this.tui.requestRender();
     try {
-      const action = await this.onSend(message);
-      if (action) { this.finish(action); return; }
-      this.notice = { text: newRun ? "Turn accepted in the original session; a report will follow." : "Message accepted; the child continues in the same session.", color: "success", revision: this.snapshot?.outputRevision ?? this.snapshot?.revision };
+      const response = await this.onSend(message);
+      if (response && "kind" in response) { this.finish(response); return; }
+      if (this.closed) return;
+      const receipt = response?.receipt;
+      let text = "Input request returned without a delivery receipt; inspect the run before retrying.";
+      let color = "warning";
+      const sameRun = !receipt || receipt.runId === response?.runId;
+      if (response && hasFailure(response) && sameRun) {
+        text = `Send failed: ${receipt ? `[receipt: ${receipt.status}] ` : ""}${response.error ?? "The run failed; inspect its result."}`;
+        color = "error";
+      } else {
+        switch (receipt?.status) {
+          case "accepted": text = "Input accepted for delivery; model consumption/execution is not confirmed."; color = "success"; break;
+          case "queued": text = "Input queued; delivery to the model is not confirmed."; break;
+          case "unconfirmed": text = "Delivery unconfirmed; inspect this run before retrying."; break;
+          case "settled": text = `Run settled (${sameRun ? response?.lastStatus ?? "outcome unknown" : "outcome unknown"}); inspect its result.`; color = "success"; break;
+          case "released": text = "Processes released; the original session is retained."; color = "success"; break;
+          case "not_running": text = "No active run; background activity was not interrupted."; color = "dim"; break;
+        }
+      }
+      if (receipt) text += ` Run: ${receipt.runId}.`;
+      this.notice = { text, color, revision: this.snapshot?.outputRevision ?? this.snapshot?.revision };
     } catch (error) {
       this.notice = { text: `Send failed: ${(error as Error).message}`, color: "error" };
     } finally {
@@ -368,7 +387,8 @@ export class ConversationViewer {
   }
 
   handleInput(data: string): void {
-    if (this.closed) return;
+    // Do not bind Ctrl+C to child controls or consume it in the composer; the host owns its routing.
+    if (this.closed || matchesKey(data, "ctrl+c")) return;
     // Like tintinweb/pi-subagents, derive scroll bounds from current content, never the last paint.
     // requestRender is asynchronous: several key presses and a page can share a single host frame.
     this.syncScroll();
@@ -379,7 +399,7 @@ export class ConversationViewer {
     const max = Math.max(0, this.totalLines - this.viewport);
     const page = Math.max(1, this.viewport);
     let direction: "older" | "newer" | undefined;
-    if (matchesKey(data, "escape") || matchesKey(data, "q") || matchesKey(data, "ctrl+c")) { this.finish(); return; }
+    if (matchesKey(data, "escape") || matchesKey(data, "q")) { this.finish(); return; }
     if (agent && this.onSend && !this.sending && canMessage(agent.phase) && matchesKey(data, "return")) { this.openComposer(); return; }
     if (this.toolKeys().some(key => matchesKey(data, key))) {
       this.toggleTools(); this.tui.requestRender(); return;
@@ -405,7 +425,8 @@ export class ConversationViewer {
     }
     else if (agent && !this.sending && matchesKey(data, "s") && canMessage(agent.phase)) {
       this.finish({ kind: "message", id: agent.id, resume: canResume(agent.phase) }); return;
-    } else if (agent && matchesKey(data, "x") && canStop(agent.phase)) { this.finish({ kind: "stop", id: agent.id }); return; }
+    } else if (agent && matchesKey(data, "t") && canInterrupt(agent)) { this.finish({ kind: "interrupt", id: agent.id }); return; }
+    else if (agent && matchesKey(data, "x") && canStop(agent.phase)) { this.finish({ kind: "stop", id: agent.id }); return; }
     if (direction === "newer" && this.follow && (this.pagingInFlight === "older" || this.history.readerWindow?.atEnd === false)) this.requestPage("latest");
     if (this.follow && !wasFollowing && !this.pagingInFlight && !this.pagingQueued && this.history.readerSnapshot) {
       this.adopt(this.history.readerSnapshot);
@@ -488,13 +509,14 @@ export class ConversationViewer {
     const toolKey = this.toolKeys()[0];
     if (toolKey && this.snapshot?.entries.some(entry => entry.kind === "tool")) hints.push(`${toolKey} tools`);
     if (agent && this.onSend && !this.sending && canMessage(agent.phase)) hints.push(canResume(agent.phase) ? "Enter resume" : agent.phase === "idle" ? "Enter new task" : "Enter message");
+    if (agent && canInterrupt(agent)) hints.push("t interrupt");
     if (agent && canStop(agent.phase)) hints.push(agent.phase === "idle" ? "x release" : "x stop");
     hints.push("Esc close");
     // Keep the most useful hints when the width is limited: dismissal and actions first, then scrolling.
     const styled = (items: string[]): string => this.theme.fg("dim", items.join(" · "));
-    const priority = [...hints].sort((a, b) => rank(a) - rank(b));
+    const priority = [...hints].sort((a, b) => rank(a, hints.includes("t interrupt")) - rank(b, hints.includes("t interrupt")));
     // A long failure must not hide how to release an idle runtime or resume a closed one.
-    const actions = hints.filter(hint => hint === "Esc close" || hint.startsWith("Enter ") || hint.startsWith("x "));
+    const actions = hints.filter(hint => hint === "Esc close" || hint === "t interrupt" || hint.startsWith("Enter ") || hint.startsWith("x "));
     const statusText = truncateToWidth(status, Math.max(0, inner - visibleWidth(styled(actions)) - 1));
     let chosen = new Set<string>();
     for (const hint of priority) {
@@ -620,9 +642,9 @@ function formatArgs(input: string | undefined): string {
 }
 
 /** Hint priority when the footer is too narrow: dismissal, actions, then scrolling. */
-function rank(hint: string): number {
+function rank(hint: string, interrupt = false): number {
   if (hint === "Esc close") return 0;
-  if (hint === "x release") return 1;
+  if (hint === "x release" || hint === "t interrupt" || (interrupt && hint === "x stop")) return 1;
   if (hint.endsWith(" tools")) return 2;
   if (hint.startsWith("Enter ")) return 3;
   if (hint === "x stop") return 4;

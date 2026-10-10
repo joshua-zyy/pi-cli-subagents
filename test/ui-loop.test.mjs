@@ -248,7 +248,7 @@ test('direct human actions are recorded for the parent without interrupting it',
   await waitUntil('instruction recorded', () => human().length === 1);
   assert.equal(human()[0].options.triggerTurn, false);
   assert.match(human()[0].message.content, new RegExp(holding.id));
-  assert.match(human()[0].message.content, /worker\] Sent an instruction: "HOLD and also check the docs"/);
+  assert.match(human()[0].message.content, /worker\] Requested input: "HOLD and also check the docs"/);
   assert.match(human()[0].message.content, /does not widen the task's original authorization/);
   assert.equal(human()[0].message.details.agentId, holding.id);
   assert.equal(human()[0].message.details.ids, undefined, 'human entries must not count as report receipts');
@@ -268,7 +268,7 @@ test('direct human actions are recorded for the parent without interrupting it',
   await stop.press('i'); await stop.press('x');
   await stop.press(keys.escape); await stop.running;
   await waitUntil('stop recorded', () => human().length === 3);
-  assert.match(human()[2].message.content, new RegExp(`${holding.id}.*Stopped active work`, 's'));
+  assert.match(human()[2].message.content, new RegExp(`${holding.id}.*Native processes released`, 's'));
   assert.equal(h.manager.get(holding.id).phase, 'closed');
   assert.equal(h.manager.get(holding.id).lastStatus, 'stopped');
   assert.equal(fs.existsSync(path.join(h.manager.root, holding.id, 'owner.lock')), false);

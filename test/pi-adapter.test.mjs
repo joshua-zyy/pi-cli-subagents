@@ -184,7 +184,9 @@ test('Pi ambiguous interrupt poisons the runtime until resource release, even af
     await assert.rejects(c.interrupt(), /uncertain|timed out/i);
     // A later genuine idle/terminal must not silently rehabilitate an uncertain runtime.
     c.rpc.child.stdin.write(JSON.stringify({ type: 'prompt', message: 'late', streamingBehavior: 'steer' }) + '\n');
-    await settled(events, 'one');
+    await waitUntil('late native terminal in the wire log', () => fs.readFileSync(c.options.logFile, 'utf8').includes('"type":"agent_settled"'));
+    assert.equal((await c.rpc.request({ type: 'get_state' })).isStreaming, false);
+    assert.equal(events.some(e => e.type === 'settled'), false, 'poisoned validation cannot publish an idle assignment');
     await assert.rejects(c.start('must not replay', 'two'), /uncertain|poison|stop|release/i);
     await assert.rejects(c.send('must not inject', 'steer'), /uncertain|poison|stop|release/i);
     assert.equal((await c.stop()).exit.code, 0);

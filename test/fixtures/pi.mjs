@@ -3,13 +3,17 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { randomUUID } from 'node:crypto';
+import { writeJson } from '../../dist/storage.js';
 const flag = (name) => process.argv[process.argv.indexOf(name) + 1];
 const sessionFile = process.argv.includes('--session') ? flag('--session') : path.join(flag('--session-dir'), 'fake-session.json');
 fs.mkdirSync(path.dirname(sessionFile), { recursive: true });
 // Native header identity, with fixture-only task state in extra fields (no real model history).
 const session = fs.existsSync(sessionFile) ? JSON.parse(fs.readFileSync(sessionFile, 'utf8')) : { type: 'session', version: 3, id: randomUUID(), cwd: process.cwd(), timestamp: new Date().toISOString(), messages: [] };
-const save = () => fs.writeFileSync(sessionFile, JSON.stringify(session));
-let active = false, buffer = '', question = false, settling;
+let active = false, buffer = '', question = false, settling, traceInputs = false;
+// Controlled input probes read progress concurrently; reuse the existing atomic
+// writer for those snapshots rather than exposing a truncate/write window.
+const save = () => traceInputs ? writeJson(sessionFile, session) : fs.writeFileSync(sessionFile, JSON.stringify(session));
+const deferredInputs = new Map();
 const emit = (record) => process.stdout.write(JSON.stringify(record) + '\n');
 const response = (cmd, data = {}) => emit({ type: 'response', id: cmd.id, command: cmd.type, success: true, data });
 const dialogs = new Map();
@@ -48,13 +52,21 @@ function finish(text, stopReason = 'stop') {
   session.messages.push(message); save();
   emit({ type: 'message_end', message }); emit({ type: 'agent_end' });
   clearTimeout(settling);
-  settling = setTimeout(() => { active = false; emit({ type: 'agent_settled' }); }, 100);
+  settling = setTimeout(() => {
+    active = false;
+    if (traceInputs) { session.fixtureActive = false; session.fixtureSettledCount = (session.fixtureSettledCount ?? 0) + 1; save(); }
+    emit({ type: 'agent_settled' });
+  }, 100);
 }
 function handle(cmd) {
+  if (cmd.type === 'fixture/finish') return finish(cmd.text);
+  if (cmd.type === 'fixture/pending') { session.fixturePendingCount = cmd.count; save(); return response(cmd); }
   if (cmd.type === 'fixture/emit') { for (const record of cmd.records) emit(record); return; }
   if (cmd.type === 'fixture/dialog') return independentDialog(cmd.dialog);
   if (cmd.type === 'get_state') {
-    const state = { sessionId: session.id, sessionFile, isStreaming: active };
+    if (traceInputs) { session.fixtureStateReads = (session.fixtureStateReads ?? 0) + 1; save(); }
+    const state = { sessionId: session.id, sessionFile, isStreaming: active,
+      ...(session.fixturePendingCount !== undefined ? { pendingMessageCount: session.fixturePendingCount } : {}) };
     if (!startupDialogOpened && ['--startup-dialog', '--startup-dialog-after-state', '--startup-dialog-with-state'].some(flag => process.argv.includes(flag))) {
       startupDialogOpened = true;
       const afterState = process.argv.includes('--startup-dialog-after-state'), withState = process.argv.includes('--startup-dialog-with-state');
@@ -83,12 +95,34 @@ function handle(cmd) {
     question = false; return finish(cmd.cancelled ? 'CANCELLED' : cmd.value ?? (cmd.confirmed ? 'ALLOW' : 'DENY'));
   }
   if (cmd.type !== 'prompt') return emit({ type: 'response', id: cmd.id, success: false, error: 'unsupported command' });
+  if (cmd.streamingBehavior && cmd.message.startsWith('DEFER_INPUT ')) {
+    // Model the real asynchronous input-handler window. A separate test-owned
+    // file releases preflight; get_state must not be needed to make progress.
+    const input = JSON.parse(cmd.message.slice(12));
+    if (!/^[a-z0-9-]+$/.test(input.key) || deferredInputs.has(input.key)) throw new Error('invalid deferred input key');
+    traceInputs = true;
+    (session.fixtureInputRequests ??= []).push(input.key); save();
+    if (deferredInputs.size === 0 && active) finish('A done');
+    const timer = setInterval(() => {
+      if (!fs.existsSync(path.join(process.cwd(), `input-${input.key}.release`))) return;
+      clearInterval(timer); deferredInputs.delete(input.key);
+      if (input.outcome === 'reject') return emit({ type: 'response', id: cmd.id, success: false, error: 'fixture preflight rejected' });
+      if (input.outcome === 'handled') return response(cmd, { disposition: 'handled' });
+      if (input.outcome === 'queued') { session.fixturePendingCount = 1; save(); return response(cmd, { disposition: 'queued' }); }
+      handle({ ...cmd, message: input.message });
+    }, 10);
+    deferredInputs.set(input.key, timer);
+    return;
+  }
   if (cmd.message === 'REJECT') return emit({ type: 'response', id: cmd.id, success: false, error: 'rejected by fixture' });
   if (active && !cmd.streamingBehavior) return emit({ type: 'response', id: cmd.id, success: false, error: 'already running' });
   session.messages.push({ role: 'user', content: cmd.message }); save();
   // Keep the actual baseline notice in the native transcript, then execute the fixture task.
   if (cmd.message.includes('\n\n[Workspace baseline]\n')) cmd = { ...cmd, message: cmd.message.split('\n\n[Workspace baseline]\n')[0] };
-  active = true; response(cmd); emit({ type: 'agent_start' });
+  const disposition = active ? 'queued' : 'started';
+  active = true;
+  if (traceInputs) { session.fixtureActive = true; save(); }
+  response(cmd, { disposition }); emit({ type: 'agent_start' });
   if (cmd.message.startsWith('HOLD')) return;
   if (cmd.message === 'ASK_PARENT') { void askParent().catch(error=>finish(error.message,'error')); return; }
   if (cmd.message === 'RUNTIME_UI') {
@@ -149,4 +183,4 @@ process.stdin.on('data', (chunk) => {
     if (line.trim()) handle(JSON.parse(line));
   }
 });
-process.stdin.on('end', () => { clearTimeout(settling); });
+process.stdin.on('end', () => { clearTimeout(settling); for (const timer of deferredInputs.values()) clearInterval(timer); deferredInputs.clear(); });

@@ -77,7 +77,7 @@ pi --extension /absolute/path/to/pi-cli-subagents/dist/index.js \
 
 ## 查看与续聊
 
-输入 **`/agents`** 或按 **Ctrl+Alt+A** 打开面板。用 **↑/↓** 选择实例，**Enter/v** 查看实时对话，**s** 发消息或恢复，**r** 回答请求，**x** 停止。关闭查看器不会停止子代理。首次打开只读取一段有界的尾部窗口，之后只跟随新追加的字节；向上翻阅（**PgUp**、**↑**）接近已加载内容顶部约两屏时，按方向提前加载更早的一页，并保持当前阅读位置；**Home** 可直接触发。加载期间继续向上翻阅的距离会在数据到达后执行，同方向请求合并，不会因为靠近另一端而反向加载；**End** 会取消此前的向上翻阅意图。磁盘读取页最多保留 300 条；页面另有独立的内容列表（最多 1200 条、8 MiB 文本与标识预算），不会随着读取窗口换页而整段替换。超限时优先淘汰翻阅方向另一端的非可见内容，不移除正在阅读的条目；暂停时屏内内容固定，回到末尾后同步已读取的最新内容。仍能逐页翻到最早的记录，也能向后逐页翻回；**End** 重新锚定到最新输出。在同一进程内再次打开同一实例会复用已分页的窗口，因此停在旧页的窗口不会自动跳回最新，需按 **End** 明确回尾；日志被替换或截断时该窗口作废。只有在已加载窗口确实覆盖了全部 run 时才显示整段 token 统计，否则头部显示 **Stats incomplete**，不会显示不完整的数字冒充总量。期间仍可翻阅、查看状态、发消息或停止，且从不改写事件日志。
+输入 **`/agents`** 或按 **Ctrl+Alt+A** 打开面板。用 **↑/↓** 选择实例，**Enter/v** 查看实时对话，**s** 发消息或恢复，**r** 回答请求，**t** 中断 Pi/Codex v2 当前轮，**x** 释放进程。关闭查看器不会停止子代理。首次打开只读取一段有界的尾部窗口，之后只跟随新追加的字节；向上翻阅（**PgUp**、**↑**）接近已加载内容顶部约两屏时，按方向提前加载更早的一页，并保持当前阅读位置；**Home** 可直接触发。加载期间继续向上翻阅的距离会在数据到达后执行，同方向请求合并，不会因为靠近另一端而反向加载；**End** 会取消此前的向上翻阅意图。磁盘读取页最多保留 300 条；页面另有独立的内容列表（最多 1200 条、8 MiB 文本与标识预算），不会随着读取窗口换页而整段替换。超限时优先淘汰翻阅方向另一端的非可见内容，不移除正在阅读的条目；暂停时屏内内容固定，回到末尾后同步已读取的最新内容。仍能逐页翻到最早的记录，也能向后逐页翻回；**End** 重新锚定到最新输出。在同一进程内再次打开同一实例会复用已分页的窗口，因此停在旧页的窗口不会自动跳回最新，需按 **End** 明确回尾；日志被替换或截断时该窗口作废。只有在已加载窗口确实覆盖了全部 run 时才显示整段 token 统计，否则头部显示 **Stats incomplete**，不会显示不完整的数字冒充总量。期间仍可翻阅、查看状态、发消息或停止，且从不改写事件日志。
 
 查看器借鉴 [tintinweb/pi-subagents](https://github.com/tintinweb/pi-subagents) 的“会话内容列表 + 显示偏移 + 自动跟随”模型，每次按键按当前内容计算滚动边界；本项目额外适配独立 CLI 的按需日志读取，而非直接持有 SDK 的 `session.messages`。
 
@@ -85,7 +85,7 @@ pi --extension /absolute/path/to/pi-cli-subagents/dist/index.js \
 
 | 父代理可用工具 | 用途 |
 | --- | --- |
-| `subagent` | `start` 启动角色、`send` 向原实例发消息、`stop` 停止当前工作 |
+| `subagent` | `start` 启动角色、`send` 向原实例发消息、`interrupt` 中断当前轮、`stop` 释放进程 |
 | `subagent_query` | `list` 查看元数据与工作区、`get` 查看实例详情、`result` 读取指定轮次结果 |
 | `subagent_reply` | 附具体理由，回答一个当前请求 |
 | `subagent_workspace` | 显式 `create` 托管工作树或 `integrate` 待集成改动 |
@@ -128,6 +128,12 @@ Pi 和 Codex 支持运行中的 `steer` 消息；运行中的 `followUp` 仅 Pi 
 - **本地记录可能包含敏感源码。** 会话、日志、快照和备份位于父会话旁的 `<父会话文件>.subagents/`，关闭实例不会删除它们。
 - **兼容性有边界。** Pi 是主要的端到端验证对象。Codex 协议按 CLI 0.159.2 核对；Claude 需要 PATH 中有原生 Claude Code >=2.1.283（Windows 为 `claude.exe`）。真实父 Pi → Codex/Claude 编排、实时 TUI 审批/基线对话框及任意崩溃恢复尚未完整验证。
 
+### 操作回执与人工干预
+
+`start/send/interrupt/stop` 返回绑定实际 run/runtime 的临时 `receipt`。`accepted` 只表示原生请求已确认，不表示模型已读或任务成功；`unconfirmed` 表示重试前先检查。`settled` 只确认捕获轮已结束，不把自然完成说成中断造成；`not_running` 表示无捕获的活跃轮（不取消待启动任务），`released` 表示资源已释放。当前适配器没有逐消息入队／注入证明时不输出这类保证，查询快照也不伪造过去的投递回执。
+
+人工动作保存于原实例旁，只投递回原父会话，包括 RPC 返回前已切换会话的情况。它使用独立的 `actionId` 消息收据，不冒充完成报告；`triggerTurn:false` 不启动主代理模型工作。重开原会话可补投已保存的记录，不重发子代理操作；记录写入之前的故障不属于该恢复保证。对话浮层中 **Ctrl+C** 中断忙碌的父代理，不中断选中的子代理；父代理空闲时则关闭浮层。
+
 ### 驻留与释放
 
 新的 Pi/Codex worker 在一轮结束后进入 **idle**；`lastStatus` 和原始 run 报告保留本轮结果。向 idle 发送任务会在同一 worker/CLI 开始新 run。`subagent stop`（或查看器 **x**）释放进程树并显示 **closed**，不覆盖已经完成的结果；向 closed 发送任务则在新 runtime 恢复同一原生会话。Claude 目前仍采用明确的非驻留 native-resume 路径。驻留不保证进程永久存活，也不授权额外模型工作。
@@ -153,6 +159,7 @@ npm run test:list # 只列本地选集，不构建或执行测试
 
 - [Paseo](https://github.com/getpaseo/paseo)：[驻留生命周期及捕获轮次的取消语义](https://github.com/getpaseo/paseo/blob/29db2b79809fc032860ff4e8ee360fbe0073c3e9/docs/agent-lifecycle.md)来源，适配为扩展自有的 worker/control 协议；Pi 工具调用与对话的关联逻辑改编自其[固定版本的映射器](https://github.com/getpaseo/paseo/blob/99fc204c55c8c1666477282eeba562ba87a3135f/packages/server/src/server/agent/providers/pi/extensions/rpiv-ask-user-question/index.ts)（Apache-2.0）。Codex 问题归一化与答案映射也改编自其[固定版本的 Codex 适配器](https://github.com/getpaseo/paseo/blob/06fe97c9019c1db4a5264dfb9b369b93e5e2fba4/packages/server/src/server/agent/providers/codex-app-server-agent.ts)，改为按 ID 回答、严格校验，并去掉缺失答案默认选第一项的行为。
 - [Lody Codex ACP](https://github.com/LodyAI/acp-extension-codex/blob/60f1dc4bda7d503eb107a9875893a62d399fd97e/src/permissions/mcp.ts)：单次与持久许可分离及[无输入字段 elicitation 的识别](https://github.com/LodyAI/acp-extension-codex/blob/60f1dc4bda7d503eb107a9875893a62d399fd97e/src/CodexElicitationHandler.ts#L361)来源（Apache-2.0），按 [OpenAI Codex rust-v0.159.2](https://github.com/openai/codex/blob/rust-v0.159.2/codex-rs/core/src/mcp_tool_call.rs#L1460) 的 MCP 前缀问题和 elicitation 协议适配，增加活跃操作关联并禁用持久许可；不捆绑 Lody/ACP 运行时。
+- [Lody acknowledged steering](https://github.com/LodyAI/Lody/blob/6dc434952ab2e942291cc8392316bf760afbdaf0/apps/cli/src/agent/acknowledged-steer.ts)：操作回执中“接受与实际应用分离”的设计参考；不引入 ACP/Core，也不捏造已应用信号。
 - [@juicesharp/rpiv-ask-user-question 2.12.0](https://www.npmjs.com/package/@juicesharp/rpiv-ask-user-question/v/2.12.0)：子 Pi 内置工具的单问题 RPC 选项／自定义回答流程来源（MIT）。
 - [pi-subagents](https://github.com/tintinweb/pi-subagents)：状态区与对话界面的设计参考。
 

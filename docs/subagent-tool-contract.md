@@ -10,7 +10,7 @@ Use four tools with separate responsibilities, exposing the role catalog directl
 
 | New tool | Operations | Existing capability source |
 |---|---|---|
-| `subagent` | `start` / `send` / `stop` | `spawn_agent` / `send_input` / `close_agent` |
+| `subagent` | `start` / `send` / `interrupt` / `stop` | `spawn_agent` / `send_input` / `close_agent` |
 | `subagent_query` | `list` / `get` / `result` | The three reading modes of `list_agents` |
 | `subagent_reply` | Answer one specific request; no action required | `respond_to_permission` |
 | `subagent_workspace` | `create` / `integrate` | `create_workspace` / `integrate_workspace` |
@@ -27,7 +27,8 @@ The following is a logical parameter contract, not the final TypeBox/JSON Schema
 |---|---|---|---|
 | `start` | `role`, `task` | `cwd` or `workspace` | Create an instance and execute its first task; cwd and workspace are mutually exclusive |
 | `send` | `id`, `message` | `mode`, `baseline`, `includeUncommitted` | Deliver instructions while running, or begin a new run in the same native session after completion |
-| `stop` | `id` | None | Stop active execution while retaining the native session and history; do not delete files or roll back changes |
+| `interrupt` | `id` | None | End only the captured current turn, retaining a usable runtime; unsupported backends reject |
+| `stop` | `id` | None | Release active/idle native resources while retaining the native session and history; do not delete files or roll back changes |
 
 `start` defaults to the current Pi working directory; when workspace is specified, resolve its actual path from the record. The role must exist in the current effective configuration. Resolve CLI, provider and model from role configuration; do not expose per-run model-routing parameters. task/message must be non-empty.
 
@@ -47,7 +48,7 @@ These CLI capabilities describe the current implementation, not a promise that e
 
 New Pi/Codex workers remain resident after a run ends: `phase: idle` describes the runtime, while `lastStatus` and the immutable per-run report describe the outcome. `stop` releases both idle and active runtimes; it never rewrites an already finished report. Claude remains non-resident until its native multi-turn/background boundary is verified. Residency preserves the opportunity for background work, not permanent process survival or authorization for more model work. A confirmed native exit becomes closed with a distinct runtime notice; missing worker/ownership proof becomes unreachable and prevents replacement work.
 
-New control endpoints use protocol v2, `runtimeId` and an expected current `runId`; stale or legacy control requests cannot operate a v2 worker. Existing workers are not hot-replaced. Only after confirmed native release is a terminal snapshot persisted with `runtimeClosed: true`, retaining old terminal enums for downgrade readers; the current manager exposes this as closed. Interrupt is implemented internally with captured-run confirmation and no replay after uncertainty; its public action is added separately in P3. Continuous runtime logs reuse the first run's events file, with instance-contained references and deduplicated history sources. Queries do not start a CLI.
+New control endpoints use protocol v2, `runtimeId` and an expected current `runId`; stale or legacy control requests cannot operate a v2 worker. Existing workers are not hot-replaced. Only after confirmed native release is a terminal snapshot persisted with `runtimeClosed: true`, retaining old terminal enums for downgrade readers; the current manager exposes this as closed. Interrupt is public with captured-run confirmation and no replay after uncertainty; it does not substitute for release. Continuous runtime logs reuse the first run's events file, with instance-contained references and deduplicated history sources. Queries do not start a CLI.
 
 Ordinary Pi dialogs can originate during startup or while idle, and their wire format does not establish task ownership. Known blocking startup dialogs are answered before the first prompt without blocking the reply control queue; dialogs observed later are still forwarded and survive normal task completion. Explicit interruption invalidates dialogs observed in that turn, while earlier runtime dialogs remain pending; release cancels all. Logical `subagent_ask_parent` IDs include the host run ID, so a repeated native tool-call ID cannot make an old answer apply to a later run. These are lifetime/correlation rules, not authorization evidence.
 
@@ -68,7 +69,7 @@ Do not introduce an ambiguous `success: true` that collapses all states:
 | Confirmed stop | The old execution has stopped/released resources; its work has not necessarily been undone |
 | Unconfirmed stop | Preserve uncertainty and diagnostic guidance; do not announce that takeover is safe |
 
-The existing `AgentState.accepted` describes receipt of the run's initial task, not an independent receipt for every send. An existing true value cannot prove delivery of a new message. A send response is based on the control request's actual result; do not add read/executed guarantees unsupported by the native CLI.
+The existing `AgentState.accepted` describes receipt of the run's initial task, not an independent receipt for every send. An existing true value cannot prove delivery of a new message, and false cannot prove that no prompt was written. Each operation returns a transient `receipt` with `operation`, `status`, affected `runId` and known `runtimeId`; it is not persisted into state/results or synthesized by queries. `accepted` requires the corresponding native acknowledgement; otherwise startup/legacy uncertainty is `unconfirmed`. Current adapters do not emit queue/injection claims merely from a delivery mode. `settled` confirms that the captured turn ended, including a natural-completion race; `not_running` confirms no captured active turn and does not cancel pending startup; `released` requires matching-runtime release proof. Errors retain known identity and no automatic retry. This follows the distinction between acceptance and applied notification in [Lody's pinned acknowledged-steer design](https://github.com/LodyAI/Lody/blob/6dc434952ab2e942291cc8392316bf760afbdaf0/apps/cli/src/agent/acknowledged-steer.ts), without importing ACP/Core or inventing an applied signal.
 
 ### 2.3 Examples
 
@@ -201,6 +202,8 @@ Zero-model checks with 0.159.2 covered both native on/off baselines and all thre
 Results and actionable blockers use the existing automatic notification channel; the child does not need a separate reporting tool. Notifications bind the original parent session, instance and run and provide the new result query entry point. Long originals use a preview plus full-text pagination, without deleting evidence.
 
 Notification semantics: an idle parent may be triggered to handle the event. A batch containing a waiting request uses `steer`, reaching a busy parent before its next model request without aborting an in-flight tool; other batches use `followUp`. This differs from the original all-follow-up implementation and is independent of `subagent.send.mode`. The queue is not a persisted receipt. Resuming the original parent can redeliver unrecorded notifications, while recorded notifications are deduplicated by ID. This is not an exactly-once guarantee under every failure mode.
+
+Direct human-action records use a separate `human-actions/ha-<uuid>.json` outbox beside the instance. The plain manager identity survives context replacement; old Pi contexts are not used to write another session. Current-parent delivery runs before report delivery, uses `cli-subagents-human-action` with `details.actionId`, and sends `triggerTurn:false` without steer/followUp. Pi 0.87.1/1.1.0 SDK-path probes confirm idle append and busy turn-end append without a new model turn. The full-session custom-message receipt, not the pending set, proves persistence. Switching/reopening can redeliver a saved but unrecorded message; this never replays the child operation. Bad sources are isolated and kept as evidence. Records are written after the UI operation returns; process failure before that write is outside this notification recovery contract.
 
 The extension does not decide that the parent must implement, review or integrate after receiving a result. This phase adds no general-purpose proactive child-to-parent messaging tool.
 

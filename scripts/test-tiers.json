@@ -38,6 +38,7 @@
     "claude-adapter.test.mjs",
     "codex-adapter.test.mjs",
     "core.test.mjs",
+    "human-actions.test.mjs",
     "pi-adapter.test.mjs",
     "pi-process.test.mjs",
     "process-tree.test.mjs",

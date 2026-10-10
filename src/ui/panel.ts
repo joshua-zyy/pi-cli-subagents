@@ -1,11 +1,12 @@
 import { matchesKey, stripTerminalSequences, truncateToWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import type { AgentView } from "../types.js";
-import { canMessage, canResume, canStop, formatElapsed, framePane, isActive, oneLine, rightAlign, shortId, viewElapsed, viewStatus, PANE_FRAME_COLS, PANE_FRAME_MIN_WIDTH, PANE_FRAME_ROWS, SPINNER, type UiColor, type UiTheme } from "./format.js";
+import { canInterrupt, canMessage, canResume, canStop, formatElapsed, framePane, isActive, oneLine, rightAlign, shortId, viewElapsed, viewStatus, PANE_FRAME_COLS, PANE_FRAME_MIN_WIDTH, PANE_FRAME_ROWS, SPINNER, type UiColor, type UiTheme } from "./format.js";
 
 export type PanelAction =
   | { kind: "view"; id: string }
   | { kind: "message"; id: string; resume: boolean; message?: string }
   | { kind: "stop"; id: string }
+  | { kind: "interrupt"; id: string }
   | { kind: "reply"; id: string; questionId: string };
 
 export const PANEL_MAX_ROWS = 8;
@@ -89,6 +90,7 @@ export class AgentsPanel {
   handleInput(data: string): void {
     if (this.settled) return;
     const agent = this.agents[this.index];
+    if (agent && matchesKey(data, "t") && canInterrupt(agent)) { this.finish({ kind: "interrupt", id: agent.id }); return; }
     if (this.view === "list") {
       if (matchesKey(data, "up")) this.index = Math.max(0, this.index - 1);
       else if (matchesKey(data, "down")) this.index = Math.min(this.agents.length - 1, this.index + 1);
@@ -155,8 +157,10 @@ export class AgentsPanel {
       lines.push(this.hint([["esc", "close"]]));
       return lines;
     }
-    lines.push(this.hint([["↑↓", "select"], ["enter/v", "conversation"], ["i", "details"], ["esc", "close"]]));
     const selected = Math.min(this.index, this.agents.length - 1);
+    const hints: [string, string][] = [["↑↓", "select"], ["enter/v", "conversation"], ["i", "details"], ["esc", "close"]];
+    if (canInterrupt(this.agents[selected])) hints.unshift(["t", "interrupt"]);
+    lines.push(this.hint(hints));
     const room = this.room;
     // Title and hints are fixed; the two "more" indicators give way to agents when the pane is short.
     const indicators = room === 0 || room - 2 >= 4;
@@ -215,10 +219,12 @@ export class AgentsPanel {
     const queue = questions.length > 1
       ? [this.theme.fg("dim", `  ${questions.length} requests pending; r answers them one at a time`)] : [];
     if (question && room > 0 && room < DETAIL_FULL_ROWS) {
+      const hints: [string, string][] = [["r", "reply"], ["v", "conversation"], ["esc", "back"], ["q", "close"]];
+      if (canInterrupt(agent)) hints.unshift(["t", "interrupt"], ["x", "stop"]);
       return [lines[0], this.field("ID", agent.id), this.section("Waiting for a response"),
         ...this.wrapBody(question.title, width, Math.max(1, room - 6)),
         ...queue,
-        this.hint([["r", "reply"], ["v", "conversation"], ["esc", "back"], ["q", "close"]])];
+        this.hint(hints)];
     }
     if (question) {
       lines.push(this.section("Waiting for a response"));
@@ -243,10 +249,11 @@ export class AgentsPanel {
     if (agent.truncated) lines.push(this.theme.fg("dim", "  ... (Result clipped; see the result file for full content)"));
 
     const hint: [string, string][] = [["esc/←", "back"], ["↑↓", "scroll"], ["v", "conversation"]];
+    if (canInterrupt(agent)) hint.unshift(["t", "interrupt"], ["x", "stop"]);
     if (agent.phase === "idle") hint.unshift(["x", "release"], ["s", "new task"]);
     else {
       if (canMessage(agent.phase)) hint.push(["s", canResume(agent.phase) ? "resume" : "message"]);
-      if (canStop(agent.phase)) hint.push(["x", "stop"]);
+      if (canStop(agent.phase) && !canInterrupt(agent)) hint.push(["x", "stop"]);
     }
     if (question) hint.push(["r", "reply"]);
     hint.push(["q", "close"]);

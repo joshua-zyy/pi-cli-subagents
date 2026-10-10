@@ -27,7 +27,7 @@ test('parent can explicitly review a child request while the human command remai
   const ctx = {cwd, hasUI:true, isProjectTrusted:()=>false,
     sessionManager:{ getSessionFile:()=>parent, getEntries:()=>[] },
     ui:{notify:(message)=>notices.push(message),confirm:async()=>{confirmations++;return false;}}};
-  extension({on(){},registerTool(tool){tools.set(tool.name,tool)},registerCommand(name,def){commands.set(name,def)},registerShortcut(){},registerMessageRenderer(){}});
+  extension({on(){},registerTool(tool){tools.set(tool.name,tool)},registerCommand(name,def){commands.set(name,def)},registerShortcut(){},registerMessageRenderer(){},sendMessage(_message,options){assert.equal(options.triggerTurn,false);}});
   const manager = new AgentManager(parent,{command:process.execPath,args:[fixture]});
   t.after(async()=>{for(const s of manager.list())if(processAlive(s.workerPid))await manager.close(s.id);process.argv[1]=saved;});
   assert.ok(tools.has('subagent_query'));

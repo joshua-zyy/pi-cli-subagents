@@ -160,3 +160,42 @@ test('summary resizes without hiding action hints and preserves errors alongside
     if (roomy) { assert.match(text(rows), /long question/); assert.match(text(rows), /r reply/); }
   }
 });
+
+test('t interrupts only v2 Pi/Codex active runs from the selected roster row or detail', () => {
+  for (const cli of ['pi', 'codex', 'claude', undefined]) for (const protocolVersion of [undefined, 2]) {
+    for (const phase of ['starting', 'running', 'waiting', 'stopping', 'idle', 'closed', 'completed', 'failed', 'stopped', 'unreachable']) {
+      const allowed = protocolVersion === 2 && ['pi', 'codex'].includes(cli) && ['starting', 'running', 'waiting'].includes(phase);
+      for (const detail of [false, true]) {
+        const p = panel([view({ id: 'other' }), view({ id: 'target', startedAt: 2000, cli, protocolVersion, phase })]);
+        p.instance.handleInput(keys.down);
+        if (detail) p.instance.handleInput('i');
+        const rendered = text(p.render(140));
+        assert.equal(rendered.includes('t interrupt'), allowed, JSON.stringify({ cli, protocolVersion, phase, detail }));
+        p.instance.handleInput('t');
+        assert.deepEqual(p.actions, allowed ? [{ kind: 'interrupt', id: 'target' }] : []);
+        p.instance.handleInput('t');
+        assert.equal(p.actions.length, allowed ? 1 : 0, 'a settled panel cannot repeat the operation');
+      }
+    }
+  }
+});
+
+test('interrupt does not reuse i, x or Ctrl+C and stays visible within small panel budgets', () => {
+  const active = view({ protocolVersion: 2, cli: 'pi', phase: 'running' });
+  const p = panel([active]);
+  p.instance.handleInput('\x03'); assert.deepEqual(p.actions, []);
+  p.instance.handleInput('i'); assert.equal(p.instance.mode, 'detail');
+  p.instance.handleInput('x'); assert.deepEqual(p.actions, [{ kind: 'stop', id: active.id }]);
+  for (const phase of ['running', 'waiting']) for (const rows of [8, 16, 24]) for (const width of [40, 70]) {
+    const small = panel([view({ ...active, phase, error: 'failure evidence', text: 'partial output',
+      questions: phase === 'waiting' ? [{ id: 'q', method: 'confirm', title: 'Permission details' }] : [] })], { rows });
+    assert.match(text(small.render(width)), /t interrupt/);
+    small.instance.handleInput('i');
+    const rendered = small.framed(width);
+    assert.ok(rendered.length <= rows);
+    assert.ok(rendered.every(line => visibleWidth(line) <= width && !/[\r\n]/.test(line)));
+    assert.match(text(rendered), /t interrupt/);
+    assert.match(text(rendered), /x stop/);
+    if (phase === 'waiting' && rows >= 16) assert.match(text(rendered), /Permission details/);
+  }
+});
