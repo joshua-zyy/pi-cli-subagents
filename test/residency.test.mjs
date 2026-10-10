@@ -62,6 +62,35 @@ async function peer(t, protocolVersion, reply) {
   return { m, id, state, calls, endpoint };
 }
 
+for (const [phase, accepted] of [['completed', true], ['failed', false], ['running', true]]) {
+  test(`workspace send keeps a validated closing response (${phase}, accepted=${accepted})`, async t => {
+    const h = await peer(t, 2, (res, state) => {
+      Object.assign(state, { phase, accepted, runtimeClosed: true, lastStatus: phase === 'failed' ? 'failed' : 'completed' });
+      writeJson(path.join(h.m.root, h.id, 'state.json'), state);
+      res.end(JSON.stringify({ ...state, receipt: { operation: 'send', status: accepted ? 'accepted' : 'unconfirmed', runId: state.runId, runtimeId: state.runtimeId } }));
+    });
+    const file = path.join(h.m.root, h.id, 'spec.json'), prior = { commit: 'a'.repeat(40), revision: 1 };
+    writeJson(file, { ...readJson(file), workspace: randomUUID(), workspaceBaseline: prior });
+    // Exercise the public send and real HTTP response while the workspace lease is held;
+    // only Git preparation is stubbed. Keep owner.lock to pin the post-reap/pre-unlock window.
+    t.mock.method(h.m.workspaces, 'runAgent', async (_workspace, id, action) => {
+      assert.equal(id, h.id); return action({ baseCommit: 'b'.repeat(40), revision: 2 });
+    });
+    if (phase === 'running') {
+      await assert.rejects(h.m.send(h.id, 'context'), /Invalid runtime identity/);
+      assert.deepEqual(readJson(file).workspaceBaseline, prior, 'invalid wire state must still be rejected before updating the baseline');
+    } else {
+      const result = await h.m.send(h.id, 'context');
+      assert.equal(result.phase, 'stopping'); assert.equal(result.runtimeClosed, true);
+      assert.equal(result.runId, h.state.runId); assert.equal(result.runtimeId, h.state.runtimeId);
+      receipt(result, 'send', accepted ? 'accepted' : 'unconfirmed');
+      const baseline = accepted ? { commit: 'b'.repeat(40), revision: 2 } : prior;
+      assert.deepEqual(result.workspaceBaseline, baseline); assert.deepEqual(readJson(file).workspaceBaseline, baseline);
+      assert.equal(h.calls.length, 1, 'do not replay input after an already validated response');
+    }
+  });
+}
+
 for (const flag of ['--startup-dialog', '--startup-dialog-after-state', '--startup-dialog-with-state']) test(`worker preserves independent Pi startup UI ${flag}`, { timeout: 15000 }, async t => {
   const { cwd, m } = setup(t, [], [flag]);
   const first = await m.spawn('worker', role, cwd, 'after-dialog');

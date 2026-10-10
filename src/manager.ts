@@ -322,10 +322,14 @@ export class AgentManager {
       if (!spec.workspace) return await send();
       return await this.workspaces.runAgent(spec.workspace, id, async (ws, notice) => {
         const state = await send(notice);
-        if (state.accepted || state.phase === "completed" || state.lastStatus === "completed") writeJson(path.join(this.directory(id), "spec.json"), {
-          ...spec, workspaceBaseline: { commit: ws.baseCommit, revision: ws.revision },
-        });
-        return this.view(id, state, state.receipt);
+        if (state.accepted || state.phase === "completed" || state.lastStatus === "completed") {
+          const workspaceBaseline = { commit: ws.baseCommit, revision: ws.revision };
+          writeJson(path.join(this.directory(id), "spec.json"), { ...spec, workspaceBaseline });
+          return { ...state, workspaceBaseline };
+        }
+        // send() already validated and normalized the raw snapshot. A closing view
+        // can be stopping + runtimeClosed while owner.lock is still being released.
+        return state;
       }, options, beforeSync);
     } catch (error) { throw this.diagnostic(id, "send", error); }
   }
