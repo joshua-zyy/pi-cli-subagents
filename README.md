@@ -25,6 +25,8 @@ pi --extension /absolute/path/to/pi-cli-subagents/dist/index.js \
    --skill /absolute/path/to/pi-cli-subagents/skills/delegate-cli-agents
 ```
 
+For a prebuilt local `.tgz`, extract it into an empty directory and use `pi install --local /absolute/path/to/extracted/package`; do **not** run `npm ci` or rebuild the unpacked package. It already includes the worker, child question tool and skill; Pi supplies its peers. No Paseo/Lody installation is needed. Local package discovery was verified with Pi **0.87.1 and 1.1.0**, without model calls; this does not prove real-backend or full TUI acceptance. The package remains `private:true`; an overall license for this project’s own code and public release authorization still need a decision.
+
 Ask Pi, for example:
 
 > Have the configured worker investigate and fix this test in an isolated worktree, and report the result.

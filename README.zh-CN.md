@@ -25,6 +25,8 @@ pi --extension /absolute/path/to/pi-cli-subagents/dist/index.js \
    --skill /absolute/path/to/pi-cli-subagents/skills/delegate-cli-agents
 ```
 
+使用预构建的本地 `.tgz` 时，先解压到空目录，再执行 `pi install --local /absolute/path/to/extracted/package`；**不要**在解包目录运行 `npm ci` 或重新构建。包已包含 worker、子问题工具及 skill，Pi 提供其 peers，无需安装 Paseo/Lody。本地包发现已在 Pi **0.87.1 和 1.1.0** 上无模型验证，但不等于真实后端或完整 TUI 验收。仍保持 `private:true`；自有代码的整体许可证与公开发布授权须另行决定。
+
 然后直接对 Pi 说，例如：
 
 > 让已配置的 worker 在独立 worktree 中调查并修复这个测试，完成后报告结果。
