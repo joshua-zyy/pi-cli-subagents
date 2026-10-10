@@ -2,7 +2,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { stripTerminalSequences, visibleWidth } from '@earendil-works/pi-tui';
-import { formatElapsed, formatTokens, oneLine, rightAlign, viewElapsed, canMessage } from '../dist/ui/format.js';
+import { formatElapsed, formatTokens, oneLine, rightAlign, viewElapsed, canMessage, canStop, canResume, viewStatus } from '../dist/ui/format.js';
 import { FINISHED_LINGER_MS, FRAME_INTERVAL_MS, MAX_STATUS_LINES, STATUS_KEY, StatusWidget, statusLines } from '../dist/ui/status.js';
 
 const theme = { fg: (_color, text) => text, bold: text => text };
@@ -15,8 +15,22 @@ const lines = (agents, options = {}) => statusLines(agents, { now: 11000, frame:
 
 test('token counts stay compact and messageability excludes unreachable instances', () => {
   for (const [input, expected] of [[0, '0'], [512, '512'], [999, '999'], [1000, '1.0k'], [12345, '12.3k'], [1_234_567, '1.2M'], [-5, '0'], [NaN, '0']]) assert.equal(formatTokens(input), expected);
-  for (const phase of ['starting', 'running', 'completed', 'failed', 'stopped']) assert.equal(canMessage(phase), true, phase);
+  for (const phase of ['starting', 'running', 'completed', 'failed', 'stopped', 'idle', 'closed']) assert.equal(canMessage(phase), true, phase);
   for (const phase of ['waiting', 'stopping', 'unreachable']) assert.equal(canMessage(phase), false, phase);
+});
+
+test('idle resources remain visible after linger and expose failure and release without busy semantics', () => {
+  assert.equal(canStop('idle'), true); assert.equal(canStop('closed'), false);
+  assert.equal(canResume('idle'), false); assert.equal(canResume('closed'), true);
+  const saved = view({ phase: 'idle', lastStatus: 'failed', error: 'native failure', updatedAt: 1 });
+  assert.equal(viewStatus(saved).color, 'error'); assert.match(viewStatus(saved).label, /Idle.*Failed/);
+  for (const width of [40, 80, 120]) {
+    const rendered = lines([saved], { now: 3600000, width });
+    assert.match(rendered.join('\n'), /idle/i); assert.match(rendered.join('\n'), /Failed|failure/);
+    assert.ok(rendered.every(row => visibleWidth(row) <= width));
+  }
+  const h = host(), widget = new StatusWidget(h, () => [saved], { lingerMs: 0 });
+  widget.update(); assert.equal(h.calls.length, 1); widget.dispose();
 });
 
 test('elapsed formatting handles all units and invalid inputs', () => {

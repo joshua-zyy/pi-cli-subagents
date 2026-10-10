@@ -32,6 +32,15 @@ const taskQuestion = async events => {
 };
 const skipped = q => Object.fromEntries(q.fields.map(field => [field.id, []]));
 
+test('Claude explicitly remains non-resident and rejects interrupt without submitting control work', async t => {
+  const { client, requests } = setup(t); const { c, events } = client(); await c.ready(); await c.start('HOLD', 'run-one');
+  assert.equal(c.resident, false); const before = requests().length;
+  await assert.rejects(c.interrupt(), /not supported|non-resident/i);
+  assert.equal(requests().length, before);
+  await c.stop(); assert.equal((await terminal(events)).status, 'stopped');
+  assert(events.every(e => e.runId === 'run-one'));
+});
+
 test('Claude terminal result does not require optional session-state events', async t => {
   const {client} = setup(t);
   for (const flags of [[], ['--state-events']]) {

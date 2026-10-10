@@ -40,10 +40,17 @@ function setup(t) {
   return {
     cwd, manager,
     invoke: (name, args) => tools.get(name).execute('test-call', args, undefined, undefined, ctx),
-    released: id => waitUntil('terminal state and owner release', () => {
-      const state = manager.get(id);
-      return ['completed', 'failed', 'stopped'].includes(state.phase) && !fs.existsSync(path.join(manager.root, id, 'owner.lock')) ? state : undefined;
-    }, 10000),
+    released: async (id, status = 'completed') => {
+      const result = await waitUntil('run result before release', () => {
+        const state = manager.get(id);
+        return ['idle', 'closed'].includes(state.phase) ? state : undefined;
+      }, 10000);
+      assert.equal(result.lastStatus, status);
+      const closed = await manager.close(id);
+      assert.equal(closed.phase, 'closed'); assert.equal(closed.lastStatus, status);
+      assert.equal(fs.existsSync(path.join(manager.root, id, 'owner.lock')), false);
+      return closed;
+    },
   };
 }
 const stateFrom = text => JSON.parse(text.slice(text.indexOf('{'), text.lastIndexOf('}') + 1));
@@ -52,14 +59,15 @@ test('a refused initial task surfaces a tool error with the actual run, not a su
   const { manager, invoke, released } = setup(t);
   let error;
   try { await invoke('subagent', { action: 'start', role: 'worker', task: 'REJECT' }); } catch (caught) { error = caught; }
-  const state = await released(manager.list()[0].id);
-  assert.equal(state.phase, 'failed'); assert.equal(state.accepted, false);
+  const state = await released(manager.list()[0].id, 'failed');
+  assert.equal(state.phase, 'closed'); assert.equal(state.lastStatus, 'failed'); assert.equal(state.accepted, false);
   assert.equal(manager.list().length, 1);
   assert(error instanceof Error, 'the tool must fail, not return an unconditional dispatched receipt');
   assert.match(error.message, /rejected by fixture/);
   assert.doesNotMatch(error.message, /subagent dispatched|Message accepted/);
   const shown = stateFrom(error.message);
-  assert.equal(shown.id, state.id); assert.equal(shown.runId, state.runId); assert.equal(shown.phase, 'failed');
+  assert.equal(shown.id, state.id); assert.equal(shown.runId, state.runId);
+  assert.equal(shown.phase, 'closed'); assert.equal(shown.lastStatus, 'failed');
 });
 
 test('a mismatched native resume identity fails the tool before submitting the follow-up', { timeout: 15000 }, async t => {
@@ -70,8 +78,8 @@ test('a mismatched native resume identity fails the tool before submitting the f
   writeJson(original.sessionFile, { ...native, id: randomUUID() });
   let error;
   try { await invoke('subagent', { action: 'send', id: initial.id, message: 'MUST NOT RUN' }); } catch (caught) { error = caught; }
-  const state = await released(initial.id);
-  assert.equal(state.phase, 'failed'); assert.equal(state.accepted, false);
+  const state = await released(initial.id, 'failed');
+  assert.equal(state.phase, 'closed'); assert.equal(state.lastStatus, 'failed'); assert.equal(state.accepted, false);
   assert.equal(state.sessionId, original.sessionId); assert.equal(state.runCount, 2);
   assert.equal(manager.list().length, 1);
   const prompts = readJson(original.sessionFile).messages.filter(message => message.role === 'user');
@@ -81,34 +89,46 @@ test('a mismatched native resume identity fails the tool before submitting the f
   assert.match(error.message, /different session/);
   assert.doesNotMatch(error.message, /Message accepted/);
   const shown = stateFrom(error.message);
-  assert.equal(shown.id, initial.id); assert.equal(shown.runId, state.runId); assert.equal(shown.phase, 'failed');
+  assert.equal(shown.id, initial.id); assert.equal(shown.runId, state.runId);
+  assert.equal(shown.phase, 'closed'); assert.equal(shown.lastStatus, 'failed');
 });
 
 test('tool receipts report observed state without equating initial acceptance with this operation', async t => {
   const { cwd, invoke } = setup(t);
   const base = { id: randomUUID(), runId: randomUUID(), role: 'worker', cli: 'pi', cwd, workerPid: 0, updatedAt: 1, questions: [], logFile: 'fixture' };
-  for (const [phase, accepted, error] of [
+  for (const [phase, accepted, error, lastStatus] of [
+    // Legacy observations remain unversioned and retain their original phase.
     ['running', true], ['waiting', false], ['completed', true], ['stopped', false],
     ['failed', false, 'Pi RPC prompt timed out; acceptance is uncertain.'],
     ['failed', true, 'Task ran but failed.'],
+    ['idle', true, undefined, 'completed'], ['closed', true, undefined, 'completed'],
+    ['idle', true, undefined, 'stopped'], ['closed', false, undefined, 'stopped'],
+    ['idle', true, 'Task ran but failed.', 'failed'],
+    ['closed', false, 'Native resume rejected.', 'failed'],
+    ['running', true, undefined, 'failed'], // Previous failure is not the new input's outcome.
   ]) {
-    const state = { ...base, phase, accepted, ...(error ? { error } : {}) };
+    const state = { ...base, phase, accepted, ...(error ? { error } : {}),
+      ...(lastStatus ? { protocolVersion: 2, runtimeId: randomUUID(), lastStatus } : {}) };
     for (const [method, tool, args] of [
       ['spawn', 'subagent', { action: 'start', role: 'worker', task: 'fixture' }],
       ['send', 'subagent', { action: 'send', id: base.id, message: 'fixture' }],
     ]) {
       const mock = t.mock.method(AgentManager.prototype, method, async () => state);
       try {
-        if (phase === 'failed') {
+        if (phase === 'failed' || (['idle', 'closed'].includes(phase) && lastStatus === 'failed')) {
           await assert.rejects(invoke(tool, args), failure => {
-            assert.equal(stateFrom(failure.message).error, error);
-            assert.equal(stateFrom(failure.message).runId, base.runId);
+            const shown = stateFrom(failure.message);
+            assert.equal(shown.error, error); assert.equal(shown.runId, base.runId);
+            assert.equal(shown.phase, phase); assert.equal(shown.lastStatus, lastStatus);
+            assert.equal(shown.protocolVersion, state.protocolVersion); assert.equal(shown.runtimeId, state.runtimeId);
             assert.doesNotMatch(failure.message, /Message accepted|subagent dispatched|nothing (ran|executed)|not executed/i);
             return true;
           });
         } else {
           const result = await invoke(tool, args), text = result.content[0].text;
-          assert.equal(stateFrom(text).phase, phase);
+          const shown = stateFrom(text);
+          assert.equal(shown.phase, phase); assert.equal(shown.lastStatus, lastStatus);
+          assert.equal(shown.protocolVersion, state.protocolVersion); assert.equal(shown.runtimeId, state.runtimeId);
           assert.doesNotMatch(text, /Message accepted|subagent dispatched|wait for the final report/i);
         }
       } finally { mock.mock.restore(); }

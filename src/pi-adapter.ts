@@ -5,7 +5,7 @@ import { StringDecoder } from "node:string_decoder";
 import { fileURLToPath } from "node:url";
 import { PiProcess, type WireRecord, type Exit } from "./pi-process.js";
 import { ASK_PARENT_TOOL, parentQuestionDialog, readParentQuestion, type ParentQuestion } from "./pi-question.js";
-import type { AdapterOptions, CliAdapter, InteractionReply } from "./cli-adapter.js";
+import type { AdapterEvent, AdapterOptions, CliAdapter, InteractionReply } from "./cli-adapter.js";
 import type { Delivery, NativeSession, Question, SessionHandle } from "./types.js";
 
 /** Read only the original header: opening a SessionManager can migrate or repair the file. */
@@ -40,6 +40,11 @@ export async function inspectPiSession(session: SessionHandle): Promise<void> {
 }
 
 export class PiAdapter implements CliAdapter {
+  readonly resident = true;
+  private active = false;
+  private runId?: string;
+  // null = independent session UI; undefined = a legacy run without a supplied runId.
+  private questions?: Map<string, string | undefined | null>;
   readonly rpc: PiProcess;
   readonly closed: Promise<Exit>;
   private assistant?: WireRecord;
@@ -65,22 +70,41 @@ export class PiAdapter implements CliAdapter {
     if (spec.role.provider) args.push("--provider", spec.role.provider);
     if (spec.role.model) args.push("--model", spec.role.model);
     if (spec.role.thinking) args.push("--thinking", spec.role.thinking);
-    this.rpc = new PiProcess(spec.launch, args, spec.cwd, options.logFile, record => this.event(record));
+    this.rpc = new PiProcess(spec.launch, args, spec.cwd, options.logFile, record => this.event(record), options.requestTimeout);
     this.closed = this.rpc.closed;
+  }
+
+  private emit(event: AdapterEvent, runId: string | undefined | null = this.runId): void {
+    if (event.type === "settled" && runId === this.runId) {
+      if (this.active === false) return;
+      this.active = false;
+    }
+    if (event.type === "question") (this.questions ??= new Map()).set(event.question.id, runId);
+    if (event.type === "resolved") this.questions?.delete(event.id);
+    this.options.onEvent({ ...event, ...(runId == null ? {} : { runId }) });
+  }
+
+  private clearQuestions(mode: "all" | "turn" | "task" = "all"): void {
+    const tasks = new Set([...this.parentCalls.values()].map(call => call.id));
+    for (const [id, scope] of this.questions ?? []) {
+      if (mode === "all" || mode === "turn" && scope !== null || mode === "task" && tasks.has(id))
+        this.emit({ type: "resolved", id }, scope ?? null);
+    }
+    this.parentCalls.clear();
   }
 
   private event(record: WireRecord): void {
     // Question normalization and cached UI replay adapted from Paseo's rpiv-ask-user-question
     // mapper (Apache-2.0). Copyright (c) 2025-present Mohamed Boudra; see README.md#credits.
     // Modified: one question per call, per-call tracking and exact, versioned UI stages.
-    if (record.toolName === ASK_PARENT_TOOL && typeof record.toolCallId === "string") {
+    if (this.active !== false && record.toolName === ASK_PARENT_TOOL && typeof record.toolCallId === "string") {
       if (record.type === "tool_execution_start") {
         const question = readParentQuestion(record.args);
         if (question) {
-          const id = `${ASK_PARENT_TOOL}:${record.toolCallId}`;
+          const id = `${ASK_PARENT_TOOL}:${this.runId ? `${this.runId}:` : ""}${record.toolCallId}`;
           const values = question.options.map(option => option.label);
           this.parentCalls.set(record.toolCallId, { id, question, next: "select" });
-          this.options.onEvent({ type: "question", question: {
+          this.emit({ type: "question", question: {
             id, method: "select", kind: "question", humanOnly: false,
             title: parentQuestionDialog(record.toolCallId, question, "select").displayTitle,
             message: question.options.map(option => `${option.label} — ${option.description}`).join("\n"),
@@ -90,12 +114,12 @@ export class PiAdapter implements CliAdapter {
       } else if (record.type === "tool_execution_end") {
         const active = this.parentCalls.get(record.toolCallId);
         this.parentCalls.delete(record.toolCallId);
-        if (active) this.options.onEvent({ type: "resolved", id: active.id });
+        if (active) this.emit({ type: "resolved", id: active.id });
       }
     }
-    if (record.type === "message_end" && typeof record.message === "object" && record.message?.role === "assistant") this.assistant = record.message;
+    if (this.active !== false && record.type === "message_end" && typeof record.message === "object" && record.message?.role === "assistant") this.assistant = record.message;
     if (record.type === "agent_start" || record.type === "tool_execution_start" || record.type === "tool_execution_end")
-      this.options.onEvent({ type: "activity", detail: record.type === "agent_start" ? "agent_start" : `${record.type}: ${record.toolName}` });
+      this.emit({ type: "activity", detail: record.type === "agent_start" ? "agent_start" : `${record.type}: ${record.toolName}` }, this.active === false ? null : this.runId);
     if (record.type === "extension_ui_request" && ["select", "confirm", "input", "editor"].includes(String(record.method))) {
       if ((record.method === "select" || record.method === "input") && typeof record.id === "string" && record.message === undefined && record.prefill === undefined) {
         for (const [callId, active] of this.parentCalls) {
@@ -122,12 +146,17 @@ export class PiAdapter implements CliAdapter {
           record.method === "select" ? { values: record.options } : { text: true },
         ...(typeof record.timeout === "number" ? { expiresAt: Date.now() + record.timeout } : {}),
       };
-      this.options.onEvent({ type: "question", question });
+      // Ordinary RPC dialogs can originate in session_start or while idle. They
+      // remain answerable independently of the next delegated run.
+      this.emit({ type: "question", question, runtimeScoped: true }, this.active === false ? null : this.runId);
     }
-    if (record.type === "agent_settled") {
-      const reason = this.assistant?.stopReason;
+    if (record.type === "agent_settled" && this.active !== false) {
+      const reason = record.aborted === true ? "aborted" : this.assistant?.stopReason;
+      // Ordinary dialogs have no reliable task provenance. Normal completion must
+      // not discard them; an explicit abort invalidates dialogs from that turn.
+      this.clearQuestions(reason === "aborted" ? "turn" : "task");
       const text = Array.isArray(this.assistant?.content) ? this.assistant.content.filter(part => part.type === "text").map(part => part.text).join("") : "";
-      this.options.onEvent({ type: "settled", status: reason === "stop" ? "completed" : reason === "aborted" ? "stopped" : "failed", text,
+      this.emit({ type: "settled", status: reason === "stop" ? "completed" : reason === "aborted" ? "stopped" : "failed", text,
         ...(reason === "stop" || reason === "aborted" ? {} : { error: String(this.assistant?.errorMessage ?? `Did not complete normally: ${reason ?? "missing final message"}`) }) });
     }
   }
@@ -140,20 +169,35 @@ export class PiAdapter implements CliAdapter {
       throw new Error("Resume returned a different session; refusing to continue");
     return { cli: "pi", sessionId: initial.sessionId, sessionFile: initial.sessionFile };
   }
-  async start(message: string): Promise<void> { await this.rpc.request({ type: "prompt", message }); }
+  async start(message: string, runId?: string): Promise<void> {
+    this.rpc.assertPromptAllowed();
+    if (this.active) throw new Error("Pi already has an active run");
+    // Reserve the run before sending: events may precede the acceptance response.
+    this.runId = runId;
+    this.assistant = undefined;
+    this.parentCalls.clear();
+    this.active = true;
+    try { await this.rpc.request({ type: "prompt", message }); }
+    catch (error) { this.active = false; throw error; }
+  }
   async send(message: string, mode: Delivery): Promise<void> { await this.rpc.request({ type: "prompt", message, streamingBehavior: mode }); }
   async reply(answer: InteractionReply): Promise<void> {
     for (const [callId, active] of this.parentCalls) {
       if (active.id !== answer.id) continue;
+      if (active.answer) throw new Error("Pi interaction was already answered");
       active.answer = { value: answer.value, cancelled: answer.cancelled };
       if (active.deferred) await this.answerParentDialog(callId);
       return;
     }
+    const scope = this.questions?.get(answer.id);
+    if (!this.questions?.delete(answer.id)) throw new Error("Pi interaction is no longer pending or was already answered");
     await this.rpc.reply({ id: answer.id, value: answer.value, confirmed: answer.confirmed, cancelled: answer.cancelled });
+    this.emit({ type: "resolved", id: answer.id }, scope ?? null);
   }
 
   private async answerParentDialog(callId: string): Promise<void> {
     const active = this.parentCalls.get(callId)!;
+    const runId = this.runId;
     const dialog = active.deferred!;
     const answer = active.answer!;
     active.deferred = undefined;
@@ -168,13 +212,14 @@ export class PiAdapter implements CliAdapter {
     } catch (error) {
       // A later auto-write has no waiting caller to receive its error. Fail the run rather than
       // silently lose the answer or replay it after an uncertain write.
-      this.parentCalls.delete(callId);
-      this.options.onEvent({ type: "settled", status: "failed", text: "", stop: true,
-        error: `Question response delivery failed: ${(error as Error).message}` });
+      if (this.parentCalls.get(callId) === active) this.parentCalls.delete(callId);
+      this.emit({ type: "settled", status: "failed", text: "", stop: true,
+        error: `Question response delivery failed: ${(error as Error).message}` }, runId);
       throw error;
     }
   }
 
-  end(): Promise<{ exit: Exit; forced: boolean }> { this.parentCalls.clear(); return this.rpc.end(); }
-  stop(): Promise<{ exit: Exit; forced: boolean }> { this.parentCalls.clear(); return this.rpc.stop(); }
+  interrupt(): Promise<void> { return this.rpc.interrupt(); }
+  end(): Promise<{ exit: Exit; forced: boolean }> { this.clearQuestions(); return this.rpc.end(); }
+  stop(): Promise<{ exit: Exit; forced: boolean }> { this.clearQuestions(); return this.rpc.stop(); }
 }

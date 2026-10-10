@@ -26,11 +26,22 @@ function setup(t, flags = []) {
   const launch = { command: process.execPath, args: [pi] }, options = { launch: { command: process.execPath, args: [fixture, ...flags] }, home };
   const manager = new AgentManager(parent, launch, options);
   t.after(async () => { for (const state of manager.list()) if (processAlive(state.workerPid)) await manager.close(state.id); });
-  const done = (id, phase = 'completed') => waitUntil('Codex completion and lease release', () => {
-    const s = manager.get(id); return s.phase === phase && !processAlive(s.workerPid) ? s : undefined;
-  }, 15_000);
+  const done = async (id, status = 'completed') => {
+    const state = await waitUntil('workspace run result', () => {
+      const s = manager.get(id); return ['idle', 'closed'].includes(s.phase) ? s : undefined;
+    }, 15_000);
+    assert.equal(state.lastStatus, status);
+    return state;
+  };
+  const release = async (id, status = 'completed') => {
+    await done(id, status);
+    const closed = await manager.close(id);
+    assert.equal(closed.phase, 'closed'); assert.equal(closed.lastStatus, status);
+    assert.equal(fs.existsSync(path.join(manager.root, id, 'owner.lock')), false);
+    return closed;
+  };
   const requests = () => readJsonLines(path.join(home, 'requests.jsonl'));
-  return { repo, home, parent, manager, done, requests, launch, options };
+  return { repo, home, parent, manager, done, release, requests, launch, options };
 }
 function readJsonLines(file) { return fs.existsSync(file) ? fs.readFileSync(file, 'utf8').trim().split('\n').filter(Boolean).map(JSON.parse) : []; }
 function baseline(ws) {
@@ -40,12 +51,12 @@ function baseline(ws) {
 const sync = { baseline: 'sync', includeUncommitted: { reason: 'The user authorized all parent changes for this fixture.' } };
 
 test('Codex managed cwd inherits authorized files and resumes the same thread after controller reopen', { timeout: 30_000 }, async t => {
-  const { repo, home, manager, done, parent, launch, options, requests } = setup(t);
+  const { repo, home, manager, done, release, parent, launch, options, requests } = setup(t);
   fs.writeFileSync(path.join(repo, 'src/base.txt'), 'authorized snapshot\n');
   const head = git(repo, 'rev-parse', 'HEAD'), index = fs.readFileSync(path.join(repo, '.git/index'));
   const ws = await manager.workspaces.create(path.join(repo, 'src'), { includeUncommitted: { reason: 'User approved all working files.' } });
   const started = await manager.spawn('codex-worker', role, repo, fileTask('base.txt'), ws.id);
-  const first = await done(started.id);
+  const first = await release(started.id);
   assert.equal(first.cwd, ws.cwd); assert.equal(first.text, 'authorized snapshot\n'); assert.equal(first.workspace, ws.id);
   const reopened = new AgentManager(parent, launch, { ...options, home: path.join(home, 'not-the-original-home') });
   await reopened.send(first.id, 'CWD'); const second = await done(first.id);
@@ -56,24 +67,24 @@ test('Codex managed cwd inherits authorized files and resumes the same thread af
 });
 
 test('Codex parallel worktrees isolate writes and allow mixed-CLI review before integration', { timeout: 40_000 }, async t => {
-  const { repo, manager, done } = setup(t);
+  const { repo, manager, release } = setup(t);
   const [a, b] = await Promise.all([manager.workspaces.create(repo), manager.workspaces.create(repo)]);
   const [wa, wb] = await Promise.all([
     manager.spawn('codex-worker', role, repo, fileTask('a.txt', 'A\n'), a.id),
     manager.spawn('codex-worker', role, repo, fileTask('b.txt', 'B\n'), b.id),
   ]);
-  const [first, second] = await Promise.all([done(wa.id), done(wb.id)]);
+  const [first, second] = await Promise.all([release(wa.id), release(wb.id)]);
   assert.notEqual(first.session.threadId, second.session.threadId);
   assert.equal(fs.existsSync(path.join(repo, 'a.txt')), false); assert.equal(fs.existsSync(path.join(a.path, 'b.txt')), false);
   const ra = await manager.spawn('pi-reviewer', piRole, repo, fileTask('a.txt'), a.id);
   const rb = await manager.spawn('codex-reviewer', role, repo, fileTask('b.txt'), b.id);
-  assert.equal((await done(ra.id)).text, 'A\n'); assert.equal((await done(rb.id)).text, 'B\n');
+  assert.equal((await release(ra.id)).text, 'A\n'); assert.equal((await release(rb.id)).text, 'B\n');
   for (const ws of [a, b]) assert.equal((await manager.workspaces.integrate(ws.id)).status, 'applied');
   assert.equal(fs.readFileSync(path.join(repo, 'a.txt'), 'utf8'), 'A\n'); assert.equal(fs.readFileSync(path.join(repo, 'b.txt'), 'utf8'), 'B\n');
 });
 
 test('Codex workspace lease rejects concurrent owners, raw cwd bypass, sync and integration while active', { timeout: 30_000 }, async t => {
-  const { repo, parent, launch, options, manager, done } = setup(t); const ws = await manager.workspaces.create(repo);
+  const { repo, parent, launch, options, manager, release } = setup(t); const ws = await manager.workspaces.create(repo);
   const other = new AgentManager(parent, launch, options);
   const result = await Promise.allSettled([
     manager.spawn('worker', role, repo, 'HOLD', ws.id), other.spawn('reviewer', piRole, repo, 'HOLD', ws.id),
@@ -85,24 +96,24 @@ test('Codex workspace lease rejects concurrent owners, raw cwd bypass, sync and 
   await assert.rejects(manager.send(active.id, 'CWD', 'steer', sync), /running|occupied/i);
   const contender = active.cli === 'codex' ? piRole : role;
   await assert.rejects(manager.spawn('reviewer', contender, repo, 'CWD', ws.id), /occupied/);
-  await manager.send(active.id, 'FINISHED'); await done(active.id);
+  await manager.send(active.id, 'FINISHED'); await release(active.id);
   assert.equal((await manager.workspaces.list())[0].occupiedBy.length, 0);
 });
 
 test('Codex keep/sync preserve original sessions, baseline notices and parent HEAD/index', { timeout: 50_000 }, async t => {
-  const { repo, manager, done, requests } = setup(t); const ws = await manager.workspaces.create(repo);
-  const worker = await manager.spawn('worker', role, repo, fileTask('src/base.txt', 'first\n'), ws.id); const first = await done(worker.id);
-  const reviewer = await manager.spawn('reviewer', role, repo, fileTask('src/base.txt'), ws.id); const firstReview = await done(reviewer.id);
+  const { repo, manager, done, release, requests } = setup(t); const ws = await manager.workspaces.create(repo);
+  const worker = await manager.spawn('worker', role, repo, fileTask('src/base.txt', 'first\n'), ws.id); const first = await release(worker.id);
+  const reviewer = await manager.spawn('reviewer', role, repo, fileTask('src/base.txt'), ws.id); const firstReview = await release(reviewer.id);
   await manager.workspaces.integrate(ws.id);
   fs.writeFileSync(path.join(repo, 'parent-new.txt'), 'parent content');
   await assert.rejects(manager.send(worker.id, 'CWD'), /baseline/i);
-  await manager.send(worker.id, fileTask('src/base.txt', 'second\n'), 'steer', { baseline: 'keep' }); await done(worker.id);
+  await manager.send(worker.id, fileTask('src/base.txt', 'second\n'), 'steer', { baseline: 'keep' }); await release(worker.id);
   assert.equal(fs.existsSync(path.join(ws.path, 'parent-new.txt')), false);
   assert.equal((await manager.workspaces.integrate(ws.id)).status, 'applied');
   const before = { head: git(repo, 'rev-parse', 'HEAD'), refs: git(repo, 'show-ref'), index: fs.readFileSync(path.join(repo, '.git/index')).toString('base64') };
   fs.mkdirSync(path.join(ws.path, 'ignored')); fs.writeFileSync(path.join(ws.path, 'ignored/cache'), 'keep');
   await assert.rejects(manager.send(worker.id, 'CWD', 'steer', { baseline: 'sync' }), /uncommitted|authoriz/i);
-  await manager.send(worker.id, fileTask('parent-new.txt'), 'steer', sync); const resumed = await done(worker.id);
+  await manager.send(worker.id, fileTask('parent-new.txt'), 'steer', sync); const resumed = await release(worker.id);
   assert.equal(resumed.text, 'parent content'); assert.deepEqual(resumed.session, first.session);
   assert.equal(manager.workspaces.get(ws.id).sync.status, 'applied');
   assert.equal(fs.readFileSync(path.join(ws.path, 'ignored/cache'), 'utf8'), 'keep');
@@ -121,8 +132,8 @@ test('Codex keep/sync preserve original sessions, baseline notices and parent HE
 });
 
 test('Codex missing or changed original thread fails before sync without a new run', { timeout: 45_000 }, async t => {
-  const { repo, home, manager, done, requests } = setup(t); const ws = await manager.workspaces.create(repo);
-  const child = await manager.spawn('worker', role, repo, 'CWD', ws.id); const first = await done(child.id);
+  const { repo, home, manager, done, release, requests } = setup(t); const ws = await manager.workspaces.create(repo);
+  const child = await manager.spawn('worker', role, repo, 'CWD', ws.id); const first = await release(child.id);
   fs.writeFileSync(path.join(repo, 'src/base.txt'), 'parent changed\n');
   const file = path.join(home, `${first.session.threadId}.json`), saved = fs.readFileSync(file);
   const before = baseline(ws), record = manager.workspaces.get(ws.id);
@@ -179,15 +190,26 @@ test('Codex resume failure after successful sync retains applied baseline and or
   await assert.rejects(manager.send(child.id, 'CWD'), /baseline/i);
 });
 
-test('Codex sync refuses unintegrated and staged data before native preflight', { timeout: 30_000 }, async t => {
+test('Codex sync preflights but refuses unintegrated and staged data without resuming or starting a run', { timeout: 30_000 }, async t => {
   const { repo, manager, done, requests } = setup(t); const ws = await manager.workspaces.create(repo);
-  const child = await manager.spawn('worker', role, repo, 'CWD', ws.id); await done(child.id);
+  const child = await manager.spawn('worker', role, repo, 'CWD', ws.id); const first = await done(child.id);
+  const record = manager.workspaces.get(ws.id), original = baseline(ws);
   fs.writeFileSync(path.join(ws.path, 'unintegrated.txt'), 'retain');
   await assert.rejects(manager.send(child.id, 'CWD', 'steer', sync), /unintegrated/i);
+  assert.equal(fs.readFileSync(path.join(ws.path, 'unintegrated.txt'), 'utf8'), 'retain');
+  assert.deepEqual(baseline(ws), original); assert.deepEqual(manager.workspaces.get(ws.id), record);
   fs.unlinkSync(path.join(ws.path, 'unintegrated.txt'));
   fs.writeFileSync(path.join(ws.path, 'src/base.txt'), 'staged'); git(ws.path, 'add', '.'); fs.writeFileSync(path.join(ws.path, 'src/base.txt'), 'base\n');
   const before = baseline(ws);
   await assert.rejects(manager.send(child.id, 'CWD', 'steer', sync), /staged/i);
   assert.deepEqual(baseline(ws), before); assert.equal(manager.get(child.id).runCount, 1);
-  assert.equal(requests().some(r => r.method === 'thread/read'), false);
+  assert.deepEqual(manager.workspaces.get(ws.id), record); assert.deepEqual(manager.get(child.id).session, first.session);
+  assert.equal(manager.get(child.id).phase, 'closed'); assert.equal(manager.get(child.id).lastStatus, 'completed');
+  assert.equal(fs.existsSync(path.join(manager.root, child.id, 'owner.lock')), false);
+  const calls = requests(), reads = calls.filter(r => r.method === 'thread/read');
+  assert.equal(reads.length, 2, 'each sync preflights after writer release and before Git validation');
+  assert.ok(reads.every(r => r.params.threadId === first.session.threadId && r.params.includeTurns === false));
+  assert.equal(calls.filter(r => r.method === 'thread/start').length, 1);
+  assert.equal(calls.filter(r => r.method === 'turn/start').length, 1);
+  assert.equal(calls.some(r => r.method === 'thread/resume'), false, 'read-only preflight must not resume native work');
 });

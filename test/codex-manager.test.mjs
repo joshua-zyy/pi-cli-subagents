@@ -24,21 +24,32 @@ function setup(t) {
   t.after(async () => {
     for (const state of manager.list()) {
       if (processAlive(state.workerPid)) await manager.close(state.id);
-      assert.equal(processAlive(manager.get(state.id).workerPid), false);
+      await waitUntil('closed worker exit', () => !processAlive(manager.get(state.id).workerPid), 5000);
     }
   });
-  const done = (id, phase = 'completed') => waitUntil('Codex worker termination', () => {
-    const s = manager.get(id);
-    return s.phase === phase && !processAlive(s.workerPid) ? s : undefined;
-  }, 12_000);
-  return { cwd, home, manager, done, parent, launch, options };
+  const done = async (id, status = 'completed') => {
+    const state = await waitUntil('run result', () => {
+      const s = manager.get(id);
+      return ['idle', 'closed'].includes(s.phase) ? s : undefined;
+    }, 12_000);
+    assert.equal(state.lastStatus, status);
+    return state;
+  };
+  const release = async (id, status = 'completed') => {
+    await done(id, status);
+    const closed = await manager.close(id);
+    assert.equal(closed.phase, 'closed'); assert.equal(closed.lastStatus, status);
+    assert.equal(fs.existsSync(path.join(manager.root, id, 'owner.lock')), false);
+    return closed;
+  };
+  return { cwd, home, manager, done, release, parent, launch, options };
 }
 
 test('manager preserves Codex native identity across a fresh controller, old Pi records still resume', { timeout: 30_000 }, async t => {
-  const { cwd, home, manager, done, parent, launch, options } = setup(t);
+  const { cwd, home, manager, done, release, parent, launch, options } = setup(t);
   const launchRole = { ...role, defaultModeQuestions: true };
   const started = await manager.spawn('codex-worker', launchRole, cwd, 'REMEMBER alpha');
-  const first = await done(started.id);
+  const first = await release(started.id);
   assert.equal(first.cli, 'codex'); assert.equal(first.session.cli, 'codex'); assert.equal(first.session.codexHome, home);
   assert.ok(first.session.threadId); assert.notEqual(first.session.threadId, first.sessionId); assert.equal(first.sessionFile, undefined);
   launchRole.defaultModeQuestions = false; // New role edits must not rewrite the existing instance's snapshot.
@@ -52,7 +63,7 @@ test('manager preserves Codex native identity across a fresh controller, old Pi 
   assert.ok(starts.every(r => r.launchArgs.includes('features.default_mode_request_user_input=true')), 'continuations keep the saved question override');
   assert.equal(readJson(path.join(manager.root, started.id, 'spec.json')).role.defaultModeQuestions, true);
   const piStarted = await manager.spawn('worker', { description: 'old Pi', instructions: 'test' }, cwd, 'REMEMBER beta');
-  const piFirst = await done(piStarted.id);
+  const piFirst = await release(piStarted.id);
   const spec = path.join(manager.root, piStarted.id, 'spec.json');
   const state = path.join(manager.root, piStarted.id, 'state.json');
   const s = readJson(state); delete s.session; writeJson(state, s);
@@ -236,17 +247,17 @@ test('Codex MCP approvals reach public tools, parent notification, audit and the
 
 test('Codex accept/cancel-only choices route through the worker and record the exact selection', { timeout: 20_000 }, async t => {
   const { cwd, manager, done, home } = setup(t);
-  for (const [value, phase] of [['Approve once', 'completed'], ['Cancel turn', 'stopped']]) {
+  for (const [value, status] of [['Approve once', 'completed'], ['Cancel turn', 'stopped']]) {
     const started = await manager.spawn('codex-worker', role, cwd, 'APPROVAL_ACCEPT_CANCEL');
     const waiting = await waitUntil('native approval or failure', () => {
-      const state = manager.get(started.id); return ['waiting', 'failed', 'stopped', 'completed'].includes(state.phase) ? state : undefined;
+      const state = manager.get(started.id); return ['waiting', 'idle', 'closed'].includes(state.phase) ? state : undefined;
     });
     assert.equal(waiting.phase, 'waiting');
     const q = waiting.questions[0]; assert.equal(q.method, 'select'); assert.deepEqual(q.options, ['Approve once', 'Cancel turn']);
     await assert.rejects(manager.reply(started.id, q.id, { confirmed: false }), /Response type/);
     await assert.rejects(manager.reply(started.id, q.id, { value: 'acceptForSession' }), /available options/);
     await manager.reply(started.id, q.id, { value }, { actor: 'parent', reason: 'Only this explicit fixture choice is authorized.' });
-    const final = await done(started.id, phase);
+    const final = await done(started.id, status);
     const audit = fs.readFileSync(path.join(manager.root, final.id, 'runs', final.runId, 'permissions.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
     assert.equal(audit.length, 1); assert.equal(audit[0].selectedOption, value);
     assert.equal(final.questions.length, 0);
@@ -299,12 +310,13 @@ test('Codex CLI resolution failure leaves existing instances and reports usable'
 });
 
 test('resume refuses a lost native Codex thread and does not create a replacement', { timeout: 20_000 }, async t => {
-  const { cwd, manager, done, home } = setup(t);
+  const { cwd, manager, done, release, home } = setup(t);
   const started = await manager.spawn('codex-worker', role, cwd, 'REMEMBER alpha');
-  const first = await done(started.id);
+  const first = await release(started.id);
   fs.renameSync(path.join(home, `${first.session.threadId}.json`), path.join(home, 'removed.json'));
   const failed = await manager.send(first.id, 'RECALL');
-  assert.equal(failed.phase, 'failed'); assert.match(failed.error, /Original thread missing/);
+  assert.equal(failed.phase, 'closed'); assert.equal(failed.lastStatus, 'failed');
+  assert.match(failed.error, /Original thread missing/);
   const records = fs.readFileSync(path.join(home, 'requests.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
   assert.equal(records.filter(r => r.method === 'thread/start').length, 1);
   assert.equal(records.filter(r => r.method === 'turn/start').length, 1);

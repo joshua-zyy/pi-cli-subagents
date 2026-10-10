@@ -1,6 +1,6 @@
 import { truncateToWidth } from "@earendil-works/pi-tui";
 import type { AgentView } from "../types.js";
-import { SPINNER, formatElapsed, isActive, isTerminal, oneLine, phaseColor, phaseIcon, phaseLabel, rightAlign, shortId, viewElapsed, viewStartedAt, type UiColor, type UiTheme } from "./format.js";
+import { SPINNER, canStop, formatElapsed, isActive, isTerminal, oneLine, phaseIcon, phaseLabel, rightAlign, shortId, viewElapsed, viewStartedAt, viewStatus, type UiColor, type UiTheme } from "./format.js";
 
 export const STATUS_KEY = "cli-subagents";
 export const MAX_STATUS_LINES = 10;
@@ -43,13 +43,15 @@ export function statusLines(agents: AgentView[], options: StatusLinesOptions): s
   const list = Array.isArray(agents) ? agents : [];
   const waiting = list.filter((agent) => agent.phase === "waiting").sort(byStart);
   const active = list.filter((agent) => isActive(agent.phase) && agent.phase !== "waiting").sort(byStart);
+  const idle = list.filter((agent) => agent.phase === "idle").sort(byStart);
   const finished = list.filter((agent) => isTerminal(agent.phase) && now - agent.updatedAt <= lingerMs).sort(byStart);
   // Prefer the most recently finished instances when space is limited.
   const recent = [...finished].reverse();
 
   const details = (agent: AgentView): string => {
     const error = oneLine(agent.error, BODY_LIMIT);
-    return error ? `${phaseLabel(agent.phase)}: ${error}` : phaseLabel(agent.phase);
+    const label = viewStatus(agent).label;
+    return error ? `${label}: ${error}` : label;
   };
   const row = (icon: string, color: UiColor, agent: AgentView, detail: string, activity?: string): Row => {
     const task = oneLine(agent.task, HEAD_LIMIT);
@@ -63,22 +65,26 @@ export function statusLines(agents: AgentView[], options: StatusLinesOptions): s
     };
   };
 
-  // Display priority: waiting for a response, active, then recently finished.
+  // Idle owners remain visible until explicitly released; only closed/legacy results expire.
+  // Display priority: waiting for a response, active, idle, then recently finished.
   const groups: { rows: Row[] }[] = [
     { rows: waiting.map((agent) => row(phaseIcon("waiting"), "warning", agent, "Waiting", oneLine(agent.questions?.[0]?.title, BODY_LIMIT) || "Waiting for a response")) },
     { rows: active.map((agent) => row(SPINNER[Math.abs(options.frame) % SPINNER.length], "accent", agent, phaseLabel(agent.phase), oneLine(agent.lastActivity, BODY_LIMIT) || "Starting...")) },
-    { rows: recent.map((agent) => row(phaseIcon(agent.phase), phaseColor(agent.phase), agent, details(agent))) },
+    ...[idle, recent].map((group) => ({ rows: group.map((agent) => {
+      const status = viewStatus(agent);
+      return row(status.icon, status.color, agent, details(agent));
+    }) })),
   ];
 
   const heading = (): string => {
-    const counts = [[active.length, "running"], [waiting.length, "waiting"], [finished.length, "ended"]]
+    const counts = [[active.length, "running"], [waiting.length, "waiting"], [idle.length, "idle"], [finished.length, "ended"]]
       .filter(([count]) => Number(count) > 0).map(([count, label]) => `${count} ${label}`);
     const color = waiting.length || active.length ? "accent" : "dim";
     return theme.fg(color, `${waiting.length || active.length ? "●" : "○"} Subagents`) +
       (counts.length ? theme.fg("dim", ` · ${counts.join(" · ")}`) : "") +
       theme.fg("dim", " · Ctrl+Alt+A view");
   };
-  if (!waiting.length && !active.length && !finished.length) return [];
+  if (!waiting.length && !active.length && !idle.length && !finished.length) return [];
 
   const budget = MAX_STATUS_LINES - 1 - 1; // One line each for heading and overflow hint
   const rows: Row[] = [];
@@ -105,7 +111,7 @@ export function statusLines(agents: AgentView[], options: StatusLinesOptions): s
 }
 
 /**
- * Register only while there is visible content; remove the widget after the linger period.
+ * Register while there is active or idle content; only finished records have a linger period.
  * Pi renders the component. The frame timer animates the spinner without rereading state;
  * `update()`, driven by the monitor, refreshes the snapshot.
  */
@@ -165,7 +171,7 @@ export class StatusWidget {
   }
   private hasActive(): boolean { return this.snapshot.some((agent) => isActive(agent.phase)); }
   private hasContent(now: number): boolean {
-    return this.snapshot.some((agent) => isActive(agent.phase) || now - agent.updatedAt <= this.lingerMs);
+    return this.snapshot.some((agent) => canStop(agent.phase) || now - agent.updatedAt <= this.lingerMs);
   }
   private register(): void {
     if (this.registered || this.disposed) return;

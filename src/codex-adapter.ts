@@ -3,7 +3,7 @@ import { createWriteStream } from "node:fs";
 import { killProcessTree } from "./process-tree.js";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
-import type { AdapterOptions, CliAdapter, InteractionReply } from "./cli-adapter.js";
+import type { AdapterEvent, AdapterOptions, CliAdapter, InteractionReply } from "./cli-adapter.js";
 import { childEnvironment, type Exit } from "./pi-process.js";
 import { CODEX_MODE_PRESETS } from "./roles.js";
 import type { CodexMode, NativeSession, Delivery, QuestionField } from "./types.js";
@@ -22,6 +22,7 @@ type Approval = { id: string; rpcId: string | number; threadId: string; turnId: 
 
 /** One worker owns one app-server process and one thread at a time. */
 export class CodexAdapter implements CliAdapter {
+  readonly resident = true;
   readonly child: ChildProcessWithoutNullStreams;
   readonly closed: Promise<Exit>;
   private pending = new Map<number, { resolve: (value: RecordValue) => void; reject: (error: Error) => void; timer: NodeJS.Timeout }>();
@@ -32,7 +33,12 @@ export class CodexAdapter implements CliAdapter {
   private ending = false;
   private failed = false;
   private activeTurn?: string;
-  private lastCompletedTurn?: string;
+  private run?: { runId?: string; settled: boolean; done: Promise<void>; resolve: () => void };
+  private starting?: Promise<void>;
+  private staged?: RecordValue[];
+  private closing = false;
+  private poisoned?: Error;
+  private interrupting?: Promise<void>;
   private thread?: NativeSession & { cli: "codex" };
   private textByItem = new Map<string, string>();
   private completedItems = new Map<string, string>();
@@ -41,7 +47,6 @@ export class CodexAdapter implements CliAdapter {
   private approvals = new Map<string, Approval>();
   private approvalByRpcId = new Map<string, Approval>();
   private completion = Promise.resolve();
-  private turnEnded?: () => void;
   private readonly timeout: number;
 
   get pid(): number | undefined { return this.child.pid; }
@@ -118,6 +123,7 @@ export class CodexAdapter implements CliAdapter {
   private record(record: RecordValue): void {
     if (typeof record.method === "string" && "id" in record) {
       // Server-initiated requests can reuse a client ID; method takes precedence over ID.
+      if (this.staged) { this.staged.push(record); return; }
       void this.serverRequest(record);
       return;
     }
@@ -130,16 +136,15 @@ export class CodexAdapter implements CliAdapter {
       else entry.reject(new Error("Codex RPC response is missing a result"));
       return;
     }
+    if (this.staged) { this.staged.push(record); return; }
     const params = object(record.params) ? record.params : {};
     if (record.method === "serverRequest/resolved" && params.threadId === this.thread?.threadId && (typeof params.requestId === "string" || typeof params.requestId === "number")) {
       const approval = this.approvalByRpcId.get(requestKey(params.requestId));
       if (approval) this.clearApproval(approval);
       return;
     }
-    if (record.method === "turn/started" && params.threadId === this.thread?.threadId && typeof params.turn?.id === "string") {
-      if (this.activeTurn !== params.turn.id) this.approvalItems.clear();
-      this.activeTurn = params.turn.id;
-      this.options.onEvent({ type: "activity", detail: "turn/started" });
+    if (record.method === "turn/started" && params.threadId === this.thread?.threadId && params.turn?.id === this.activeTurn && this.activeTurn) {
+      this.emit({ type: "activity", detail: "turn/started" });
     }
     if (params.threadId !== this.thread?.threadId || !this.activeTurn || params.turnId !== this.activeTurn && params.turn?.id !== this.activeTurn) return;
     if ((record.method === "item/started" || record.method === "item/completed" && params.item?.type === "mcpToolCall") &&
@@ -154,12 +159,12 @@ export class CodexAdapter implements CliAdapter {
       if (params.item.phase === "final_answer") this.finalAnswerId = params.item.id;
     } else if (record.method === "turn/completed") {
       const turn = params.turn;
-      this.lastCompletedTurn = turn.id;
+      const run = this.run!;
       for (const approval of [...this.approvals.values()]) this.clearApproval(approval, new Error("The Codex turn ended before this interaction was resolved"));
       this.activeTurn = undefined;
-      this.turnEnded?.();
+      run.resolve();
       this.completion = this.completion.then(async () => {
-        if (this.ending || this.failed) return;
+        if (this.ending || this.failed || this.run !== run) return;
         const ids = new Set([...this.textByItem.keys(), ...this.completedItems.keys()]);
         const text = this.finalAnswerId ? this.completedItems.get(this.finalAnswerId) ?? "" :
           [...ids].map(id => this.completedItems.get(id) ?? this.textByItem.get(id) ?? "").join("\n");
@@ -173,26 +178,35 @@ export class CodexAdapter implements CliAdapter {
             const messages = (saved.items ?? []).filter((item: RecordValue) => item.type === "agentMessage" && typeof item.text === "string");
             const final = messages.filter((item: RecordValue) => item.phase === "final_answer");
             result = (final.length ? final : messages).map((item: RecordValue) => item.text).join("\n");
-          } catch (error) { this.options.onEvent({ type: "settled", status: "failed", text: "", error: `Could not verify Codex's empty completion: ${(error as Error).message}` }); return; }
+          } catch (error) { this.emit({ type: "settled", status: "failed", text: "", error: `Could not verify Codex's empty completion: ${(error as Error).message}` }, run); return; }
         }
-        if (this.ending || this.failed) return;
+        if (this.ending || this.failed || this.run !== run) return;
         const status = turn.status === "completed" ? "completed" : turn.status === "interrupted" ? "stopped" : "failed";
-        this.options.onEvent({ type: "settled", status, text: result, ...(status === "failed" ? { error: String(turn.error?.message ?? `Codex turn status: ${turn.status}`) } : {}) });
-      }).catch(error => this.options.onEvent({ type: "settled", status: "failed", text: "", error: (error as Error).message }));
+        this.emit({ type: "settled", status, text: result, ...(status === "failed" ? { error: String(turn.error?.message ?? `Codex turn status: ${turn.status}`) } : {}) });
+      }).catch(error => this.emit({ type: "settled", status: "failed", text: "", error: (error as Error).message }, run));
     } else if (record.method === "item/started" || record.method === "item/completed") {
-      this.options.onEvent({ type: "activity", detail: record.method });
+      this.emit({ type: "activity", detail: record.method });
     }
+  }
+
+  private emit(event: AdapterEvent, run = this.run): void {
+    if (event.type === "settled" && run) {
+      if (run.settled) return;
+      run.settled = true;
+    }
+    this.options.onEvent({ ...event, ...(run?.runId === undefined ? {} : { runId: run.runId }) });
   }
 
   private clearApproval(approval: Approval, error?: Error): void {
     if (!this.approvals.delete(approval.id)) return;
     this.approvalByRpcId.delete(requestKey(approval.rpcId));
-    this.options.onEvent({ type: "resolved", id: approval.id });
+    this.emit({ type: "resolved", id: approval.id });
     if (error) approval.rejected?.(error);
     else approval.resolved?.();
   }
 
   private async serverRequest(record: RecordValue): Promise<void> {
+    const run = this.run;
     const rpcId = record.id;
     const command = record.method === "item/commandExecution/requestApproval";
     const file = record.method === "item/fileChange/requestApproval";
@@ -212,7 +226,7 @@ export class CodexAdapter implements CliAdapter {
         const id = randomUUID();
         const pending: Approval = { id, rpcId, threadId: p.threadId, turnId: p.turnId, attempted: false, mcp: { item: candidate } };
         this.approvals.set(id, pending); this.approvalByRpcId.set(requestKey(rpcId), pending);
-        this.options.onEvent({ type: "question", question: { id, method: "confirm", title: "Approve one Codex MCP tool call?",
+        this.emit({ type: "question", question: { id, method: "confirm", title: "Approve one Codex MCP tool call?",
           message: elicitation.message, parentPolicy: { confirm: true } } });
         return;
       }
@@ -226,7 +240,7 @@ export class CodexAdapter implements CliAdapter {
         const pending: Approval = { id, rpcId, threadId: p.threadId, turnId: p.turnId, attempted: false,
           mcp: { questionId: mcp.questionId, item } };
         this.approvals.set(id, pending); this.approvalByRpcId.set(requestKey(rpcId), pending);
-        this.options.onEvent({ type: "question", question: { id, method: "select", title: "Approve one Codex MCP tool call?",
+        this.emit({ type: "question", question: { id, method: "select", title: "Approve one Codex MCP tool call?",
           message: mcp.message, options: ["Allow", "Cancel"], parentPolicy: { values: ["Allow", "Cancel"] } } });
         return;
       }
@@ -236,7 +250,7 @@ export class CodexAdapter implements CliAdapter {
         const id = randomUUID();
         const pending: Approval = { id, rpcId, threadId: p.threadId, turnId: p.turnId, attempted: false, fields };
         this.approvals.set(id, pending); this.approvalByRpcId.set(requestKey(rpcId), pending);
-        this.options.onEvent({ type: "question", question: { id, method: "form", kind: "question", fields,
+        this.emit({ type: "question", question: { id, method: "form", kind: "question", fields,
           isBlocking: p.isBlocking, humanOnly: false, parentPolicy: { answers: true }, title: "Codex task questions",
           message: `${p.isBlocking ? "The current turn is waiting for these answers." : "Non-blocking: the current turn may continue."}\n${JSON.stringify(fields, null, 2)}` } });
         return;
@@ -255,7 +269,7 @@ export class CodexAdapter implements CliAdapter {
     if (!scope || !(command || file) || !details || details.length > 12_000 || !(typeof rpcId === "string" || Number.isSafeInteger(rpcId)) || this.approvalByRpcId.has(requestKey(rpcId))) {
       await this.write({ id: rpcId, ...(scope && (command || file) && (!command || !object(p) || p.availableDecisions == null || decisions?.includes("decline"))
         ? { result: { decision: "decline" } } : { error: { code: -32601, message: "Unsupported or unscoped interaction" } }) }).catch(() => {});
-      this.rejectInteraction(`Codex interaction ${record.method} is not supported or lacks reviewable action details; not approved`);
+      if (this.run === run) this.rejectInteraction(`Codex interaction ${record.method} is not supported or lacks reviewable action details; not approved`);
       return;
     }
     const id = randomUUID();
@@ -263,7 +277,7 @@ export class CodexAdapter implements CliAdapter {
       ...(command && decisions ? { allowed: new Set(decisions.filter((value: unknown) => typeof value === "string")) } : {}) }; 
     this.approvals.set(id, approval); this.approvalByRpcId.set(requestKey(rpcId), approval);
     const cancelOnly = command && decisions && !decisions.includes("decline");
-    this.options.onEvent({ type: "question", question: { id, method: cancelOnly ? "select" : "confirm",
+    this.emit({ type: "question", question: { id, method: cancelOnly ? "select" : "confirm",
       title: command ? "Approve one Codex command?" : "Approve one Codex file change?",
       message: details + (cancelOnly ? "\nThe native server offers no decline-and-continue option. Cancel turn ends this turn without approving the command." : ""),
       // Codex offers a one-time accept, a decline and a cancel; its session-wide decision is never sent.
@@ -272,7 +286,7 @@ export class CodexAdapter implements CliAdapter {
   private rejectInteraction(error: string): void {
     if (this.failed || this.ending) return;
     this.failed = true;
-    this.options.onEvent({ type: "settled", status: "failed", text: "", error, stop: true });
+    this.emit({ type: "settled", status: "failed", text: "", error, stop: true });
   }
 
   private checkedSession(thread: RecordValue | undefined): Extract<NativeSession, { cli: "codex" }> {
@@ -316,16 +330,33 @@ export class CodexAdapter implements CliAdapter {
     return session;
   }
 
-  async start(message: string): Promise<void> {
-    if (!this.thread || this.activeTurn) throw new Error("Codex is not ready for a new turn");
-    const result = await this.request("turn/start", { threadId: this.thread.threadId, input: textInput(message), ...(this.options.spec.role.effort ? { effort: this.options.spec.role.effort } : {}) });
-    if (typeof result.turn?.id !== "string") throw new Error("Codex did not acknowledge a turn ID");
-    if (this.activeTurn && result.turn.id !== this.activeTurn) throw new Error("Codex acknowledged a different active turn");
-    // A fast turn may have completed before its start response arrives.
-    if (!this.activeTurn && !this.ending && !this.failed && this.lastCompletedTurn !== result.turn.id && result.turn.status === "inProgress") this.activeTurn = result.turn.id;
+  async start(message: string, runId?: string): Promise<void> {
+    if (this.poisoned) throw this.poisoned;
+    if (!this.thread || this.activeTurn || this.starting || this.closing || this.ending || this.failed || this.interrupting || this.run && !this.run.settled)
+      throw new Error("Codex is not ready for a new turn (active, closing or interrupt pending)");
+    let resolve!: () => void;
+    const done = new Promise<void>(r => { resolve = r; });
+    this.run = { runId, settled: false, done, resolve };
+    this.textByItem.clear(); this.completedItems.clear(); this.finalAnswerId = undefined;
+    this.approvalItems.clear(); this.approvals.clear(); this.approvalByRpcId.clear();
+    this.staged = [];
+    this.starting = (async () => {
+      const result = await this.request("turn/start", { threadId: this.thread!.threadId, input: textInput(message), ...(this.options.spec.role.effort ? { effort: this.options.spec.role.effort } : {}) });
+      if (typeof result.turn?.id !== "string" || !result.turn.id.trim()) throw new Error("Codex did not acknowledge a turn ID");
+      this.activeTurn = result.turn.id;
+      // Events can beat acceptance. Replay only after the response binds the exact
+      // turn; a stale turn/started must never switch our foreground identity.
+      const staged = this.staged!; this.staged = undefined;
+      for (const record of staged) this.record(record);
+    })();
+    try { await this.starting; }
+    catch (error) { this.poisoned = new Error(`Codex start is uncertain; stop/release before new work: ${(error as Error).message}`); throw this.poisoned; }
+    finally { this.starting = undefined; this.staged = undefined; }
   }
 
   async send(message: string, mode: Delivery): Promise<void> {
+    if (this.poisoned) throw this.poisoned;
+    if (this.interrupting || this.closing || this.ending || this.failed) throw new Error("Codex interrupt or shutdown pending; cannot send");
     if (mode === "followUp") throw new Error("Codex followUp while running is not supported; wait for this run to finish");
     if (!this.thread || !this.activeTurn) throw new Error("Codex has no active turn; inspect the instance before retrying");
     const expectedTurnId = this.activeTurn;
@@ -334,7 +365,7 @@ export class CodexAdapter implements CliAdapter {
   }
   async reply(answer: InteractionReply): Promise<void> {
     const approval = this.approvals.get(answer.id);
-    if (!this.activeTurn?.trim() || !approval || approval.attempted || approval.threadId !== this.thread?.threadId || approval.turnId !== this.activeTurn)
+    if (this.poisoned || this.interrupting || this.closing || !this.activeTurn?.trim() || !approval || approval.attempted || approval.threadId !== this.thread?.threadId || approval.turnId !== this.activeTurn)
       throw new Error("Codex approval is no longer pending or was already answered; inspect before retrying");
     let result: RecordValue;
     if (approval.mcp) {
@@ -385,21 +416,33 @@ export class CodexAdapter implements CliAdapter {
     try { return { exit: await this.closed, forced: this.forced }; }
     finally { clearTimeout(timer); }
   }
+  interrupt(): Promise<void> {
+    if (this.poisoned) return Promise.reject(this.poisoned);
+    if (this.interrupting) return this.interrupting;
+    const run = this.run, starting = this.starting;
+    if (!run || run.settled && !this.activeTurn) return Promise.resolve();
+    let timer: NodeJS.Timeout;
+    const operation = (async () => {
+      await starting;
+      if (this.run !== run) throw new Error("Codex interrupt target changed; runtime is uncertain");
+      const turnId = this.activeTurn;
+      if (turnId) await this.request("turn/interrupt", { threadId: this.thread!.threadId, turnId });
+      // A native response only acknowledges the command, not completion.
+      await run.done;
+      await this.completion;
+    })();
+    this.interrupting = Promise.race([operation, this.closed.then(() => {}), new Promise<void>((_, reject) => {
+      timer = setTimeout(() => reject(new Error("Codex interrupt timed out; runtime is uncertain. Stop/release before new work.")), this.timeout);
+    })]).catch(error => { this.poisoned = error; throw error; }).finally(() => {
+      clearTimeout(timer); this.interrupting = undefined;
+    });
+    return this.interrupting;
+  }
   async stop(): Promise<{ exit: Exit; forced: boolean }> {
-    // Interrupt acknowledgement and graceful exit share one deadline, not a full
-    // request timeout followed by another exit timeout.
+    this.closing = true;
     const deadline = setTimeout(() => { void this.kill(); }, 5000);
     try {
-      if (this.thread && this.activeTurn && !this.exitError) {
-        const completed = new Promise<void>(resolve => { this.turnEnded = resolve; });
-        try {
-          await this.request("turn/interrupt", { threadId: this.thread.threadId, turnId: this.activeTurn });
-          let timer: NodeJS.Timeout | undefined;
-          try { await Promise.race([completed, new Promise<void>(resolve => { timer = setTimeout(resolve, 500); })]); }
-          finally { if (timer) clearTimeout(timer); }
-        } catch { /* The stop deadline still reaps this CLI tree. */ }
-        this.turnEnded = undefined;
-      }
+      try { await this.interrupt(); } catch { /* Only resource release recovers uncertainty. */ }
       return await this.end();
     } finally { clearTimeout(deadline); }
   }

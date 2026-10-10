@@ -32,20 +32,24 @@ export function framePane(lines: string[], width: number, paint: (text: string) 
 
 export const PHASE_LABEL: Record<Phase, string> = {
   starting: "Starting", running: "Running", waiting: "Waiting", stopping: "Stopping",
-  completed: "Completed", failed: "Failed", stopped: "Stopped", unreachable: "Unreachable",
+  completed: "Completed", failed: "Failed", stopped: "Stopped", idle: "Idle", closed: "Closed", unreachable: "Unreachable",
 };
 
 export const isActive = (phase: Phase): boolean => ["starting", "running", "waiting", "stopping"].includes(phase);
-export const isTerminal = (phase: Phase): boolean => !isActive(phase);
+export const isTerminal = (phase: Phase): boolean => ["completed", "failed", "stopped", "closed", "unreachable"].includes(phase);
+
+/** Idle has no active run, but still owns processes which can be explicitly released. */
+export const canStop = (phase: Phase): boolean => isActive(phase) || phase === "idle";
+export const canResume = (phase: Phase): boolean => ["completed", "failed", "stopped", "closed"].includes(phase);
 
 /** Waiting children do not accept messages; their questions must go through /agent-reply. */
 export const canSteer = (phase: Phase): boolean => phase === "starting" || phase === "running";
 
 /**
- * Whether this instance can receive a message: running ones are steered, finished ones resume
- * their original session. Unreachable instances must not be resumed, so they are excluded.
+ * Running instances are steered, idle ones start a new run in the resident runtime, and closed
+ * ones resume their native session. Waiting, stopping and unreachable instances cannot accept input.
  */
-export const canMessage = (phase: Phase): boolean => canSteer(phase) || ["completed", "failed", "stopped"].includes(phase);
+export const canMessage = (phase: Phase): boolean => canSteer(phase) || phase === "idle" || canResume(phase);
 
 /** Unknown phases from old or manually edited records should remain visible. */
 export const phaseLabel = (phase: Phase): string => PHASE_LABEL[phase] ?? String(phase);
@@ -53,7 +57,8 @@ export const phaseLabel = (phase: Phase): string => PHASE_LABEL[phase] ?? String
 export function phaseIcon(phase: Phase): string {
   if (phase === "completed") return "✓";
   if (phase === "failed") return "✗";
-  if (phase === "stopped") return "■";
+  if (phase === "stopped" || phase === "closed") return "■";
+  if (phase === "idle") return "○";
   if (phase === "waiting" || phase === "unreachable") return "⚠";
   return "·";
 }
@@ -61,9 +66,23 @@ export function phaseIcon(phase: Phase): string {
 export function phaseColor(phase: Phase): UiColor {
   if (phase === "completed") return "success";
   if (phase === "failed") return "error";
-  if (phase === "stopped" || phase === "stopping") return "muted";
+  if (phase === "stopped" || phase === "stopping" || phase === "closed") return "muted";
   if (phase === "waiting" || phase === "unreachable") return "warning";
   return "accent";
+}
+
+/** A previous failed run must not turn a new running input into a failed receipt. */
+export const hasFailure = (view: Pick<AgentView, "phase" | "lastStatus" | "error">): boolean =>
+  view.phase === "failed" || ((view.phase === "idle" || view.phase === "closed") && (view.lastStatus === "failed" || Boolean(view.error)));
+
+/** Lifecycle and last-run outcome are separate: an idle/closed runtime can still show a failure. */
+export function viewStatus(view: Pick<AgentView, "phase" | "lastStatus" | "error">): { label: string; icon: string; color: UiColor } {
+  const settled = view.phase === "idle" || view.phase === "closed";
+  const last = settled && view.lastStatus ? ` · last ${phaseLabel(view.lastStatus)}` : "";
+  const error = settled && view.error && view.lastStatus !== "failed" ? " · Error" : "";
+  return { label: `${phaseLabel(view.phase)}${last}${error}`,
+    icon: hasFailure(view) ? phaseIcon("failed") : phaseIcon(view.phase),
+    color: hasFailure(view) ? "error" : phaseColor(view.phase) };
 }
 
 /** Strip terminal sequences, collapse whitespace and clip user-supplied text. */
@@ -98,9 +117,9 @@ export const viewStartedAt = (view: AgentView): number => view.startedAt ?? view
  */
 export const shortId = (id: string): string => (typeof id === "string" ? id.slice(0, 8) : "");
 
-/** Freeze elapsed time at updatedAt for terminal states. */
+/** Run elapsed time stops while idle as well as after the runtime closes. */
 export const viewElapsed = (view: AgentView, now: number): number =>
-  (isTerminal(view.phase) ? view.updatedAt : now) - viewStartedAt(view);
+  (isActive(view.phase) ? now : view.updatedAt) - viewStartedAt(view);
 
 /** Preserve right-aligned statistics by clipping the left text first. */
 export function rightAlign(left: string, right: string, width: number): string {

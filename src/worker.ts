@@ -12,24 +12,45 @@ import { readJson, writeJson } from "./storage.js";
 import type { AgentSpec, AgentState, Control, Question, Report, StartRequest } from "./types.js";
 
 async function run(dir: string, runId: string): Promise<void> {
-  const runDir = path.join(dir, "runs", runId);
+  let runDir = path.join(dir, "runs", runId);
+  const runtimeId = randomUUID();
   const spec = readJson<AgentSpec>(path.join(dir, "spec.json"))!;
   const start = readJson<StartRequest>(path.join(runDir, "request.json"))!;
   if (!spec || ![1, 2, 3].includes(spec.version) || (spec.version === 1 && spec.cli !== undefined && spec.cli !== "pi") || (spec.version === 2 && (spec.cli !== "codex" || !spec.codexHome)) || (spec.version === 3 && (spec.cli !== "claude" || !spec.claudeHome)) || start?.runId !== runId) throw new Error("Invalid startup record");
   const lockFile = path.join(dir, "owner.lock");
   const lock = openSync(lockFile, "wx", 0o600);
-  writeFileSync(lock, JSON.stringify({ pid: process.pid, runId }));
+  writeFileSync(lock, JSON.stringify({ pid: process.pid, runId, runtimeId }));
   const state: AgentState = {
-    id: spec.id, runId, phase: "starting", workerPid: process.pid, startedAt: Date.now(),
+    id: spec.id, runId, runtimeId, protocolVersion: 2, phase: "starting", workerPid: process.pid, startedAt: start.createdAt ?? Date.now(),
     updatedAt: Date.now(), accepted: false, questions: [], logFile: path.join(runDir, "events.jsonl"),
     ...(start.session ? { session: nativeSession(start.session), sessionId: start.session.sessionId,
       ...("sessionFile" in start.session ? { sessionFile: start.session.sessionFile } : {}) } : {}),
   };
   const save = () => { state.updatedAt = Date.now(); writeJson(path.join(dir, "state.json"), state); };
-  let rpc: CliAdapter | undefined, server: Server | undefined, ending = false;
+  let rpc: CliAdapter | undefined, server: Server | undefined, ending = false, released = false, runOpen = true, runCaptured = false;
   let finalText = "";
+  const token = randomBytes(32).toString("hex");
+  const endpoint = () => {
+    const address = server?.address();
+    if (!address || typeof address === "string") throw new Error("Local control address is unavailable");
+    writeJson(path.join(dir, "endpoint.json"), { port: address.port, token, runId, runtimeId, protocolVersion: 2 });
+  };
+  const independentQuestions = new Set<string>();
+  let unblockStartup: (() => void) | undefined;
+  const clearTimers = (all = true) => {
+    for (const [id, timer] of timers) if (all || !independentQuestions.has(id)) { clearTimeout(timer); timers.delete(id); }
+  };
+  const forgetQuestion = (id: string) => {
+    independentQuestions.delete(id); clearTimeout(timers.get(id)); timers.delete(id);
+    state.questions = state.questions.filter(q => q.id !== id);
+  };
+  const refreshPhase = () => {
+    const blocking = state.questions.some(q => q.isBlocking !== false);
+    if (!ending && state.phase !== "unreachable") state.phase = blocking ? "waiting" : runOpen ? state.accepted ? "running" : "starting" : "idle";
+    if (!blocking || ending || state.phase === "unreachable") { unblockStartup?.(); unblockStartup = undefined; }
+  };
   let commandQueue = Promise.resolve();
-  const timers = new Set<NodeJS.Timeout>();
+  const timers = new Map<string, NodeJS.Timeout>();
   let resolveFinished!: () => void;
   const finished = new Promise<void>((resolve) => { resolveFinished = resolve; });
 
@@ -45,72 +66,116 @@ async function run(dir: string, runId: string): Promise<void> {
     if (!questionId) state.resultFile = file;
   }
 
-  async function finish(status: "completed" | "failed" | "stopped", error?: string, stop = false): Promise<void> {
-    if (ending) return;
-    ending = true;
-    state.phase = "stopping"; save();
-    for (const timer of timers) clearTimeout(timer);
+  type Outcome = { status: "completed" | "failed" | "stopped"; text: string; error?: string };
+  function publish(outcome: Outcome): void {
+    runOpen = false; runCaptured = false; clearTimers(false); state.lastStatus = outcome.status;
+    if (state.phase !== "unreachable") state.error = outcome.error;
+    finalText = outcome.text; state.questions = state.questions.filter(q => independentQuestions.has(q.id));
+    report(outcome.status, outcome.text, outcome.error);
+  }
+
+  // Paseo's close-before-replace and captured-run semantics, adapted to one local worker.
+  // Source: getpaseo/paseo 29db2b798..., docs/agent-lifecycle.md / agent-run-state.ts (Apache-2.0).
+  async function release(stop: boolean, outcome?: Outcome): Promise<void> {
+    if (ending || released) return;
+    ending = true; state.phase = "stopping"; clearTimers(); unblockStartup?.(); unblockStartup = undefined;
+    if (!outcome && runOpen) outcome = { status: "stopped", text: finalText, error: "Parent requested shutdown" };
     try {
+      save();
       if (rpc) {
-        if (stop) {
-          for (const question of state.questions) {
-            try {
-              appendFileSync(path.join(runDir, "permissions.jsonl"), `${JSON.stringify({ time: Date.now(), runId,
-                questionId: question.id, actor: "controller", decision: "cancelled", delivery: "attempted", reason: "Shutdown cleanup; no action was approved" })}\n`, { mode: 0o600 });
-              // Queue cancellation writes before interrupt, but never await native receipts
-              // here: stop owns the deadline and closes outstanding reply waiters.
-              void rpc.reply({ type: "reply", id: question.id, cancelled: true }).catch(() => {});
-            } catch { /* stop() still reaps this CLI tree even if the audit cannot be written */ }
-          }
+        if (stop) for (const question of state.questions) {
+          try {
+            appendFileSync(path.join(runDir, "permissions.jsonl"), `${JSON.stringify({ time: Date.now(), runId,
+              questionId: question.id, actor: "controller", decision: "cancelled", delivery: "attempted", reason: "Shutdown cleanup; no action was approved" })}\n`, { mode: 0o600 });
+            void rpc.reply({ type: "reply", id: question.id, cancelled: true }).catch(() => {});
+          } catch { /* Reap even if cancellation intent could not be recorded. */ }
         }
         const result = await (stop ? rpc.stop() : rpc.end());
         state.exitCode = result.exit.code; state.forced = result.forced;
-        if (status === "completed" && (result.exit.code !== 0 || result.forced)) {
-          status = "failed"; error = "The turn ended but child CLI did not exit cleanly; inspect the logs.";
-        }
+        if (outcome?.status === "completed" && (result.exit.code !== 0 || result.forced))
+          outcome = { ...outcome, status: "failed", error: "The turn ended but child CLI did not exit cleanly; inspect the logs." };
       }
-      state.phase = status; state.error = error; state.questions = [];
-      report(status, finalText, error); save();
-    } finally {
-      if (server?.listening) server.close(() => resolveFinished());
-      else resolveFinished();
+      if (outcome) publish(outcome);
+      state.questions = []; independentQuestions.clear(); state.runtimeClosed = true;
+      // On-disk terminal enums remain readable by the old version after release.
+      state.phase = state.lastStatus ?? "stopped"; save(); released = true;
+      // Native reaping, not a half-open HTTP client, is the ownership barrier. Allow the
+      // current response to flush, then bound connection draining without holding the writer lock.
+      server?.close();
+      if (server) setTimeout(() => server?.closeAllConnections(), 1_000).unref();
+      resolveFinished();
+    } catch (error) {
+      ending = false; state.phase = "unreachable";
+      state.error = `Runtime release is uncertain: ${(error as Error).message}`;
+      try { if (outcome) publish({ ...outcome, status: "failed", error: state.error }); }
+      finally { save(); }
+      throw error; // Keep ownership and the endpoint; never admit a replacement writer.
     }
   }
 
+  function settle(outcome: Outcome, stop = false): void {
+    if (!runOpen || ending) return;
+    if (rpc?.resident && !stop) { publish(outcome); refreshPhase(); save(); }
+    else { runOpen = false; void release(stop, outcome).catch(() => {}); }
+  }
+
   function event(record: AdapterEvent): void {
-    if (ending) return;
+    if (ending || (record.runId !== undefined && record.runId !== runId)) return;
     if (record.type === "activity") {
       state.lastActivity = record.detail;
-      state.phase = state.questions.some(q => q.isBlocking !== false) ? "waiting" : "running"; save();
+      refreshPhase(); save();
     }
     if (record.type === "question") {
       const question: Question = record.question;
+      if (record.runtimeScoped || record.runId === undefined) independentQuestions.add(question.id);
       report("waiting", `${question.title}\n${question.message ?? ""}`, undefined, question.id);
-      state.questions.push(question); state.phase = state.questions.some(q => q.isBlocking !== false) ? "waiting" : "running"; save();
+      state.questions.push(question); refreshPhase(); save();
       if (question.expiresAt !== undefined) {
         const timer = setTimeout(() => {
-          timers.delete(timer);
-          state.questions = state.questions.filter((q) => q !== question);
-          if (!ending) { state.phase = state.questions.some(q => q.isBlocking !== false) ? "waiting" : state.accepted ? "running" : "starting"; save(); }
+          forgetQuestion(question.id);
+          if (!ending) { refreshPhase(); save(); }
         }, Math.max(0, question.expiresAt - Date.now()));
-        timers.add(timer);
+        clearTimeout(timers.get(question.id)); timers.set(question.id, timer);
       }
     }
     if (record.type === "resolved") {
-      state.questions = state.questions.filter(q => q.id !== record.id);
-      state.phase = state.questions.some(q => q.isBlocking !== false) ? "waiting" : state.accepted ? "running" : "starting"; save();
+      forgetQuestion(record.id);
+      refreshPhase(); save();
     }
     if (record.type === "settled") {
-      finalText = record.text;
-      void finish(record.status, record.error, record.stop);
+      settle(record, record.stop);
     }
   }
 
   async function dispatch(input: Control): Promise<AgentState> {
     if (input.type === "status") return state;
-    if (input.type === "close") { void finish("stopped", "Parent requested shutdown", true); return state; }
+    if (input.type === "close") {
+      if (input.onlyIdle && (state.phase !== "idle" || runOpen || state.questions.length)) throw new Error("Runtime is no longer idle; it was not closed");
+      await release(true); return { ...state };
+    }
     if (ending || !rpc) throw new Error("Not accepted: worker is starting or shutting down; inspect its state first.");
-    if (input.type === "send") {
+    if (state.phase === "unreachable") throw new Error("Runtime execution is uncertain; release it before any new work");
+    if (input.type === "start") {
+      if (!rpc.resident || state.phase !== "idle" || runOpen || state.questions.length) throw new Error("Runtime is not idle; new work was not accepted");
+      if (typeof input.message !== "string" || !input.message.trim()) throw new Error("Task must not be empty");
+      const next = randomUUID();
+      const request: StartRequest = { runId: next, message: input.message, createdAt: Math.max(Date.now(), (state.startedAt ?? 0) + 1), session: state.session, logFile: state.logFile };
+      writeJson(path.join(dir, "runs", next, "request.json"), request);
+      runId = next; runDir = path.join(dir, "runs", next); runOpen = true; finalText = ""; clearTimers();
+      state.runId = next; state.startedAt = request.createdAt; state.accepted = false; state.phase = "starting";
+      delete state.error; delete state.resultFile; delete state.lastStatus; delete state.lastActivity;
+      save(); endpoint();
+      try { runCaptured = true; await rpc.start(input.message, runId); state.accepted = true; refreshPhase(); save(); }
+      catch (error) { await release(true, { status: "failed", text: finalText, error: (error as Error).message }); throw error; }
+    } else if (input.type === "interrupt") {
+      if (!runOpen) return { ...state };
+      if (!runCaptured) throw new Error("No captured turn to interrupt during startup; use close/release instead");
+      const captured = runId;
+      try {
+        await rpc.interrupt();
+        if (runId === captured && runOpen) settle({ status: "stopped", text: finalText, error: "Parent interrupted the current turn" });
+      } catch (error) { state.phase = "unreachable"; state.error = `Interrupt outcome uncertain: ${(error as Error).message}`; save(); throw error; }
+    } else if (input.type === "send") {
       if (!state.accepted) throw new Error("Initial task has not been accepted; resolve any startup interaction first.");
       if (state.questions.some(q => q.isBlocking !== false)) throw new Error("The child has an unresolved interaction. Use subagent_reply or /agent-reply; a message is not an approval.");
       if (typeof input.message !== "string" || !input.message.trim() || !["steer", "followUp"].includes(input.mode)) throw new Error("Invalid message or delivery mode");
@@ -149,15 +214,14 @@ async function run(dir: string, runId: string): Promise<void> {
         ...(q.method === "select" && q.options?.includes(input.value!) ? { selectedOption: input.value } : {}),
       })}\n`, { mode: 0o600 });
       await rpc.reply(input);
-      state.questions = state.questions.filter((item) => item !== q);
-      if (!ending) { state.phase = state.questions.some(q => q.isBlocking !== false) ? "waiting" : state.accepted ? "running" : "starting"; save(); }
+      forgetQuestion(q.id);
+      if (!ending) { refreshPhase(); save(); }
     } else throw new Error("Unknown control operation");
-    return state;
+    return { ...state, questions: [...state.questions] };
   }
 
   try {
     save();
-    const token = randomBytes(32).toString("hex");
     server = createServer(async (req, res) => {
       res.setHeader("Content-Type", "application/json"); res.setHeader("Connection", "close");
       if (req.method !== "POST" || req.url !== "/" || req.headers.authorization !== `Bearer ${token}`) {
@@ -166,8 +230,12 @@ async function run(dir: string, runId: string): Promise<void> {
       try {
         let body = "";
         for await (const chunk of req) { body += chunk; if (body.length > 1024 * 1024) throw new Error("Control message is too large"); }
-        const input = JSON.parse(body) as Control;
-        const operation = commandQueue.then(() => dispatch(input));
+        const input = JSON.parse(body) as Control & { protocolVersion?: number; runtimeId?: string; expectedRunId?: string };
+        const operation = commandQueue.then(() => {
+          if (input.protocolVersion !== 2 || input.runtimeId !== runtimeId || input.expectedRunId !== runId)
+            throw new Error("Worker control protocol/runtime/run identity mismatch; inspect before retrying");
+          return dispatch(input);
+        });
         commandQueue = operation.then(() => {}, () => {});
         const result = await operation;
         res.end(JSON.stringify(result));
@@ -175,9 +243,7 @@ async function run(dir: string, runId: string): Promise<void> {
     });
     server.requestTimeout = 40_000;
     await new Promise<void>((resolve, reject) => { server!.once("error", reject); server!.listen(0, "127.0.0.1", resolve); });
-    const address = server.address();
-    if (!address || typeof address === "string") throw new Error("Local control address is unavailable");
-    writeJson(path.join(dir, "endpoint.json"), { port: address.port, token, runId });
+    endpoint();
     const session = nativeSession(start.session);
     rpc = (spec.cli ?? "pi") === "codex"
       ? new CodexAdapter({ spec, session, logFile: state.logFile, onEvent: event })
@@ -185,24 +251,40 @@ async function run(dir: string, runId: string): Promise<void> {
       : new PiAdapter({ spec, session, logFile: state.logFile, onEvent: event });
     state.cliPid = rpc.pid; save();
     rpc.closed.then((exit) => {
-      if (!ending) void finish("failed", `Child CLI exited before a terminal event (${exit.code ?? exit.signal})`);
+      if (ending) return;
+      const error = `Child CLI exited unexpectedly (${exit.code ?? exit.signal}); previous run results are unchanged`;
+      if (runOpen) settle({ status: "failed", text: finalText, error }, true);
+      else {
+        state.error = error;
+        writeJson(path.join(dir, "reports", `${runtimeId}-exited.json`), {
+          notificationId: `${runtimeId}-exited`, agentId: spec.id, runId, parentFile: spec.parentFile,
+          status: "failed", time: Date.now(), text: "Runtime exited between assignments; read the original run result by runId.", error, logFile: state.logFile,
+        } satisfies Report);
+        void release(false).catch(() => {});
+      }
     });
     const initial = await rpc.ready();
     state.session = initial; state.sessionId = initial.sessionId;
     if (initial.cli === "pi") state.sessionFile = initial.sessionFile;
     save();
-    if (!ending) {
-      await rpc.start(start.message);
-      state.accepted = true; if (!ending && !state.questions.some(q => q.isBlocking !== false)) state.phase = "running"; save();
+    // Runtime-level startup dialogs may outlive ready(). Do not occupy the control
+    // queue while waiting: parent replies must be able to unblock the original task.
+    while (!ending && state.phase !== "unreachable" && state.questions.some(q => q.isBlocking !== false))
+      await new Promise<void>(resolve => { unblockStartup = resolve; });
+    if (!ending && state.phase !== "unreachable") {
+      runCaptured = true;
+      await rpc.start(start.message, runId);
+      state.accepted = true; refreshPhase(); if (!released) save();
     }
     await finished;
   } catch (error) {
-    await finish("failed", (error as Error).message, true);
+    await release(true, { status: "failed", text: finalText, error: (error as Error).message }).catch(() => {});
     await finished;
   } finally {
-    for (const timer of timers) clearTimeout(timer);
+    clearTimers();
     server?.close();
-    closeSync(lock); unlinkSync(lockFile);
+    closeSync(lock);
+    if (released) unlinkSync(lockFile);
   }
 }
 

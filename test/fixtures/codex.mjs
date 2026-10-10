@@ -4,6 +4,7 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 const home = process.env.CODEX_HOME;
 if (!home || !fs.existsSync(path.join(home, 'fixture-home'))) throw Error('An explicit fixture home is required');
+if (process.argv.includes('--exit-when-idle')) setInterval(() => { if (fs.existsSync(path.join(home, 'exit-idle'))) process.exit(0); }, 10);
 const emit = record => process.stdout.write(JSON.stringify(record) + '\n');
 const response = (cmd, result = {}) => emit({ id: cmd.id, result });
 const error = (cmd, message) => emit({ id: cmd.id, error: { code: -32000, message } });
@@ -256,6 +257,12 @@ function handle(cmd) {
     if (!cmd.params.model) return error(cmd, 'Explicit model required');
     thread = { id: randomUUID(), sessionId: randomUUID(), path: null, cwd: cmd.params.cwd, ephemeral: false, status: { type: 'idle' }, turns: [], model: cmd.params.model };
     save();
+    if (process.argv.includes('--hold-ready')) {
+      const timer = setInterval(() => { if (fs.existsSync(path.join(home, 'release-ready'))) {
+        clearInterval(timer); response(cmd, { thread, model: cmd.params.model, cwd: thread.cwd });
+      } }, 10);
+      return;
+    }
     return response(cmd, { thread, model: cmd.params.model, cwd: thread.cwd });
   }
   if (cmd.method === 'thread/resume' || cmd.method === 'thread/read') {
@@ -277,6 +284,7 @@ function handle(cmd) {
     }
     return reply();
   }
+  if (cmd.method === 'fixture/emit') { for (const record of cmd.params.records) emit(record); return; }
   if (cmd.method === 'fixture/mcpItemUpdate') {
     notify('item/completed', { threadId: thread.id, turnId: turn.id,
       item: { type: 'mcpToolCall', id: 'mcp-call', status: 'completed', server: 'fixture', tool: 'write', arguments: {} } });
@@ -302,6 +310,7 @@ function handle(cmd) {
     notify('item/completed', { threadId: thread.id, turnId: turn.id,
       item: { type: 'userMessage', id: `user-${turn.id}`, content: [{ type: 'text', text: message }] } });
     execute(message);
+    if (process.argv.includes('--delay-start')) return setTimeout(() => response(cmd, { turn: initial }), 100);
     return response(cmd, { turn: initial });
   }
   if (cmd.method === 'turn/steer') {
@@ -315,6 +324,8 @@ function handle(cmd) {
     if (process.argv.includes('--ignore-interrupt')) return;
     if (cmd.params.threadId !== thread.id || cmd.params.turnId !== turn.id) return error(cmd, 'Wrong interrupt target');
     response(cmd);
+    if (process.argv.includes('--ack-interrupt-only')) return;
+    approvals.clear(); questions.clear(); elicitations.clear();
     // The response is not completion. A client must wait for the terminal event.
     setTimeout(() => finish('INTERRUPTED', 'interrupted'), 60);
     return;

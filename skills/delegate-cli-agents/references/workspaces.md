@@ -21,8 +21,9 @@ permissions to make a child start there.
 
 ## Work in it
 
-One active instance per workspace. Another instance may use the same workspace ID after the previous
-instance releases it; whether that next task is implementation, review or something else is your workflow.
+One runtime owner per workspace, including an **idle** resident Pi/Codex instance. Explicitly stop it
+before integration or handing the workspace to another instance. Another instance may use the same
+workspace ID after the previous instance releases it; whether that next task is implementation, review or something else is your workflow.
 
 ## Sync and keep
 
@@ -30,7 +31,9 @@ When an instance continues work in an existing workspace, the baseline is an exp
 
 - `baseline: "keep"` — continue with the workspace as it is. This is not a restore of remembered files.
 - `baseline: "sync"` — update an idle, fully integrated workspace from the parent. Sync refuses
-  unintegrated or staged work: **never reset or discard that work to make sync pass.**
+  unintegrated or staged work: **never reset or discard that work to make sync pass.** It closes only
+  the target idle runtime before session preflight/synchronization/resume; other owners block it. A
+  later refusal may leave that runtime closed with its original session and reports intact.
 
 After either choice, read the baseline or file-change notice and tell the child what to re-read; its
 session memory is not a current view of the files. If a pruned acknowledged baseline means the exact

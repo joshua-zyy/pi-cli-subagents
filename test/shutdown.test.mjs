@@ -24,7 +24,8 @@ test('multiple approvals without cancellation receipts do not delay worker inter
   try {
     const start = Date.now(), closed = await m.close(first.id);
     assert(Date.now() - start < 8000, 'cancellation receipts must not multiply the stop deadline');
-    assert.equal(closed.phase, 'stopped'); assert.deepEqual(closed.session, first.session);
+    assert.equal(closed.phase, 'closed'); assert.equal(closed.lastStatus, 'stopped');
+    assert.deepEqual(closed.session, first.session);
     assert.equal(closed.questions.length, 0);
     const requests = fs.readFileSync(path.join(home, 'requests.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
     assert.equal(requests.filter(r => r.result?.decision === 'cancel').length, 2);
@@ -44,7 +45,7 @@ test('shutdown audit failure still interrupts without approving or retrying a de
   fs.mkdirSync(path.join(m.root, first.id, 'runs', first.runId, 'permissions.jsonl'));
   try {
     const start = Date.now(), closed = await m.close(first.id);
-    assert(Date.now() - start < 8000); assert.equal(closed.phase, 'stopped');
+    assert(Date.now() - start < 8000); assert.equal(closed.phase, 'closed'); assert.equal(closed.lastStatus, 'stopped');
     const requests = fs.readFileSync(path.join(home, 'requests.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
     assert(!requests.some(r => r.result?.decision), 'failed intent logging must not send an action decision');
     assert.equal(requests.filter(r => r.method === 'turn/interrupt').length, 1);

@@ -19,7 +19,15 @@ const setup = t => {
   const launch={command:process.execPath,args:[pi]},options={launch:{command:process.execPath,args:[fixture]},home};
   const m=new AgentManager(parent,launch,undefined,options);
   t.after(async()=>{for(const s of m.list())if(processAlive(s.workerPid))await m.close(s.id);});
-  const done=(id,phase='completed')=>waitUntil('Claude worker release',()=>{const s=m.get(id);return s.phase===phase&&!processAlive(s.workerPid)?s:undefined;},12000);
+  const done=async(id,status='completed')=>{
+    const state=await waitUntil('run result',()=>{const s=m.get(id);return ['idle','closed'].includes(s.phase)?s:undefined;},12000);
+    assert.equal(state.lastStatus,status);
+    if(state.cli==='claude'){
+      assert.equal(state.phase,'closed');
+      await waitUntil('Claude worker release',()=>!processAlive(state.workerPid),5000);
+    }
+    return state;
+  };
   return{m,cwd,home,parent,launch,options,done};
 };
 function publicApi(parent,cwd,ui={}) {

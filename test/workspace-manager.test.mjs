@@ -27,10 +27,21 @@ function setup(t) {
   });
   return { repo, parent, manager };
 }
-const complete = (manager, id) => waitUntil('worker completion and lease release', () => {
-  const state = manager.get(id);
-  return state.phase === 'completed' && !processAlive(state.workerPid) ? state : undefined;
-}, 15_000);
+const complete = async (manager, id) => {
+  const state = await waitUntil('workspace run result', () => {
+    const current = manager.get(id);
+    return ['idle', 'closed'].includes(current.phase) ? current : undefined;
+  }, 15_000);
+  assert.equal(state.lastStatus, 'completed');
+  return state;
+};
+const release = async (manager, id) => {
+  await complete(manager, id);
+  const closed = await manager.close(id);
+  assert.equal(closed.phase, 'closed'); assert.equal(closed.lastStatus, 'completed');
+  assert.equal(fs.existsSync(path.join(manager.root, id, 'owner.lock')), false);
+  return closed;
+};
 const fileTask = (file, content) => `FILE ${JSON.stringify({ file, ...(content === undefined ? {} : { content }) })}`;
 
 test('managed cwd reaches the real child and survives manager reopen', { timeout: 30_000 }, async t => {
@@ -54,7 +65,7 @@ test('two isolated workers, independent reviewers and integration share the corr
     manager.spawn('worker', defaultRoles.worker, repo, fileTask('a.txt', 'A\n'), a.id),
     manager.spawn('worker', defaultRoles.worker, repo, fileTask('b.txt', 'B\n'), b.id),
   ]);
-  const [first, second] = await Promise.all([complete(manager, wa.id), complete(manager, wb.id)]);
+  const [first, second] = await Promise.all([release(manager, wa.id), release(manager, wb.id)]);
   assert.notEqual(first.sessionId, second.sessionId);
   assert.equal(fs.existsSync(path.join(repo, 'a.txt')), false);
   assert.equal(fs.existsSync(path.join(a.path, 'b.txt')), false);
@@ -62,7 +73,7 @@ test('two isolated workers, independent reviewers and integration share the corr
     manager.spawn('reviewer', defaultRoles.reviewer, repo, fileTask('a.txt'), a.id),
     manager.spawn('reviewer', defaultRoles.reviewer, repo, fileTask('b.txt'), b.id),
   ]);
-  const [reviewA, reviewB] = await Promise.all([complete(manager, ra.id), complete(manager, rb.id)]);
+  const [reviewA, reviewB] = await Promise.all([release(manager, ra.id), release(manager, rb.id)]);
   assert.equal(reviewA.text, 'A\n'); assert.equal(reviewB.text, 'B\n');
   assert.notEqual(reviewA.sessionId, first.sessionId); assert.equal(reviewA.cwd, first.cwd);
   const result = await Promise.all([manager.workspaces.integrate(a.id), manager.workspaces.integrate(b.id)]);
@@ -79,7 +90,7 @@ test('a reviewer holds the workspace against tool and raw cwd starts while sibli
   const { repo, manager } = setup(t);
   const ws = await manager.workspaces.create(repo);
   const worker = await manager.spawn('worker', defaultRoles.worker, repo, 'CWD', ws.id);
-  await complete(manager, worker.id);
+  await release(manager, worker.id);
   const reviewer = await manager.spawn('reviewer', defaultRoles.reviewer, repo, 'HOLD review', ws.id);
   await assert.rejects(manager.send(worker.id, 'new task'), /occupied/);
   await assert.rejects(manager.spawn('worker', defaultRoles.worker, repo, 'CWD', ws.id), /occupied/);
@@ -89,7 +100,7 @@ test('a reviewer holds the workspace against tool and raw cwd starts while sibli
   const other = await manager.workspaces.create(repo);
   const sibling = await manager.spawn('worker', defaultRoles.worker, repo, 'CWD', other.id);
   assert.equal((await complete(manager, sibling.id)).text, other.path);
-  await manager.send(reviewer.id, 'review complete'); await complete(manager, reviewer.id);
+  await manager.send(reviewer.id, 'review complete'); await release(manager, reviewer.id);
   await manager.send(worker.id, 'CWD');
   assert.equal((await complete(manager, worker.id)).runCount, 2);
 });
@@ -122,19 +133,19 @@ test('workspace occupation survives the original controller exiting', { timeout:
 test('explicit keep resumes the same session and integrates only the subsequent increment', { timeout: 40_000 }, async t => {
   const { repo, parent, manager } = setup(t); const ws = await manager.workspaces.create(repo);
   const worker = await manager.spawn('worker', defaultRoles.worker, repo, fileTask('src/base.txt', 'first\n'), ws.id);
-  const first = await complete(manager, worker.id); await manager.workspaces.integrate(ws.id);
+  const first = await release(manager, worker.id); await manager.workspaces.integrate(ws.id);
   fs.writeFileSync(path.join(repo, 'parent-only.txt'), 'do not silently inherit');
   await assert.rejects(manager.send(worker.id, 'CWD'), /baseline/i);
   const fresh = new AgentManager(parent, launch);
   await fresh.send(worker.id, fileTask('src/base.txt', 'second\n'), 'steer', { baseline: 'keep' });
-  const resumed = await complete(fresh, worker.id);
+  const resumed = await release(fresh, worker.id);
   assert.equal(resumed.sessionId, first.sessionId); assert.equal(resumed.sessionFile, first.sessionFile);
   assert.equal(fs.existsSync(path.join(ws.path, 'parent-only.txt')), false);
   assert.equal(git(ws.path, 'rev-parse', 'HEAD').trim(), ws.baseCommit);
   const native = JSON.parse(fs.readFileSync(resumed.sessionFile, 'utf8'));
   assert.match(native.messages.filter(m => m.role === 'user').at(-1).content, /Workspace baseline/);
   const reviewer = await fresh.spawn('reviewer', defaultRoles.reviewer, repo, fileTask('src/base.txt'), ws.id);
-  assert.equal((await complete(fresh, reviewer.id)).text, 'second\n');
+  assert.equal((await release(fresh, reviewer.id)).text, 'second\n');
   const result = await fresh.workspaces.integrate(ws.id);
   assert.equal(result.status, 'applied'); assert.deepEqual(result.changedFiles, ['src/base.txt']);
   assert.equal(fs.readFileSync(path.join(repo, 'src/base.txt'), 'utf8'), 'second\n');
@@ -147,10 +158,10 @@ test('sync inherits confirmed parent changes, preserves ignored files and requir
   fs.writeFileSync(path.join(repo, '.gitignore'), 'ignored/\n'); git(repo, 'add', '.'); git(repo, 'commit', '-qm', 'ignored fixture');
   const ws = await manager.workspaces.create(repo);
   const worker = await manager.spawn('worker', defaultRoles.worker, repo, fileTask('src/base.txt', 'first\n'), ws.id);
-  const first = await complete(manager, worker.id);
+  const first = await release(manager, worker.id);
   fs.writeFileSync(path.join(ws.path, 'obsolete.txt'), 'already integrated then removed');
   const reviewer = await manager.spawn('reviewer', defaultRoles.reviewer, repo, fileTask('src/base.txt'), ws.id);
-  await complete(manager, reviewer.id);
+  await release(manager, reviewer.id);
   await manager.workspaces.integrate(ws.id);
   fs.mkdirSync(path.join(ws.path, 'ignored')); fs.writeFileSync(path.join(ws.path, 'ignored/cache'), 'preserve cache');
   fs.unlinkSync(path.join(repo, 'obsolete.txt')); fs.writeFileSync(path.join(repo, 'parent-new.txt'), 'authorized parent content');
@@ -158,7 +169,7 @@ test('sync inherits confirmed parent changes, preserves ignored files and requir
   await assert.rejects(manager.send(worker.id, 'CWD', 'steer', { baseline: 'sync' }), /uncommitted|authoriz/i);
   assert.equal(fs.existsSync(path.join(ws.path, 'parent-new.txt')), false);
   await manager.send(worker.id, fileTask('parent-new.txt'), 'steer', { baseline: 'sync', includeUncommitted: { reason: 'User confirmed all parent task changes.' } });
-  const resumed = await complete(manager, worker.id);
+  const resumed = await release(manager, worker.id);
   assert.equal(resumed.text, 'authorized parent content'); assert.equal(resumed.sessionId, first.sessionId);
   const synced = new AgentManager(parent, launch).workspaces.get(ws.id);
   assert.notEqual(synced.baseCommit, ws.baseCommit); assert.equal(synced.sync.status, 'applied');
@@ -174,11 +185,11 @@ test('sync inherits confirmed parent changes, preserves ignored files and requir
   assert.match(prompt, /Workspace baseline/); assert.match(prompt, /parent-new.txt/); assert.match(prompt, /obsolete.txt/);
   await assert.rejects(manager.send(reviewer.id, fileTask('parent-new.txt')), /baseline/i);
   await manager.send(worker.id, fileTask('parent-new.txt', 'next change'));
-  await complete(manager, worker.id);
+  await release(manager, worker.id);
   assert.equal((await manager.workspaces.integrate(ws.id)).status, 'applied');
   assert.equal(fs.readFileSync(path.join(repo, 'parent-new.txt'), 'utf8'), 'next change');
   await manager.send(worker.id, 'CWD', 'steer', { baseline: 'sync', includeUncommitted: { reason: 'Approved the next integrated increment.' } });
-  await complete(manager, worker.id);
+  await release(manager, worker.id);
   assert.deepEqual(manager.workspaces.get(ws.id).sync.changedFiles, [], 'the latest sync need not repeat earlier deletions');
   await assert.rejects(manager.send(reviewer.id, fileTask('parent-new.txt')), /baseline/i);
   await manager.send(reviewer.id, fileTask('parent-new.txt'), 'steer', { baseline: 'keep' });
@@ -192,7 +203,7 @@ test('sync inherits confirmed parent changes, preserves ignored files and requir
 test('sync refuses unintegrated or staged-only work without changing files or the native session', { timeout: 40_000 }, async t => {
   const { repo, manager } = setup(t); const ws = await manager.workspaces.create(repo);
   const worker = await manager.spawn('worker', defaultRoles.worker, repo, fileTask('src/base.txt', 'first\n'), ws.id);
-  const first = await complete(manager, worker.id); await manager.workspaces.integrate(ws.id);
+  const first = await release(manager, worker.id); await manager.workspaces.integrate(ws.id);
   const options = { baseline: 'sync', includeUncommitted: { reason: 'Approved parent changes.' } };
   fs.writeFileSync(path.join(ws.path, 'not-integrated.txt'), 'do not lose this');
   await assert.rejects(manager.send(worker.id, 'CWD', 'steer', options), /unintegrated/i);
@@ -211,7 +222,7 @@ test('sync refuses a live instance, missing native session, and an unfinished sy
   const { repo, parent, manager } = setup(t); const ws = await manager.workspaces.create(repo);
   const worker = await manager.spawn('worker', defaultRoles.worker, repo, 'HOLD', ws.id);
   await assert.rejects(manager.send(worker.id, 'CWD', 'steer', { baseline: 'sync' }), /running|occupied/i);
-  await manager.send(worker.id, 'done'); const first = await complete(manager, worker.id);
+  await manager.send(worker.id, 'done'); const first = await release(manager, worker.id);
   fs.writeFileSync(path.join(ws.path, 'src/base.txt'), 'first\n'); await manager.workspaces.integrate(ws.id);
   const content = fs.readFileSync(path.join(ws.path, 'src/base.txt'), 'utf8');
   fs.renameSync(first.sessionFile, `${first.sessionFile}.retained`);
@@ -229,7 +240,7 @@ test('sync refuses a live instance, missing native session, and an unfinished sy
 test('Pi identity mismatch is rejected before sync without changing either Git tree or creating a run', { timeout: 30_000 }, async t => {
   const { repo, manager } = setup(t); const ws = await manager.workspaces.create(repo);
   const child = await manager.spawn('worker', defaultRoles.worker, repo, 'REMEMBER original-token', ws.id);
-  const first = await complete(manager, child.id);
+  const first = await release(manager, child.id);
   const saved = fs.readFileSync(first.sessionFile);
   const foreign = Buffer.from(JSON.stringify({ ...JSON.parse(saved), id: 'foreign-session' }));
   fs.writeFileSync(first.sessionFile, foreign);
@@ -266,7 +277,7 @@ test('Pi identity mismatch is rejected before sync without changing either Git t
 test('sync rejects a sparse parent even when the managed worktree itself is full', { timeout: 30_000 }, async t => {
   const { repo, manager } = setup(t); const ws = await manager.workspaces.create(repo);
   const worker = await manager.spawn('worker', defaultRoles.worker, repo, fileTask('src/base.txt', 'first\n'), ws.id);
-  await complete(manager, worker.id); await manager.workspaces.integrate(ws.id);
+  await release(manager, worker.id); await manager.workspaces.integrate(ws.id);
   git(repo, 'config', 'extensions.worktreeConfig', 'true');
   git(repo, 'config', '--worktree', 'core.sparseCheckout', 'true');
   assert.notEqual(git(ws.path, 'config', '--default=false', 'core.sparseCheckout').trim(), 'true');
@@ -282,7 +293,7 @@ test('sync preserves CRLF/binary content and refuses to overwrite an ignored col
   fs.writeFileSync(path.join(repo, '.gitignore'), 'ignored/\n');
   git(repo, 'add', '.'); git(repo, 'commit', '-qm', 'attributes');
   const ws = await manager.workspaces.create(repo);
-  const worker = await manager.spawn('worker', defaultRoles.worker, repo, 'CWD', ws.id); await complete(manager, worker.id);
+  const worker = await manager.spawn('worker', defaultRoles.worker, repo, 'CWD', ws.id); await release(manager, worker.id);
   fs.writeFileSync(path.join(ws.path, 'src/base.txt'), 'integrated\r\n'); await manager.workspaces.integrate(ws.id);
   fs.writeFileSync(path.join(repo, 'src/base.txt'), 'parent\r\n');
   fs.writeFileSync(path.join(repo, 'bytes.bin'), Buffer.from([0, 255, 12, 13, 10]));

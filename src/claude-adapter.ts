@@ -3,7 +3,7 @@ import { createWriteStream, readdirSync, lstatSync, fstatSync, openSync, readSyn
 import { killProcessTree } from "./process-tree.js";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
-import type { AdapterOptions, CliAdapter, InteractionReply } from "./cli-adapter.js";
+import type { AdapterEvent, AdapterOptions, CliAdapter, InteractionReply } from "./cli-adapter.js";
 import { childEnvironment, type Exit } from "./pi-process.js";
 import type { AgentSpec, NativeSession, Delivery, QuestionField } from "./types.js";
 import { claudeQuestionAnswers, readClaudeQuestionFields } from "./claude-question.js";
@@ -55,6 +55,11 @@ export function inspectClaudeSession(spec: AgentSpec, session: ClaudeSession): s
 type Approval = { id: string; requestId: string; toolId: string; input: Json; messageId: string; humanOnly: boolean; attempted: boolean; fields?: QuestionField[] };
 /** Native stream-json stays inside this adapter; the worker retains ownership and audit. */
 export class ClaudeAdapter implements CliAdapter {
+  readonly resident = false;
+  private runId?: string;
+  private emit(event: AdapterEvent): void {
+    this.options.onEvent({ ...event, ...(this.runId === undefined ? {} : { runId: this.runId }) });
+  }
   readonly child: ChildProcessWithoutNullStreams;
   readonly closed: Promise<Exit>;
   private readonly session: ClaudeSession;
@@ -128,7 +133,7 @@ export class ClaudeAdapter implements CliAdapter {
     this.rejectPending(error);
     if (!this.settled && !this.ending) {
       this.settled = true; this.clearApprovals();
-      this.options.onEvent({ type: "settled", status: "failed", text: "", error: error.message, stop: true });
+      this.emit({ type: "settled", status: "failed", text: "", error: error.message, stop: true });
     }
     void this.kill();
   }
@@ -157,7 +162,7 @@ export class ClaudeAdapter implements CliAdapter {
       this.gates.set(name, { resolve, reject, timer });
     });
   }
-  private clearApprovals(): void { for (const a of this.approvals.values()) this.options.onEvent({ type: "resolved", id: a.id }); this.approvals.clear(); }
+  private clearApprovals(): void { for (const a of this.approvals.values()) this.emit({ type: "resolved", id: a.id }); this.approvals.clear(); }
   private record(record: Json): void {
     if (this.error || this.ending) return;
     if (record.type === "control_response") {
@@ -171,7 +176,7 @@ export class ClaudeAdapter implements CliAdapter {
     }
     if (record.type === "control_request") { this.permission(record); return; }
     if (record.type === "control_cancel_request") {
-      for (const a of this.approvals.values()) if (a.requestId === record.request_id) { this.approvals.delete(a.id); this.options.onEvent({ type: "resolved", id: a.id }); }
+      for (const a of this.approvals.values()) if (a.requestId === record.request_id) { this.approvals.delete(a.id); this.emit({ type: "resolved", id: a.id }); }
       return;
     }
     if (record.parent_tool_use_id != null) return;
@@ -196,7 +201,7 @@ export class ClaudeAdapter implements CliAdapter {
       if (record.session_id !== this.session.sessionId || !this.activeMessage || !ids.includes(this.activeMessage)) return;
       this.clearApprovals(); this.result = record; this.maybeSettle();
     }
-    if (!this.settled && this.activeMessage && ["assistant", "stream_event", "tool_progress", "user"].includes(record.type)) this.options.onEvent({ type: "activity", detail: record.type });
+    if (!this.settled && this.activeMessage && ["assistant", "stream_event", "tool_progress", "user"].includes(record.type)) this.emit({ type: "activity", detail: record.type });
   }
   private maybeSettle(): void {
     // Local stream-json may omit session_state_changed entirely. The matching result is
@@ -208,7 +213,7 @@ export class ClaudeAdapter implements CliAdapter {
     const stopped = ["aborted_tools", "aborted_streaming"].includes(r.terminal_reason);
     const failed = r.subtype !== "success" || r.is_error !== false || r.terminal_reason && !["completed", "aborted_tools", "aborted_streaming"].includes(r.terminal_reason);
     this.settled = true; this.activeMessage = undefined; this.clearApprovals(); this.mark("terminal");
-    this.options.onEvent({ type: "settled", status: stopped ? "stopped" : failed ? "failed" : "completed", text: typeof r.result === "string" ? r.result : "",
+    this.emit({ type: "settled", status: stopped ? "stopped" : failed ? "failed" : "completed", text: typeof r.result === "string" ? r.result : "",
       ...(failed && !stopped ? { error: String(r.errors?.join("\n") || r.result || `Claude terminal reason: ${r.terminal_reason}`) } : {}) });
   }
   private permission(record: Json): void {
@@ -234,12 +239,12 @@ export class ClaudeAdapter implements CliAdapter {
     const approval: Approval = { id: randomUUID(), requestId, toolId: p.tool_use_id, input: structuredClone(p.input), messageId: this.activeMessage!, humanOnly, attempted: false, ...(fields ? { fields } : {}) };
     this.approvals.set(approval.id, approval);
     if (fields) {
-      this.options.onEvent({ type: "question", question: { id: approval.id, method: "form", kind: "question", title: p.input.title || "Claude task questions", fields,
+      this.emit({ type: "question", question: { id: approval.id, method: "form", kind: "question", title: p.input.title || "Claude task questions", fields,
         message: `${humanOnly ? "Human response required by native policy; the parent may only cancel.\n" : "Answers supply task context, not permission to take new actions.\n"}${details}`,
         parentPolicy: humanOnly ? {} : { answers: true }, ...(humanOnly ? { humanOnly: true } : {}) } });
     } else {
       const options = ["Deny once", "Approve once", "Cancel turn"];
-      this.options.onEvent({ type: "question", question: { id: approval.id, method: "select", title: "Approve one Claude tool call?",
+      this.emit({ type: "question", question: { id: approval.id, method: "select", title: "Approve one Claude tool call?",
         message: `${humanOnly ? "Human approval required; the parent may only deny or cancel.\n" : ""}${details}`, options,
         parentPolicy: { values: humanOnly ? ["Deny once", "Cancel turn"] : options }, ...(humanOnly ? { humanOnly: true } : {}) } });
     }
@@ -258,8 +263,9 @@ export class ClaudeAdapter implements CliAdapter {
     this.mark("ready");
     return this.session;
   }
-  async start(message: string): Promise<void> {
+  async start(message: string, runId?: string): Promise<void> {
     if (!this.observed.has("ready") || this.activeMessage || this.settled) throw new Error("Claude is not ready for a new task");
+    this.runId = runId;
     this.activeMessage = randomUUID();
     await this.write({ type: "user", uuid: this.activeMessage, session_id: this.session.sessionId, parent_tool_use_id: null, message: { role: "user", content: message } });
     await this.wait("init");
@@ -287,7 +293,10 @@ export class ClaudeAdapter implements CliAdapter {
     a.attempted = true;
     await this.write({ type: "control_response", response: { subtype: "success", request_id: a.requestId, response: { ...response, toolUseID: a.toolId } } });
     // Native stdio has no approval receipt. A successful write is not proof of tool execution.
-    if (this.approvals.delete(a.id)) this.options.onEvent({ type: "resolved", id: a.id });
+    if (this.approvals.delete(a.id)) this.emit({ type: "resolved", id: a.id });
+  }
+  async interrupt(): Promise<void> {
+    throw new Error("Claude interrupt without resource release is not supported; use stop on this non-resident runtime");
   }
   async end(): Promise<{ exit: Exit; forced: boolean }> {
     this.ending = true;

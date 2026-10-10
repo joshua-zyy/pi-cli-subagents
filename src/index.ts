@@ -10,7 +10,7 @@ import { detectClis, probeCatalog, type ModelCatalog } from "./cli-discovery.js"
 import { addRole, deleteRole, FIELD_LABELS, fieldValue, readScope, roleRows, setField, writeScope, type Scope } from "./role-settings.js";
 import { AgentsPanel, paneRows, type PanelAction } from "./ui/panel.js";
 import { RoleSettingsPanel, SETTINGS_MAX_ROWS, type RoleSettingsAction, type RoleSettingsCursor } from "./ui/role-settings.js";
-import { canSteer, isTerminal, oneLine } from "./ui/format.js";
+import { canMessage, canResume, canSteer, canStop, hasFailure, oneLine, viewStatus } from "./ui/format.js";
 import { StatusWidget } from "./ui/status.js";
 import { FleetView } from "./ui/fleet.js";
 import { TranscriptWindow } from "./ui/transcript-window.js";
@@ -27,8 +27,8 @@ export function parentManager(ctx: Pick<ExtensionContext, "sessionManager">, lau
 function visible(state: AgentView, includeText = true) {
   // `task`, `history` and `startedAt` let the parent match an instance to its assignments
   // after its own context is compacted, without reading the child's transcript.
-  const { id, cli, role, phase, task, history, runCount, runId, sessionId, session, cwd, startedAt, updatedAt, lastActivity, questions, text, truncated, error, logFile } = state;
-  return { id, cli, role, phase, runId, sessionId, ...(session?.cli === "codex" ? { threadId: session.threadId } : {}), cwd, updatedAt, lastActivity, questions, ...(includeText ? { text, truncated } : {}), error, logFile, history, runCount,
+  const { id, cli, role, phase, protocolVersion, runtimeId, lastStatus, task, history, runCount, runId, sessionId, session, cwd, startedAt, updatedAt, lastActivity, questions, text, truncated, error, logFile } = state;
+  return { id, cli, role, phase, protocolVersion, runtimeId, lastStatus, runId, sessionId, ...(session?.cli === "codex" ? { threadId: session.threadId } : {}), cwd, updatedAt, lastActivity, questions, ...(includeText ? { text, truncated } : {}), error, logFile, history, runCount,
     ...(state.workspace ? { workspace: state.workspace, workspaceBaseline: state.workspaceBaseline } : {}), ...(task ? { task } : {}), ...(startedAt ? { startedAt } : {}) };
 }
 
@@ -85,12 +85,12 @@ export default function extension(pi: ExtensionAPI): void {
 
   /** A resolved send can still have failed; both UI paths must report the observed phase. */
   function recordHumanInput(ctx: ExtensionContext, agent: AgentView, input: string, action: string): void {
-    if (agent.phase === "failed") {
+    if (hasFailure(agent)) {
       const error = new Error(`Subagent input failed: ${agent.error ?? "No error details available"}\nInstance: ${agent.id}\nRun: ${agent.runId}\nInspect the instance before retrying; work may already have run.`);
       recordHumanAction(ctx, agent, `Input request failed: ${input}\n${error.message}`);
       throw error;
     }
-    recordHumanAction(ctx, agent, `${action}: ${input}`);
+    recordHumanAction(ctx, agent, `${action}: ${input}\nObserved ${viewStatus(agent).label}; instance: ${agent.id}; run: ${agent.runId}.`);
   }
 
   let active: { file: string; ctx: ExtensionContext; manager: AgentManager; pending: Set<string>; timer: NodeJS.Timeout; agents: AgentView[]; widget?: StatusWidget; fleet?: FleetView } | undefined;
@@ -153,7 +153,7 @@ export default function extension(pi: ExtensionAPI): void {
 
   pi.registerTool({
     name: "subagent_workspace", label: "Subagent workspace",
-    description: "Manage this parent's detached Git worktrees. create uses committed HEAD unless all uncommitted changes were explicitly authorized. integrate applies an idle workspace's unintegrated changes, rejecting conflicts before writing and preserving parent HEAD/index/branches. No installs, pushes or cleanup. Workspaces may be reused sequentially by different instances.",
+    description: "Manage this parent's detached Git worktrees. create uses committed HEAD unless all uncommitted changes were explicitly authorized. integrate applies unintegrated changes only after all workspace runtimes, including idle ones, have been explicitly stopped; it rejects conflicts before writing and preserves parent HEAD/index/branches. No installs, pushes or cleanup. Workspaces may be reused sequentially by different instances.",
     parameters: Type.Object({
       action: Type.Union([Type.Literal("create"), Type.Literal("integrate")]),
       workspace: Type.Optional(Type.String({ description: "Required for integrate; workspace ID returned by create" })),
@@ -171,7 +171,7 @@ export default function extension(pi: ExtensionAPI): void {
   });
   const registerSubagent = (catalog: string): void => pi.registerTool({
     name: "subagent", label: "CLI subagent",
-    description: `Start, message or stop a persistent CLI subagent. start requires role and task; choose cwd or workspace, never both. send requires id and message and continues that exact instance: Pi supports running steer/followUp, Codex running steer only, Claude must finish first. stop requires id and retains history. Never silently replaces a session. Workspace continuation may require explicit keep/sync; sync refuses active, staged or unintegrated work. Results return automatically. Query existing instances with subagent_query.\n\nDelegate outcomes, not implementation recipes. Give the goal, essential context (relevant paths and confirmed facts), authorized scope, and acceptance or return needs. A new instance has not seen this conversation. Let the child investigate, choose an approach and verify its work; prescribe implementation details only when the user, compatibility or shared-work constraints require them.\n\n${catalog}`,
+    description: `Start, message or stop a persistent CLI subagent. start requires role and task; choose cwd or workspace, never both. send requires id and message and continues that exact instance: idle starts a new run in the resident runtime; closed resumes the original native session. Pi supports running steer/followUp, Codex running steer only, Claude must finish first; waiting/stopping do not accept ordinary messages. stop requires id and releases processes, including idle runtimes, while retaining history and the last run outcome. Never silently replaces a session. Workspace continuation may require explicit keep/sync; sync closes only the target's confirmed idle runtime before syncing and refuses other resident writers, active, staged or unintegrated work. Results return automatically. Query existing instances with subagent_query.\n\nDelegate outcomes, not implementation recipes. Give the goal, essential context (relevant paths and confirmed facts), authorized scope, and acceptance or return needs. A new instance has not seen this conversation. Let the child investigate, choose an approach and verify its work; prescribe implementation details only when the user, compatibility or shared-work constraints require them.\n\n${catalog}`,
     parameters: Type.Object({
       action: Type.Union([Type.Literal("start"), Type.Literal("send"), Type.Literal("stop")]),
       role: Type.Optional(Type.String({ description: "start only, required: configured role name" })),
@@ -193,7 +193,7 @@ export default function extension(pi: ExtensionAPI): void {
         const resolved = roles[args.role!];
         const state = await parentManager(ctx, launch).spawn(args.role!, inheritParentModel(resolved, ctx), args.cwd ?? ctx.cwd, args.task!, args.workspace);
         const result = `Subagent ${state.phase}: ${view(state)}`;
-        if (state.phase === "failed") throw new Error(`${result}\nInspect the instance before retrying; work may already have run.`);
+        if (hasFailure(state)) throw new Error(`${result}\nInspect the instance before retrying; work may already have run.`);
         return content(`${result}\nCompletion and waiting reports return to this parent session.`);
       }
       if (args.action === "send") {
@@ -201,7 +201,7 @@ export default function extension(pi: ExtensionAPI): void {
         const state = await parentManager(ctx, launch).send(args.id!, args.message!, (args.mode ?? "steer") as Delivery,
           { baseline: args.baseline, includeUncommitted: args.includeUncommitted });
         const result = `Subagent ${state.phase} after input request: ${view(state)}`;
-        if (state.phase === "failed") throw new Error(`${result}\nInspect the instance before retrying; work may already have run.`);
+        if (hasFailure(state)) throw new Error(`${result}\nInspect the instance before retrying; work may already have run.`);
         return content(result);
       }
       if (args.action !== "stop") throw new Error("Unknown subagent action; use start, send or stop");
@@ -212,7 +212,7 @@ export default function extension(pi: ExtensionAPI): void {
   registerSubagent("Role catalog loads at session start.");
   pi.registerTool({
     name: "subagent_query", label: "Query CLI subagents",
-    description: "Read-only inspection of this parent's instances. list returns metadata and managed workspaces without report bodies; get requires id and includes current details and a bounded preview. result requires id and runId and pages that exact original final report; keep both IDs fixed and follow nextOffset until null. Missing results never fall back to another run. Does not resume agents or cross parent sessions. Completion notifications arrive automatically.",
+    description: "Read-only inspection of this parent's instances. phase describes the runtime; idle still owns processes and closed retains the native session for resume. lastStatus is the last run's completed/failed/stopped outcome, not proof of release. list returns metadata and managed workspaces without report bodies; get requires id and includes current details and a bounded preview. result requires id and runId and pages that exact original final report; keep both IDs fixed and follow nextOffset until null. Missing results never fall back to another run. Does not resume agents or cross parent sessions. Completion notifications arrive automatically.",
     parameters: Type.Object({
       action: Type.Union([Type.Literal("list"), Type.Literal("get"), Type.Literal("result")]),
       id: Type.Optional(Type.String({ description: "get/result only, required: instance ID" })),
@@ -473,21 +473,24 @@ export default function extension(pi: ExtensionAPI): void {
             const state = manager.get(action.id);
             if (action.kind === "reply") { await replyPrompt(ctx, manager, action.id, action.questionId); if (fromFleet) return; continue; }
             if (action.kind === "stop") {
-              if (isTerminal(state.phase)) { ctx.ui.notify(`${state.role} has already ended; nothing to stop.`, "info"); continue; }
-              const confirmed = await ctx.ui.confirm("Stop subagent?", `${state.role} ${action.id.slice(0, 8)}: stop active work. The native session and results remain available for later continuation.`);
+              if (!canStop(state.phase)) { ctx.ui.notify(`${state.role} has no releasable runtime (${state.phase}); nothing to stop.`, "info"); continue; }
+              const idle = state.phase === "idle";
+              const confirmed = await ctx.ui.confirm(idle ? "Release idle subagent?" : "Stop subagent?", `${state.role} ${action.id.slice(0, 8)}: stop any active or background work and release processes. The native session, last run outcome and results remain available for later continuation.`);
               if (!confirmed || epoch !== sessionEpoch) continue;
-              recordHumanAction(ctx, await manager.close(action.id), "Stopped active work; the original session and results remain available.");
+              recordHumanAction(ctx, await manager.close(action.id), idle ? "Released idle processes; the original session, last run outcome and results remain available." : "Stopped active work and released processes; the original session and results remain available.");
               ctx.ui.notify("Processes stopped; original session retained.", "info");
               if (fromFleet) return;
               continue;
             }
             if (state.phase === "waiting") { ctx.ui.notify("This child has a pending interaction: use r, /agent-reply, or the parent permission tool.", "error"); continue; }
+            if (!canMessage(state.phase)) { ctx.ui.notify(`Cannot message this child while ${state.phase}; inspect it before continuing.`, "error"); continue; }
             const steerable = canSteer(state.phase);
-            const message = action.message ?? await ctx.ui.editor(steerable ? `Message ${state.role}` : `Resume ${state.role} in the original session`, "");
+            const resuming = canResume(state.phase);
+            const message = action.message ?? await ctx.ui.editor(resuming ? `Resume ${state.role} in the original session` : state.phase === "idle" ? `New task for ${state.role}` : `Message ${state.role}`, "");
             if (!message?.trim() || epoch !== sessionEpoch) continue;
             if (!steerable) ctx.ui.notify("Starting a new turn in the original session; this can take up to about 60 seconds...", "info");
             const sent = await sendHuman(ctx, manager, action.id, message, epoch,
-              steerable ? "Sent an instruction" : "Resumed the original session with");
+              steerable ? "Sent an instruction" : resuming ? "Resumed the original session with" : "Started a new task in the resident runtime with");
             if (!sent) { if (fromFleet) return; continue; }
             ctx.ui.notify(steerable ? "Instructions accepted; a completion report will follow." : "New turn accepted in the original session; a completion report will follow.", "info");
             if (fromFleet) return;
@@ -502,7 +505,7 @@ export default function extension(pi: ExtensionAPI): void {
       }
   }
   pi.registerCommand("agents", {
-    description: "Manage subagents: view live conversations, results and errors, message, resume, reply or stop",
+    description: "Manage subagents: view conversations and last run outcomes, message, start an idle task, resume, reply or release processes",
     handler: (_args, ctx) => openAgents(ctx),
   });
 

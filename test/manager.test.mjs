@@ -45,10 +45,21 @@ function setup(t) {
   });
   return { cwd, parent, manager };
 }
-const complete = (manager, id, phase = 'completed') => waitUntil('terminal state and process release', () => {
-  const state = manager.get(id);
-  return state.phase === phase && !processAlive(state.workerPid) ? state : undefined;
-}, 15_000);
+const complete = async (manager, id, status = 'completed') => {
+  const state = await waitUntil('run result', () => {
+    const current = manager.get(id);
+    return ['idle', 'closed'].includes(current.phase) ? current : undefined;
+  }, 15_000);
+  assert.equal(state.lastStatus, status);
+  return state;
+};
+const release = async (manager, id, status = 'completed') => {
+  await complete(manager, id, status);
+  const closed = await manager.close(id);
+  assert.equal(closed.phase, 'closed'); assert.equal(closed.lastStatus, status);
+  assert.equal(fs.existsSync(path.join(manager.root, id, 'owner.lock')), false);
+  return closed;
+};
 
 test('a rejected role is refused before any instance or process is created', async t => {
   const { cwd, manager } = setup(t);
@@ -76,7 +87,7 @@ test('CLI cleanup checks distinguish the live original CLI from an unrelated reu
 test('complete, release, then resume the original native session', { timeout: 20_000 }, async t => {
   const { cwd, manager } = setup(t);
   const started = await manager.spawn('worker', defaultRoles.worker, cwd, 'REMEMBER alpha');
-  const first = await complete(manager, started.id);
+  const first = await release(manager, started.id);
   assert.equal(first.text, 'OK'); assert.ok(fs.existsSync(first.sessionFile));
   const next = await manager.send(first.id, 'RECALL');
   const resumed = await complete(manager, next.id);
@@ -169,43 +180,39 @@ test('task history records every assignment an instance handled, with its outcom
   assert.deepEqual(second.history.map(run => run.status), ['completed', 'completed']);
   assert.equal(second.task, 'RECALL second-assignment', 'task stays the current assignment');
   assert.equal(second.history.at(-1).runId, second.runId);
-  assert.deepEqual(manager.eventLogs(started.id).map(file => path.basename(path.dirname(file))),
-    second.history.map(run => run.runId), 'logs must line up with the history order');
+  assert.equal(second.logFile, first.logFile, 'idle continuation appends to the original runtime log');
+  assert.deepEqual(manager.eventLogs(started.id), [first.logFile],
+    'shared runtime logs must be enumerated once rather than duplicated for each run');
 });
 
 test('history keeps the five most recent runs and never invents an outcome', { timeout: 20_000 }, async t => {
   const { cwd, manager } = setup(t);
   const started = await manager.spawn('worker', defaultRoles.worker, cwd, 'run-1');
-  await complete(manager, started.id);
+  const first = await release(manager, started.id);
   const dir = path.join(manager.root, started.id);
-  // Fabricate the way a long-lived instance accumulates runs: one crashed run without a report,
-  // and a current run the state has acknowledged but not yet resolved.
-  const runs = [manager.get(started.id).runId];
-  for (let index = 2; index <= 7; index++) {
+  // Add historical records only after release, including a crashed run without a report.
+  for (let index = 2; index <= 6; index++) {
     const runId = randomUUID();
-    writeJson(path.join(dir, 'runs', runId, 'request.json'), { runId, message: `run-${index}`, createdAt: Date.now() + index });
-    if (index !== 6 && index !== 7) writeJson(path.join(dir, 'reports', `${runId}-result.json`), {
+    writeJson(path.join(dir, 'runs', runId, 'request.json'), { runId, message: `run-${index}`, createdAt: first.startedAt + index });
+    if (index !== 6) writeJson(path.join(dir, 'reports', `${runId}-result.json`), {
       notificationId: `${runId}-result`, agentId: started.id, runId, parentFile: manager.parentFile,
       status: 'failed', time: Date.now(), text: '', error: 'boom', logFile: 'events.jsonl',
     });
-    runs.push(runId);
   }
-  const stateFile = path.join(dir, 'state.json'), original = readJson(stateFile);
-  writeJson(stateFile, { ...original, runId: runs.at(-1), phase: 'running', workerPid: process.pid });
+  // Use a real acknowledged run and owner rather than fabricating a live state.json.
+  await manager.send(started.id, 'HOLD run-7');
   const view = manager.get(started.id);
   assert.equal(view.runCount, 7);
-  assert.deepEqual(view.history.map(run => run.task), ['run-3', 'run-4', 'run-5', 'run-6', 'run-7']);
+  assert.deepEqual(view.history.map(run => run.task), ['run-3', 'run-4', 'run-5', 'run-6', 'HOLD run-7']);
   assert.deepEqual(view.history.map(run => run.status), ['failed', 'failed', 'failed', 'unknown', 'running'],
     'a run without a report has no verdict; the current run reports its live phase');
-  assert.equal(view.task, 'run-7', 'the current assignment is the acknowledged run');
-  // Restore the real record so the shared teardown does not try to stop a fabricated live owner.
-  writeJson(stateFile, original);
+  assert.equal(view.task, 'HOLD run-7', 'the current assignment is the acknowledged run');
 });
 
 test('a queued resume is not shown until the worker acknowledges it', { timeout: 20_000 }, async t => {
   const { cwd, manager } = setup(t);
   const started = await manager.spawn('worker', defaultRoles.worker, cwd, 'REMEMBER before-queue');
-  await complete(manager, started.id);
+  await release(manager, started.id);
   const settled = manager.get(started.id);
   // A resume persists its run directory immediately but the worker only later replaces state.json.
   const queued = randomUUID();
@@ -256,7 +263,8 @@ test('close stops active work without deleting the resumable session', { timeout
   const { cwd, manager } = setup(t);
   const start = await manager.spawn('worker', defaultRoles.worker, cwd, 'HOLD');
   const stopped = await manager.close(start.id);
-  assert.equal(stopped.phase, 'stopped'); assert.ok(fs.existsSync(stopped.sessionFile));
+  assert.equal(stopped.phase, 'closed'); assert.equal(stopped.lastStatus, 'stopped');
+  assert.ok(fs.existsSync(stopped.sessionFile));
   await manager.send(start.id, 'NEW');
   const next = await complete(manager, start.id);
   assert.equal(next.text, 'NEW'); assert.equal(next.sessionId, stopped.sessionId);
@@ -265,7 +273,7 @@ test('close stops active work without deleting the resumable session', { timeout
 test('missing sessions, foreign ids and path traversal fail closed', { timeout: 20_000 }, async t => {
   const { cwd, manager, parent } = setup(t);
   const start = await manager.spawn('worker', defaultRoles.worker, cwd, 'DONE');
-  const done = await complete(manager, start.id);
+  const done = await release(manager, start.id);
   fs.renameSync(done.sessionFile, `${done.sessionFile}.backup`);
   await assert.rejects(manager.send(done.id, 'RECALL'), /will not silently create/);
   assert.throws(() => manager.get('../anything'), /Invalid/);
@@ -275,7 +283,7 @@ test('missing sessions, foreign ids and path traversal fail closed', { timeout: 
 test('racing resumes cannot start two CLI owners for the same session', { timeout: 20_000 }, async t => {
   const { cwd, manager, parent } = setup(t);
   const start = await manager.spawn('worker', defaultRoles.worker, cwd, 'DONE');
-  await complete(manager, start.id);
+  await release(manager, start.id);
   const other = new AgentManager(parent, launch);
   const outcomes = await Promise.allSettled([manager.send(start.id, 'HOLD one'), other.send(start.id, 'HOLD two')]);
   assert.equal(outcomes.filter(x => x.status === 'fulfilled').length, 1);

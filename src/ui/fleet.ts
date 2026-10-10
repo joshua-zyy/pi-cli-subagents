@@ -1,7 +1,7 @@
 import { isKeyRelease, matchesKey, truncateToWidth, type TUI } from "@earendil-works/pi-tui";
 import type { ExtensionUIContext } from "@earendil-works/pi-coding-agent";
 import type { AgentView } from "../types.js";
-import { formatElapsed, isActive, oneLine, phaseColor, phaseIcon, rightAlign, shortId, viewElapsed, viewStartedAt, type UiTheme } from "./format.js";
+import { canStop, formatElapsed, isActive, oneLine, rightAlign, shortId, viewElapsed, viewStartedAt, viewStatus, type UiTheme } from "./format.js";
 
 const KEY = "cli-subagents-fleet";
 const LINGER_MS = 4000;
@@ -39,7 +39,7 @@ export class FleetView {
 
   update(): void {
     if (this.disposed) return;
-    try { this.agents = this.read().filter((agent) => isActive(agent.phase) || Date.now() - agent.updatedAt < LINGER_MS)
+    try { this.agents = this.read().filter((agent) => canStop(agent.phase) || Date.now() - agent.updatedAt < LINGER_MS)
       .sort((a, b) => viewStartedAt(a) - viewStartedAt(b)); }
     catch { return; } // Keep the last valid snapshot while a worker updates its state file.
     if (this.selectedId && !this.agents.some((agent) => agent.id === this.selectedId)) this.selectedId = undefined;
@@ -100,9 +100,10 @@ export class FleetView {
     if (windowStart > 0) lines.push(rightAlign("", theme.fg("dim", `↑ ${windowStart} more`), width));
     for (const agent of visible) {
       const focused = this.active && agent.id === this.selectedId;
-      const icon = isActive(agent.phase) ? "●" : phaseIcon(agent.phase);
-      const left = `  ${focused ? theme.fg("accent", "●") : theme.fg("dim", "○")} ${theme.fg(phaseColor(agent.phase), icon)} ${theme.fg("text", agent.role)} ${theme.fg("dim", shortId(agent.id))}  ${theme.fg(focused ? "text" : "muted", oneLine(agent.task, 80) || "(No task summary)")}`;
-      const right = `${formatElapsed(viewElapsed(agent, now))} · ${agent.phase}`;
+      const status = viewStatus(agent);
+      const icon = isActive(agent.phase) ? "●" : status.icon;
+      const left = `  ${focused ? theme.fg("accent", "●") : theme.fg("dim", "○")} ${theme.fg(status.color, icon)} ${theme.fg("text", agent.role)} ${theme.fg("dim", shortId(agent.id))}  ${theme.fg(focused ? "text" : "muted", oneLine(agent.task, 80) || "(No task summary)")}`;
+      const right = `${status.label} · ${formatElapsed(viewElapsed(agent, now))}`;
       lines.push(rightAlign(left, theme.fg("dim", right), width));
     }
     const below = this.agents.length - windowStart - visible.length;

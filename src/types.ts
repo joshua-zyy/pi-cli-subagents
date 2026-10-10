@@ -1,4 +1,4 @@
-export type Phase = "starting" | "running" | "waiting" | "stopping" | "completed" | "failed" | "stopped" | "unreachable";
+export type Phase = "starting" | "running" | "waiting" | "stopping" | "completed" | "failed" | "stopped" | "idle" | "closed" | "unreachable";
 export type Delivery = "steer" | "followUp";
 export type Thinking = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 
@@ -108,6 +108,12 @@ export interface TaskRun {
   status: Phase | "unknown";
 }
 export interface AgentState extends Partial<SessionHandle> {
+  /** v2 runtime identity is independent of the currently assigned run. */
+  protocolVersion?: 2;
+  runtimeId?: string;
+  /** Closed snapshots keep a legacy terminal phase on disk for downgrade readers. */
+  runtimeClosed?: boolean;
+  lastStatus?: "completed" | "failed" | "stopped";
   session?: NativeSession;
   id: string;
   runId: string;
@@ -126,8 +132,8 @@ export interface AgentState extends Partial<SessionHandle> {
   exitCode?: number | null;
   forced?: boolean;
 }
-export interface StartRequest { runId: string; message: string; session?: NativeSession | SessionHandle; createdAt?: number }
-export interface Endpoint { port: number; token: string; runId: string }
+export interface StartRequest { runId: string; message: string; session?: NativeSession | SessionHandle; createdAt?: number; logFile?: string }
+export interface Endpoint { port: number; token: string; runId: string; protocolVersion?: 2; runtimeId?: string }
 /** The interaction a waiting report is about, so the notifier can state it without re-reading state. */
 export type PendingRequest = Pick<Question, "method" | "options" | "parentPolicy" | "humanOnly" | "kind" | "fields" | "isBlocking">;
 export interface Report {
@@ -162,5 +168,7 @@ export interface AgentView extends AgentState {
 export type Control =
   | { type: "status" }
   | { type: "send"; message: string; mode: Delivery }
-  | { type: "close" }
+  | { type: "start"; message: string }
+  | { type: "interrupt" }
+  | { type: "close"; onlyIdle?: boolean }
   | { type: "reply"; id: string; value?: string; answers?: QuestionAnswers; confirmed?: boolean; cancelled?: boolean; actor?: "human" | "parent"; reason?: string };

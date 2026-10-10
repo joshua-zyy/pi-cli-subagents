@@ -25,6 +25,69 @@ function setup(t, overrides = {}) {
   return { cwd, home, spec, client, requests };
 }
 const settled = events => waitUntil('adapter terminal event', () => events.find(e => e.type === 'settled'), 5000);
+const runSettled = (events, runId) => waitUntil('run terminal', () => events.find(e => e.type === 'settled' && e.runId === runId), 5000);
+
+test('Codex resident resets each round, keeps PID/session and rejects stale terminal events', async t => {
+  const { client, requests } = setup(t); const { c, events } = client(); const session = await c.ready(), pid = c.pid;
+  assert.equal(c.resident, true);
+  await c.start('REMEMBER alpha', 'one'); assert.equal((await runSettled(events, 'one')).text, 'OK');
+  const saved = JSON.parse(fs.readFileSync(path.join(session.codexHome, session.threadId + '.json'))).turns[0];
+  const firstCount = events.length;
+  await c.start('HOLD', 'two');
+  c.child.stdin.write(JSON.stringify({ method: 'fixture/emit', params: { records: [
+    { method: 'turn/started', params: { threadId: session.threadId, turn: saved } },
+    { method: 'turn/completed', params: { threadId: session.threadId, turn: saved } },
+  ] } }) + '\n');
+  await c.send('RECALL', 'steer'); assert.equal((await runSettled(events, 'two')).text, 'alpha');
+  assert.equal(c.pid, pid);
+  assert(events.slice(0, firstCount).every(e => e.runId === 'one'));
+  assert(events.slice(firstCount).every(e => e.runId === 'two'));
+  await c.start('BACKFILL', 'three'); assert.equal((await runSettled(events, 'three')).text, 'RECOVERED');
+  assert.equal(requests().filter(r => r.method === 'thread/start').length, 1);
+  assert.equal(events.filter(e => e.type === 'settled').length, 3);
+});
+
+test('Codex interrupt captures the pending turn, is idempotent and clears old questions', async t => {
+  const { client, requests } = setup(t); const { c, events } = client(undefined, ['--delay-start']); await c.ready();
+  const start = c.start('QUESTION', 'one');
+  const a = c.interrupt(), b = c.interrupt();
+  await assert.rejects(c.start('wrong', 'two'), /interrupt|active|ready/i);
+  await assert.rejects(c.send('wrong', 'steer'), /interrupt/i);
+  await Promise.all([start, a, b]);
+  assert.equal((await runSettled(events, 'one')).status, 'stopped');
+  const q = events.find(e => e.type === 'question'); assert(q);
+  await assert.rejects(c.reply({ type: 'reply', id: q.question.id, cancelled: true }), /pending|answered/i);
+  assert(events.some(e => e.type === 'resolved' && e.runId === 'one'));
+  assert.equal(c.child.exitCode, null);
+  assert.equal(requests().filter(r => r.method === 'turn/interrupt').length, 1);
+  await c.start('REMEMBER next', 'two'); assert.equal((await runSettled(events, 'two')).text, 'OK');
+});
+
+test('Codex blocks new rounds while final text is being recovered from the captured turn', async t => {
+  const { client, home, requests } = setup(t); const { c, events } = client(undefined, ['--hold-read']); await c.ready();
+  await c.start('BACKFILL', 'one');
+  await waitUntil('native backfill request', () => requests().some(r => r.method === 'thread/read'));
+  await assert.rejects(c.start('wrong', 'two'), /ready|active/i);
+  fs.writeFileSync(path.join(home, 'release-read'), '');
+  assert.equal((await runSettled(events, 'one')).text, 'RECOVERED');
+  await c.start('FAIL', 'two');
+  const result = await runSettled(events, 'two'); assert.equal(result.status, 'failed'); assert.equal(result.text, '');
+});
+
+test('Codex interrupt acknowledgement without terminal and timeout poison the runtime', async t => {
+  for (const flag of ['--ignore-interrupt', '--ack-interrupt-only']) {
+    const { client } = setup(t); const { c, events } = client(undefined, [flag]); const session = await c.ready(); await c.start('HOLD', 'one');
+    await assert.rejects(c.interrupt(), /uncertain|timed out/i);
+    const turnId = c.activeTurn;
+    c.child.stdin.write(JSON.stringify({ method: 'fixture/emit', params: { records: [
+      { method: 'turn/completed', params: { threadId: session.threadId, turn: { id: turnId, status: 'interrupted' } } },
+    ] } }) + '\n');
+    await runSettled(events, 'one');
+    await assert.rejects(c.start('wrong', 'two'), /uncertain|poison|stop|release/i);
+    await assert.rejects(c.send('wrong', 'steer'), /uncertain|poison|stop|release/i);
+    await c.stop();
+  }
+});
 
 test('Codex correlates fast events, keeps native IDs distinct, and resumes the exact thread', async t => {
   const { client, requests, home } = setup(t);

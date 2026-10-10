@@ -1,6 +1,6 @@
 import { matchesKey, stripTerminalSequences, truncateToWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import type { AgentView } from "../types.js";
-import { canMessage, canSteer, formatElapsed, framePane, isActive, isTerminal, oneLine, phaseColor, phaseIcon, phaseLabel, rightAlign, shortId, viewElapsed, PANE_FRAME_COLS, PANE_FRAME_MIN_WIDTH, PANE_FRAME_ROWS, SPINNER, type UiColor, type UiTheme } from "./format.js";
+import { canMessage, canResume, canStop, formatElapsed, framePane, isActive, oneLine, rightAlign, shortId, viewElapsed, viewStatus, PANE_FRAME_COLS, PANE_FRAME_MIN_WIDTH, PANE_FRAME_ROWS, SPINNER, type UiColor, type UiTheme } from "./format.js";
 
 export type PanelAction =
   | { kind: "view"; id: string }
@@ -97,15 +97,14 @@ export class AgentsPanel {
       else if (matchesKey(data, "escape") || matchesKey(data, "q")) this.finish(undefined);
       return;
     }
-    // Waiting children require /agent-reply; completed instances resume as a new run in the same session.
+    // Waiting children require /agent-reply; idle starts a new run without native resume.
     const question = agent?.phase === "waiting" ? agent.questions?.[0] : undefined;
-    const steerable = agent ? canSteer(agent.phase) : false;
     if (matchesKey(data, "escape") || matchesKey(data, "left") || matchesKey(data, "h")) this.view = "list";
     else if (matchesKey(data, "up")) this.scroll = Math.max(0, this.scroll - 1);
     else if (matchesKey(data, "down")) this.scroll = Math.min(Math.max(0, this.bodyLines - this.pageLines), this.scroll + 1);
-    else if (agent && matchesKey(data, "s") && canMessage(agent.phase)) this.finish({ kind: "message", id: agent.id, resume: !steerable });
+    else if (agent && matchesKey(data, "s") && canMessage(agent.phase)) this.finish({ kind: "message", id: agent.id, resume: canResume(agent.phase) });
     else if (agent && matchesKey(data, "v")) this.finish({ kind: "view", id: agent.id });
-    else if (agent && matchesKey(data, "x") && !isTerminal(agent.phase)) this.finish({ kind: "stop", id: agent.id });
+    else if (agent && matchesKey(data, "x") && canStop(agent.phase)) this.finish({ kind: "stop", id: agent.id });
     else if (agent && question && matchesKey(data, "r")) this.finish({ kind: "reply", id: agent.id, questionId: question.id });
     else if (matchesKey(data, "q")) this.finish(undefined);
   }
@@ -177,11 +176,12 @@ export class AgentsPanel {
     const current = index === selected;
     // The cursor matches the role editor's, so the two panes read the same way.
     const cursor = current ? this.theme.fg("accent", "›") : " ";
-    const icon = isActive(agent.phase) ? SPINNER[0] : phaseIcon(agent.phase);
+    const status = viewStatus(agent);
+    const icon = isActive(agent.phase) ? SPINNER[0] : status.icon;
     const role = current ? this.theme.bold(this.theme.fg("text", agent.role)) : this.theme.fg("muted", agent.role);
     const task = oneLine(agent.task, 80) || "(No task summary)";
-    const stats = `${phaseLabel(agent.phase)} · ${formatElapsed(viewElapsed(agent, this.now))}`;
-    const left = `  ${cursor} ${this.theme.fg(phaseColor(agent.phase), icon)} ${role} ${this.theme.fg("dim", shortId(agent.id))}  ${current ? this.theme.fg("text", task) : this.theme.fg("dim", task)}`;
+    const stats = `${status.label} · ${formatElapsed(viewElapsed(agent, this.now))}`;
+    const left = `  ${cursor} ${this.theme.fg(status.color, icon)} ${role} ${this.theme.fg("dim", shortId(agent.id))}  ${current ? this.theme.fg("text", task) : this.theme.fg("dim", task)}`;
     return rightAlign(left, current ? this.theme.fg("text", stats) : this.theme.fg("dim", stats), width);
   }
 
@@ -192,7 +192,8 @@ export class AgentsPanel {
     // A short pane drops the metadata block first: the task, the question and the result matter
     // more, and `v` still shows the full record next to the transcript.
     const compact = room > 0 && room < DETAIL_FULL_ROWS;
-    const title = this.theme.bold(this.theme.fg("accent", `Subagent ${agent.role} · ${phaseLabel(agent.phase)}`));
+    const status = viewStatus(agent);
+    const title = this.theme.bold(this.theme.fg(status.color, `Subagent ${agent.role} · ${status.label}`));
     const lines = compact
       ? [title, this.field("ID", agent.id), ""]
       : [title,
@@ -242,9 +243,11 @@ export class AgentsPanel {
     if (agent.truncated) lines.push(this.theme.fg("dim", "  ... (Result clipped; see the result file for full content)"));
 
     const hint: [string, string][] = [["esc/←", "back"], ["↑↓", "scroll"], ["v", "conversation"]];
-    if (canSteer(agent.phase)) hint.push(["s", "message"]);
-    else if (canMessage(agent.phase)) hint.push(["s", "resume"]);
-    if (!isTerminal(agent.phase)) hint.push(["x", "stop"]);
+    if (agent.phase === "idle") hint.unshift(["x", "release"], ["s", "new task"]);
+    else {
+      if (canMessage(agent.phase)) hint.push(["s", canResume(agent.phase) ? "resume" : "message"]);
+      if (canStop(agent.phase)) hint.push(["x", "stop"]);
+    }
     if (question) hint.push(["r", "reply"]);
     hint.push(["q", "close"]);
     lines.push("", this.hint(hint));

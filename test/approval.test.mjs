@@ -10,6 +10,14 @@ import { waitUntil, processAlive } from '../dist/storage.js';
 import { tempDir } from './helpers/tmp.mjs';
 
 const fixture = fileURLToPath(new URL('./fixtures/pi.mjs', import.meta.url));
+const completed = async (manager, id, timeout) => {
+  const state = await waitUntil('Pi approval run result', () => {
+    const current = manager.get(id);
+    return ['idle', 'closed'].includes(current.phase) ? current : undefined;
+  }, timeout);
+  assert.equal(state.phase, 'idle'); assert.equal(state.lastStatus, 'completed');
+  return state;
+};
 test('parent can explicitly review a child request while the human command remains available', {timeout:12000}, async t=>{
   const saved = process.argv[1];process.argv[1] = fixture;
   const cwd = tempDir('approve');
@@ -43,7 +51,7 @@ test('parent can explicitly review a child request while the human command remai
   assert.equal(manager.get(id).phase,'waiting');
   // A native Pi confirm is delivered to the parent, not classified by button wording.
   await invoke('subagent_reply',{id,questionId:'permission-1',confirmed:true,reason:'Confirm the authorized fixture-only action'});
-  await waitUntil('complete',()=>manager.get(id).phase==='completed'&&!processAlive(manager.get(id).workerPid));
+  await completed(manager,id);
   assert.equal(confirmations,0);
   assert.equal(manager.get(id).text,'ALLOW');
   assert.deepEqual(await waiting(),[]);
@@ -54,7 +62,7 @@ test('parent can explicitly review a child request while the human command remai
   const second=JSON.parse((await invoke('subagent',{ action: 'start',role:'worker',task:'WAIT',cwd})).match(/\{.+\}/)[0]);
   await waitUntil('human waiting',()=>manager.get(second.id).phase==='waiting');
   await commands.get('agent-reply').handler(`${second.id} permission-1`,ctx);
-  await waitUntil('human complete',()=>manager.get(second.id).phase==='completed'&&!processAlive(manager.get(second.id).workerPid));
+  await completed(manager,second.id);
   assert.equal(confirmations,1);assert.equal(manager.get(second.id).text,'DENY');
   assert.ok(notices.some(message=>message.includes('Human response accepted for subagent')));
 });
@@ -66,9 +74,7 @@ test('parent refusal of a Pi confirmation reaches the child and records denial',
   const started=await manager.spawn('worker',{description:'fixture',instructions:'Only fixture interactions'},cwd,'WAIT');
   const q=await waitUntil('confirmation',()=>manager.get(started.id).questions[0]);
   await manager.reply(started.id,q.id,{confirmed:false},{actor:'parent',reason:'Not authorized'});
-  const final=await waitUntil('refusal completed',()=>{
-    const state=manager.get(started.id);return state.phase==='completed'&&!processAlive(state.workerPid)?state:undefined;
-  });
+  const final=await completed(manager,started.id);
   assert.equal(final.text,'DENY');
   const audit=fs.readFileSync(path.join(manager.root,started.id,'runs',started.runId,'permissions.jsonl'),'utf8').trim().split('\n').map(JSON.parse);
   assert.equal(audit.length,1);assert.equal(audit[0].actor,'parent');assert.equal(audit[0].decision,'denied');
@@ -104,7 +110,7 @@ test('permission tools reject foreign parents, missing persistent sessions and i
   await assert.rejects(invoke('subagent_reply',{id:select.id,questionId:'permission-1',confirmed:true,reason:'wrong method'}),/type/);
   await assert.rejects(invoke('subagent_reply',{id:select.id,questionId:'permission-1',value:'Allow forever',reason:'not offered'}),/available options/);
   await invoke('subagent_reply',{id:select.id,questionId:'permission-1',value:'Deny',reason:'Not authorized'});
-  await waitUntil('select complete',()=>manager.get(select.id).phase==='completed'&&!processAlive(manager.get(select.id).workerPid));
+  await completed(manager,select.id);
   assert.equal(manager.get(select.id).text,'Deny');
   // All native labels remain visible; the parent's authorization judgment chooses the narrow action.
   const guard=JSON.parse((await invoke('subagent',{ action: 'start',role:'worker',task:'WAIT_SAFETY',cwd})).match(/\{.+\}/)[0]);
@@ -123,7 +129,7 @@ test('permission tools reject foreign parents, missing persistent sessions and i
   assert.match(guardContent,/user.*requires.*confirmation/i);
   assert.deepEqual(warnings,[]);
   await invoke('subagent_reply',{id:guard.id,questionId:'permission-1',value:'Allow once',reason:'One-off read-only grep inside the assigned scope'});
-  await waitUntil('guard complete',()=>manager.get(guard.id).phase==='completed'&&!processAlive(manager.get(guard.id).workerPid));
+  await completed(manager,guard.id);
   assert.equal(manager.get(guard.id).text,'Allow once');
 });
 
@@ -153,9 +159,7 @@ test('parent replies to native Pi text dialogs once while cancellations and expi
       await assert.rejects(invoke({...args,answers:{field:['wrong contract']}}),/type/);
       await invoke({...args,...answer});
     }
-    const final=await waitUntil('original run completed',()=>{
-      const state=manager.get(started.id);return state.phase==='completed'&&!processAlive(state.workerPid)?state:undefined;
-    });
+    const final=await completed(manager,started.id);
     assert.equal(final.runId,started.runId);assert.equal(final.sessionId,started.sessionId);assert.equal(final.text,expected);
     assert.deepEqual(final.questions,[]);
     await assert.rejects(invoke({...args,value:'late reply'}),/ended|exited|exist/);
@@ -198,7 +202,7 @@ test('owned Pi questions accept parent choices, custom text and cancellation in 
     // The caller submits one logical answer, never a menu entry followed by a second reply.
     await invoke('subagent_reply',{id,questionId:q.id,reason:'Use the agreed verification scope',
       ...(mode==='cancel'?{cancelled:true}:{value:mode==='custom'?'Only the focused regression.':'Unit'})});
-    await waitUntil('question run completion',()=>manager.get(id).phase==='completed'&&!processAlive(manager.get(id).workerPid),4000);
+    await completed(manager,id,4000);
     const state=manager.get(id);assert.equal(state.runId,runId);assert.equal(state.sessionId,sessionId);assert.deepEqual(state.questions,[]);
     const result=JSON.parse(await invoke('subagent_query',{action:'result',id,runId}));
     const answer=JSON.parse(result.text);
@@ -210,7 +214,8 @@ test('owned Pi questions accept parent choices, custom text and cancellation in 
     const native=JSON.parse(fs.readFileSync(state.session.sessionFile,'utf8'));
     assert.equal(native.messages.filter(m=>m.role==='user').length,taskCount,'answering must not submit a replacement task');
     const events=fs.readFileSync(state.logFile,'utf8').trim().split('\n').map(JSON.parse);
-    assert.equal(events.filter(e=>e.type==='agent_start').length,1);
+    assert.equal(events.filter(e=>e.type==='agent_start').length,taskCount,
+      'the continuous runtime log contains one native start per assigned task, not per reply');
     const audit=fs.readFileSync(path.join(manager.root,id,'runs',runId,'permissions.jsonl'),'utf8').trim().split('\n').map(JSON.parse);
     assert.equal(audit.length,1);assert(audit.every(row=>row.actor==='parent'&&row.runId===runId));
     assert(audit.every(row=>row.kind==='question'&&['answered','cancelled'].includes(row.decision)));

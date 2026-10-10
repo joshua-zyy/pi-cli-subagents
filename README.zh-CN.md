@@ -128,6 +128,12 @@ Pi 和 Codex 支持运行中的 `steer` 消息；运行中的 `followUp` 仅 Pi 
 - **本地记录可能包含敏感源码。** 会话、日志、快照和备份位于父会话旁的 `<父会话文件>.subagents/`，关闭实例不会删除它们。
 - **兼容性有边界。** Pi 是主要的端到端验证对象。Codex 协议按 CLI 0.159.2 核对；Claude 需要 PATH 中有原生 Claude Code >=2.1.283（Windows 为 `claude.exe`）。真实父 Pi → Codex/Claude 编排、实时 TUI 审批/基线对话框及任意崩溃恢复尚未完整验证。
 
+### 驻留与释放
+
+新的 Pi/Codex worker 在一轮结束后进入 **idle**；`lastStatus` 和原始 run 报告保留本轮结果。向 idle 发送任务会在同一 worker/CLI 开始新 run。`subagent stop`（或查看器 **x**）释放进程树并显示 **closed**，不覆盖已经完成的结果；向 closed 发送任务则在新 runtime 恢复同一原生会话。Claude 目前仍采用明确的非驻留 native-resume 路径。驻留不保证进程永久存活，也不授权额外模型工作。
+
+idle 仍占有工作区：集成或交给另一实例前先显式 stop。baseline sync 只关闭目标 idle writer，再执行原会话预检、同步及恢复；失效的确认元数据在关闭前拒绝，后续预检／内容检查失败则可能保持 closed。旧 worker 不热替换；新控制协议拒绝错误或过期的 runtime/run 身份。连续日志跨 run 可读，并去重同一来源。
+
 ## 开发
 
 ```bash
@@ -145,7 +151,7 @@ npm run test:list # 只列本地选集，不构建或执行测试
 
 ## 致谢
 
-- [Paseo](https://github.com/getpaseo/paseo)：生命周期设计参考；Pi 工具调用与对话的关联逻辑改编自其[固定版本的映射器](https://github.com/getpaseo/paseo/blob/99fc204c55c8c1666477282eeba562ba87a3135f/packages/server/src/server/agent/providers/pi/extensions/rpiv-ask-user-question/index.ts)（Apache-2.0）。Codex 问题归一化与答案映射也改编自其[固定版本的 Codex 适配器](https://github.com/getpaseo/paseo/blob/06fe97c9019c1db4a5264dfb9b369b93e5e2fba4/packages/server/src/server/agent/providers/codex-app-server-agent.ts)，改为按 ID 回答、严格校验，并去掉缺失答案默认选第一项的行为。
+- [Paseo](https://github.com/getpaseo/paseo)：[驻留生命周期及捕获轮次的取消语义](https://github.com/getpaseo/paseo/blob/29db2b79809fc032860ff4e8ee360fbe0073c3e9/docs/agent-lifecycle.md)来源，适配为扩展自有的 worker/control 协议；Pi 工具调用与对话的关联逻辑改编自其[固定版本的映射器](https://github.com/getpaseo/paseo/blob/99fc204c55c8c1666477282eeba562ba87a3135f/packages/server/src/server/agent/providers/pi/extensions/rpiv-ask-user-question/index.ts)（Apache-2.0）。Codex 问题归一化与答案映射也改编自其[固定版本的 Codex 适配器](https://github.com/getpaseo/paseo/blob/06fe97c9019c1db4a5264dfb9b369b93e5e2fba4/packages/server/src/server/agent/providers/codex-app-server-agent.ts)，改为按 ID 回答、严格校验，并去掉缺失答案默认选第一项的行为。
 - [Lody Codex ACP](https://github.com/LodyAI/acp-extension-codex/blob/60f1dc4bda7d503eb107a9875893a62d399fd97e/src/permissions/mcp.ts)：单次与持久许可分离及[无输入字段 elicitation 的识别](https://github.com/LodyAI/acp-extension-codex/blob/60f1dc4bda7d503eb107a9875893a62d399fd97e/src/CodexElicitationHandler.ts#L361)来源（Apache-2.0），按 [OpenAI Codex rust-v0.159.2](https://github.com/openai/codex/blob/rust-v0.159.2/codex-rs/core/src/mcp_tool_call.rs#L1460) 的 MCP 前缀问题和 elicitation 协议适配，增加活跃操作关联并禁用持久许可；不捆绑 Lody/ACP 运行时。
 - [@juicesharp/rpiv-ask-user-question 2.12.0](https://www.npmjs.com/package/@juicesharp/rpiv-ask-user-question/v/2.12.0)：子 Pi 内置工具的单问题 RPC 选项／自定义回答流程来源（MIT）。
 - [pi-subagents](https://github.com/tintinweb/pi-subagents)：状态区与对话界面的设计参考。

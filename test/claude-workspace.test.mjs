@@ -16,16 +16,30 @@ function setup(t,flags=[]){
  const launch={command:process.execPath,args:[pi]},options={launch:{command:process.execPath,args:[fixture,...flags]},home};
  const m=new AgentManager(parent,launch,undefined,options);
  t.after(async()=>{for(const s of m.list())if(processAlive(s.workerPid))await m.close(s.id);});
- const done=(id,phase='completed')=>waitUntil('Claude workspace release',()=>{const s=m.get(id);return s.phase===phase&&!processAlive(s.workerPid)?s:undefined;},12000);
- return {m,repo,home,parent,launch,options,done};
+ const done=async(id,status='completed')=>{
+   const state=await waitUntil('workspace run result',()=>{const s=m.get(id);return ['idle','closed'].includes(s.phase)?s:undefined;},12000);
+   assert.equal(state.lastStatus,status);
+   if(state.cli==='claude'){
+     assert.equal(state.phase,'closed');
+     await waitUntil('Claude worker release',()=>!processAlive(state.workerPid),5000);
+   }
+   return state;
+ };
+ const release=async id=>{
+   await done(id);const closed=await m.close(id);
+   assert.equal(closed.phase,'closed');assert.equal(closed.lastStatus,'completed');
+   assert.equal(fs.existsSync(path.join(m.root,id,'owner.lock')),false);
+   return closed;
+ };
+ return {m,repo,home,parent,launch,options,done,release};
 }
 function snapshot(ws){return {head:git(ws.path,'rev-parse','HEAD'),index:fs.readFileSync(git(ws.path,'rev-parse','--path-format=absolute','--git-path','index').trim()).toString('base64'),files:fs.readdirSync(ws.path),base:fs.readFileSync(path.join(ws.path,'base.txt'),'utf8')};}
 test('Claude workspaces isolate parallel writes, permit independent Pi review, and enforce leases', {timeout:35000}, async t=>{
- const {m,repo,done,parent,launch,options}=setup(t);const a=await m.workspaces.create(repo),b=await m.workspaces.create(repo);
+ const {m,repo,done,release,parent,launch,options}=setup(t);const a=await m.workspaces.create(repo),b=await m.workspaces.create(repo);
  const [wa,wb]=await Promise.all([m.spawn('worker',role,repo,fileTask('a.txt','A\n'),a.id),m.spawn('worker',role,repo,fileTask('b.txt','B\n'),b.id)]);
  const [first,second]=await Promise.all([done(wa.id),done(wb.id)]);assert.notEqual(first.sessionId,second.sessionId);
  assert(!fs.existsSync(path.join(repo,'a.txt')));assert(!fs.existsSync(path.join(a.path,'b.txt')));
- const review=await m.spawn('reviewer',piRole,repo,fileTask('a.txt'),a.id);assert.equal((await done(review.id)).text,'A\n');
+ const review=await m.spawn('reviewer',piRole,repo,fileTask('a.txt'),a.id);assert.equal((await release(review.id)).text,'A\n');
  for(const ws of [a,b])assert.equal((await m.workspaces.integrate(ws.id)).status,'applied');
  const held=await m.send(first.id,'HOLD','steer',{baseline:'keep'});const other=new AgentManager(parent,launch,undefined,options);
  await assert.rejects(other.spawn('reviewer',role,repo,'CWD',a.id),/occupied/);

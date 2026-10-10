@@ -58,6 +58,13 @@ test('Kitty release keys do not move selection; finished children linger, widths
   h.fleet.dispose();
 });
 
+test('idle resources outlive fleet linger and remain selectable',()=>{
+  const h=harness(); h.state.agents=[agent('idle',{phase:'idle',lastStatus:'failed',error:'native failure',updatedAt:1})];
+  h.fleet.update(); assert.match(h.render(),/Task idle/); assert.match(h.render(),/Idle.*Failed/);
+  h.input('\x1b[B'); h.input('\x1b[B'); h.input('\r'); assert.deepEqual(h.state.actions,['idle']);
+  h.fleet.dispose();
+});
+
 test('a pane that owns the keyboard suspends the below-editor roster',()=>{
   const h=harness();
   h.state.agents=[agent('first')];h.fleet.update();

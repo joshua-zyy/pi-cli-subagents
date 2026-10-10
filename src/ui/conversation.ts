@@ -3,10 +3,10 @@ import type { AgentView } from "../types.js";
 import type { PanelAction } from "./panel.js";
 import type { TranscriptEntry, TranscriptPageBoundary, TranscriptSnapshot } from "./transcript.js";
 import { ConversationHistory } from "./conversation-history.js";
-import { canMessage, canSteer, formatElapsed, formatTokens, isTerminal, oneLine, phaseColor, phaseIcon, phaseLabel, rightAlign, shortId, viewElapsed } from "./format.js";
+import { canMessage, canResume, canStop, formatElapsed, formatTokens, isActive, oneLine, rightAlign, shortId, viewElapsed, viewStatus } from "./format.js";
 
 export interface ConversationSnapshot extends TranscriptSnapshot {
-  agent: Pick<AgentView, "id" | "role" | "phase" | "runId"> & Partial<Pick<AgentView, "startedAt" | "updatedAt">>;
+  agent: Pick<AgentView, "id" | "role" | "phase" | "runId"> & Partial<Pick<AgentView, "startedAt" | "updatedAt" | "lastStatus" | "error">>;
 }
 /** Structural subset of Pi's theme; tests can pass a minimal object. */
 export interface ViewerTheme {
@@ -344,15 +344,21 @@ export class ConversationViewer {
 
   private async send(message: string): Promise<void> {
     const agent = this.agent;
-    if (!agent || !this.onSend) return;
-    const resuming = !canSteer(agent.phase);
+    if (!agent || !this.onSend || this.sending) return;
+    // The phase can change while the composer is open. Do not dispatch a now-blocked message.
+    if (!canMessage(agent.phase)) {
+      this.notice = { text: `Cannot send while ${viewStatus(agent).label}; inspect the instance first.`, color: "warning" };
+      this.tui.requestRender();
+      return;
+    }
+    const newRun = agent.phase === "idle" || canResume(agent.phase);
     this.sending = true;
-    this.notice = { text: resuming ? "Starting a new turn in the original session..." : "Delivering to the running child...", color: "dim", revision: this.snapshot?.outputRevision ?? this.snapshot?.revision };
+    this.notice = { text: newRun ? "Starting a new turn in the original session..." : "Delivering to the running child...", color: "dim", revision: this.snapshot?.outputRevision ?? this.snapshot?.revision };
     this.tui.requestRender();
     try {
       const action = await this.onSend(message);
       if (action) { this.finish(action); return; }
-      this.notice = { text: resuming ? "Turn accepted in the original session; a report will follow." : "Message accepted; the child continues in the same session.", color: "success", revision: this.snapshot?.outputRevision ?? this.snapshot?.revision };
+      this.notice = { text: newRun ? "Turn accepted in the original session; a report will follow." : "Message accepted; the child continues in the same session.", color: "success", revision: this.snapshot?.outputRevision ?? this.snapshot?.revision };
     } catch (error) {
       this.notice = { text: `Send failed: ${(error as Error).message}`, color: "error" };
     } finally {
@@ -374,7 +380,7 @@ export class ConversationViewer {
     const page = Math.max(1, this.viewport);
     let direction: "older" | "newer" | undefined;
     if (matchesKey(data, "escape") || matchesKey(data, "q") || matchesKey(data, "ctrl+c")) { this.finish(); return; }
-    if (agent && this.onSend && canMessage(agent.phase) && matchesKey(data, "return")) { this.openComposer(); return; }
+    if (agent && this.onSend && !this.sending && canMessage(agent.phase) && matchesKey(data, "return")) { this.openComposer(); return; }
     if (this.toolKeys().some(key => matchesKey(data, key))) {
       this.toggleTools(); this.tui.requestRender(); return;
     }
@@ -397,9 +403,9 @@ export class ConversationViewer {
       this.pendingUpRows = 0; this.scroll = Math.min(max, this.scroll + 1);
       this.follow = this.scroll >= max && (this.snapshot.window?.atEnd ?? true); direction = "newer";
     }
-    else if (agent && matchesKey(data, "s") && (canSteer(agent.phase) || isTerminal(agent.phase))) {
-      this.finish({ kind: "message", id: agent.id, resume: !canSteer(agent.phase) }); return;
-    } else if (agent && matchesKey(data, "x") && !isTerminal(agent.phase)) { this.finish({ kind: "stop", id: agent.id }); return; }
+    else if (agent && !this.sending && matchesKey(data, "s") && canMessage(agent.phase)) {
+      this.finish({ kind: "message", id: agent.id, resume: canResume(agent.phase) }); return;
+    } else if (agent && matchesKey(data, "x") && canStop(agent.phase)) { this.finish({ kind: "stop", id: agent.id }); return; }
     if (direction === "newer" && this.follow && (this.pagingInFlight === "older" || this.history.readerWindow?.atEnd === false)) this.requestPage("latest");
     if (this.follow && !wasFollowing && !this.pagingInFlight && !this.pagingQueued && this.history.readerSnapshot) {
       this.adopt(this.history.readerSnapshot);
@@ -453,9 +459,11 @@ export class ConversationViewer {
       ? `${formatTokens(this.snapshot.usage.input + this.snapshot.usage.output + this.snapshot.usage.cacheRead + this.snapshot.usage.cacheWrite)} tokens` : undefined;
     const stats = [tokens, this.snapshot?.usageComplete === false ? "Stats incomplete" : undefined,
       this.snapshot?.model ? oneLine(this.snapshot.model, 40) : undefined].filter(Boolean).join(" · ");
-    const header = agent
-      ? rightAlign(`${this.theme.fg(phaseColor(agent.phase), isTerminal(agent.phase) ? phaseIcon(agent.phase) : "●")} ${this.theme.bold(this.theme.fg("text", oneLine(agent.role, 40)))} ${this.theme.fg("dim", shortId(agent.id))}${this.theme.fg("muted", ` · ${phaseLabel(agent.phase)}`)}${agent.startedAt ? this.theme.fg("dim", ` · ${formatElapsed(viewElapsed(agent as AgentView, Date.now()))}`) : ""}`,
-        this.theme.fg("dim", stats), inner)
+    const stateStatus = agent ? viewStatus(agent) : undefined;
+    // Phase and last-run failure take precedence over model/token statistics on narrow terminals.
+    const header = agent && stateStatus
+      ? rightAlign(`${this.theme.fg(stateStatus.color, isActive(agent.phase) ? "●" : stateStatus.icon)} ${this.theme.bold(this.theme.fg("text", oneLine(agent.role, 40)))} ${this.theme.fg("dim", shortId(agent.id))}${stats ? this.theme.fg("dim", ` · ${stats}`) : ""}`,
+        this.theme.fg(stateStatus.color, `${stateStatus.label}${agent.startedAt ? ` · ${formatElapsed(viewElapsed(agent as AgentView, Date.now()))}` : ""}`), inner)
       : this.theme.fg("muted", "Loading child session...");
 
     this.contentWidth = inner;
@@ -465,8 +473,9 @@ export class ConversationViewer {
     while (visible.length < this.viewport) visible.push("");
 
     const percent = body.length <= this.viewport ? 100 : Math.round(((this.scroll + this.viewport) / Math.max(1, body.length)) * 100);
-    const status = this.error
-      ? this.theme.fg("error", oneLine(this.error, 120))
+    const error = this.error ?? agent?.error;
+    const status = error
+      ? this.theme.fg("error", oneLine(error, 120))
       : this.pagingError ? this.theme.fg("error", oneLine(this.pagingError, 120))
         : this.pagingInFlight ? this.theme.fg("dim", this.pagingInFlight === "older" ? "Loading older history..." : this.pagingInFlight === "newer" ? "Loading newer history..." : "Returning to the latest output...")
           : this.snapshot?.historyLoading ? this.theme.fg(this.snapshot.notice ? "warning" : "dim", `Recent preview · loading history/totals${this.snapshot.notice ? ` · ${oneLine(this.snapshot.notice, 120)}` : ""}`)
@@ -478,20 +487,22 @@ export class ConversationViewer {
     if (this.snapshot?.window && !this.snapshot.window.atEnd) hints.push("End latest");
     const toolKey = this.toolKeys()[0];
     if (toolKey && this.snapshot?.entries.some(entry => entry.kind === "tool")) hints.push(`${toolKey} tools`);
-    if (agent && this.onSend && canSteer(agent.phase)) hints.push("Enter message");
-    else if (agent && this.onSend && canMessage(agent.phase)) hints.push("Enter resume");
-    if (agent && !isTerminal(agent.phase)) hints.push("x stop");
+    if (agent && this.onSend && !this.sending && canMessage(agent.phase)) hints.push(canResume(agent.phase) ? "Enter resume" : agent.phase === "idle" ? "Enter new task" : "Enter message");
+    if (agent && canStop(agent.phase)) hints.push(agent.phase === "idle" ? "x release" : "x stop");
     hints.push("Esc close");
     // Keep the most useful hints when the width is limited: dismissal and actions first, then scrolling.
     const styled = (items: string[]): string => this.theme.fg("dim", items.join(" · "));
     const priority = [...hints].sort((a, b) => rank(a) - rank(b));
+    // A long failure must not hide how to release an idle runtime or resume a closed one.
+    const actions = hints.filter(hint => hint === "Esc close" || hint.startsWith("Enter ") || hint.startsWith("x "));
+    const statusText = truncateToWidth(status, Math.max(0, inner - visibleWidth(styled(actions)) - 1));
     let chosen = new Set<string>();
     for (const hint of priority) {
       const candidate = hints.filter((item) => chosen.has(item) || item === hint);
-      if (visibleWidth(status) + 1 + visibleWidth(styled(candidate)) <= inner) chosen.add(hint);
+      if (visibleWidth(statusText) + 1 + visibleWidth(styled(candidate)) <= inner) chosen.add(hint);
     }
     const shown = hints.filter((hint) => chosen.has(hint));
-    const footer = shown.length ? bar(status, styled(shown)) : status;
+    const footer = shown.length ? bar(statusText, styled(shown)) : statusText;
     // Every chrome row is framed, so the footer cannot spill past the border it belongs to.
     const bottomRows = this.composer
       ? [row(this.composer.render(inner)[0] ?? ""), row(bar(this.theme.fg("accent", "✎ message"), this.theme.fg("dim", "Enter send · Esc cancel")))]
@@ -611,10 +622,11 @@ function formatArgs(input: string | undefined): string {
 /** Hint priority when the footer is too narrow: dismissal, actions, then scrolling. */
 function rank(hint: string): number {
   if (hint === "Esc close") return 0;
-  if (hint.endsWith(" tools")) return 1;
-  if (hint.startsWith("Enter ")) return 2;
-  if (hint === "x stop") return 3;
-  return 4;
+  if (hint === "x release") return 1;
+  if (hint.endsWith(" tools")) return 2;
+  if (hint.startsWith("Enter ")) return 3;
+  if (hint === "x stop") return 4;
+  return 5;
 }
 
 /** Hard-wrap sanitized text without dropping whitespace or splitting graphemes. */

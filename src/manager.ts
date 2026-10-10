@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, openSync, closeSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, openSync, closeSync, statSync, realpathSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
@@ -85,17 +85,33 @@ export class AgentManager {
   }
 
   get(id: string): AgentView {
+    return this.view(id, readJson<AgentState>(path.join(this.directory(id), "state.json")));
+  }
+  private view(id: string, snapshot: AgentState | undefined): AgentView {
     const spec = this.spec(id), dir = this.directory(id);
-    let state = readJson<AgentState>(path.join(dir, "state.json"));
+    let state = snapshot;
     if (!state) throw new Error(`Subagent ${id} has no runtime state yet; inspect ${dir}`);
-    if (state.id !== id || !idPattern.test(state.runId) || !["starting", "running", "waiting", "stopping", "completed", "failed", "stopped", "unreachable"].includes(state.phase)
+    if (state.id !== id || !idPattern.test(state.runId) || !["starting", "running", "waiting", "stopping", "completed", "failed", "stopped", "idle", "closed", "unreachable"].includes(state.phase)
       || !Number.isInteger(state.workerPid) || state.workerPid < 0 || !Number.isFinite(state.updatedAt) || typeof state.accepted !== "boolean"
       || typeof state.logFile !== "string" || !Array.isArray(state.questions) || state.questions.some(q => !q || typeof q.id !== "string" || typeof q.title !== "string" || !["select", "confirm", "input", "editor", "form"].includes(q.method)))
       throw new Error(`Invalid runtime state for subagent ${id}; inspect ${dir}`);
-    if (["starting", "running", "waiting", "stopping"].includes(state.phase) && !processAlive(state.workerPid)) {
-      state = { ...state, phase: "unreachable", error: "The worker exited and task status is uncertain. Do not start duplicate work; inspect the logs and owner.lock." };
+    if (state.protocolVersion !== undefined) {
+      if (state.protocolVersion !== 2 || typeof state.runtimeId !== "string" || !idPattern.test(state.runtimeId) ||
+        state.phase === "closed" && state.runtimeClosed !== true ||
+        state.lastStatus !== undefined && !["completed", "failed", "stopped"].includes(state.lastStatus) ||
+        state.runtimeClosed && !["completed", "failed", "stopped", "closed"].includes(state.phase))
+        throw new Error(`Invalid runtime identity for subagent ${id}`);
+      const owner = readJson<{ pid: number; runtimeId?: string }>(path.join(dir, "owner.lock"));
+      if (state.runtimeClosed && !owner) state = { ...state, phase: "closed" };
+      else if (!owner || owner.runtimeId !== state.runtimeId || owner.pid !== state.workerPid)
+        state = { ...state, phase: "unreachable", error: "Runtime ownership is uncertain; inspect owner.lock. Previous run results are unchanged." };
+      else if (state.runtimeClosed) state = { ...state, phase: "stopping" };
     }
-    const report = state.resultFile ? this.report(state.resultFile) : undefined;
+    if (["starting", "running", "waiting", "stopping", "idle"].includes(state.phase) && !processAlive(state.workerPid)) {
+      state = { ...state, phase: "unreachable", error: "The worker exited and runtime status is uncertain. Previous run results are unchanged. Do not start duplicate work; inspect the logs and owner.lock." };
+    }
+    const candidate = state.resultFile ? this.report(state.resultFile) : undefined;
+    const report = candidate?.runId === state.runId && candidate.agentId === id && candidate.parentFile === this.parentFile ? candidate : undefined;
     const current = state.runId, phase = state.phase;
     // A resume writes its run directory before the worker replaces state.json. Report only runs
     // the persisted state has acknowledged, so a queued run is never paired with the previous
@@ -108,7 +124,7 @@ export class AgentManager {
       return {
         runId: run.runId, startedAt: run.time, ...(task ? { task } : {}),
         // A run that left no result report has no verdict to report; never invent one.
-        status: final ?? (run.runId === current ? phase : "unknown"),
+        status: final ?? (run.runId === current && !["idle", "closed"].includes(phase) ? phase : "unknown"),
       };
     });
     const latest = history.at(-1);
@@ -139,7 +155,7 @@ export class AgentManager {
       // A run directory exists before its request file is durable; skip it rather than failing a poll.
       const request = this.readHistory(file, (mtimeMs) => {
         const saved = readJson<StartRequest>(file);
-        return saved ? { runId: saved.runId, message: summarize(saved.message) ?? "", createdAt: saved.createdAt ?? mtimeMs } : undefined;
+        return saved ? { runId: saved.runId, message: summarize(saved.message) ?? "", createdAt: saved.createdAt ?? mtimeMs, logFile: saved.logFile } : undefined;
       });
       if (!request || request.runId !== runId) continue;
       runs.push({ runId, folder, request, time: request.createdAt });
@@ -150,7 +166,21 @@ export class AgentManager {
   /** Event logs for this instance, ordered like its task history. */
   eventLogs(id: string): string[] {
     this.spec(id);
-    return this.runs(id).map((run) => path.join(run.folder, "events.jsonl"));
+    const runs = this.runs(id);
+    if (!runs.length) return [];
+    const root = path.join(this.directory(id), "runs"), realInstance = realpathSync(this.directory(id));
+    const logs = runs.map(run => {
+      const file = run.request.logFile === undefined ? path.join(run.folder, "events.jsonl") : path.resolve(run.request.logFile);
+      const relative = path.relative(root, file), parts = relative.split(path.sep);
+      if (parts.length !== 2 || !idPattern.test(parts[0]) || parts[1] !== "events.jsonl") throw new Error("Invalid or outside-instance runtime log reference");
+      // Anchor at the instance, not runs/ (which could itself be a symlink). Resolve
+      // the parent even for missing logs so a later-created file cannot bypass this check.
+      const resolved = existsSync(file) ? realpathSync(file) : path.join(realpathSync(path.dirname(file)), "events.jsonl");
+      const actual = path.relative(realInstance, resolved).split(path.sep);
+      if (actual.length !== 3 || actual[0] !== "runs" || !idPattern.test(actual[1]) || actual[2] !== "events.jsonl") throw new Error("Runtime log reference escapes the instance");
+      return resolved;
+    });
+    return [...new Set(logs)];
   }
 
   async spawn(roleName: string, role: Role, cwd: string, message: string, workspace?: string): Promise<AgentView> {
@@ -187,7 +217,8 @@ export class AgentManager {
     if (session && "sessionFile" in session && !existsSync(session.sessionFile)) throw new Error(`Original session file is missing: ${session.sessionFile}; will not silently create a new session.`);
     const runId = randomUUID(), runDir = path.join(dir, "runs", runId);
     mkdirSync(runDir, { recursive: true, mode: 0o700 });
-    const initial: StartRequest = { runId, message, createdAt: Date.now(), session };
+    const priorStart = readJson<AgentState>(path.join(dir, "state.json"))?.startedAt;
+    const initial: StartRequest = { runId, message, createdAt: Math.max(Date.now(), Number.isFinite(priorStart) ? priorStart! + 1 : 0), session };
     writeJson(path.join(runDir, "request.json"), initial);
     const fd = openSync(path.join(runDir, "worker.log"), "a", 0o600);
     try {
@@ -205,19 +236,20 @@ export class AgentManager {
         if (!state || state.runId !== runId) return undefined;
         const view = this.get(id);
         if (view.phase === "unreachable") throw new Error(view.error);
-        return view.accepted || ["waiting", "failed", "stopped", "completed"].includes(view.phase) ? view : undefined;
+        return view.accepted || ["waiting", "failed", "stopped", "completed", "idle", "closed"].includes(view.phase) ? view : undefined;
       }, 45_000);
     } catch (error) {
       throw new Error(`Subagent ${id}: ${(error as Error).message}; records retained at ${dir}`);
     }
   }
 
-  private async request(id: string, input: Control): Promise<void> {
+  private async request(id: string, input: Control): Promise<AgentState> {
     const state = this.get(id);
     if (!processAlive(state.workerPid)) throw new Error("Worker has exited; inspect the final state");
     const endpoint = readJson<Endpoint>(path.join(this.directory(id), "endpoint.json"));
-    if (!endpoint || endpoint.runId !== state.runId) throw new Error("Worker is not ready, or the connection record is stale");
-    await control(endpoint, input);
+    if (!endpoint || endpoint.runId !== state.runId || (state.protocolVersion === 2 &&
+      (endpoint.protocolVersion !== 2 || endpoint.runtimeId !== state.runtimeId))) throw new Error("Worker is not ready, or the connection record is stale");
+    return control(endpoint, input);
   }
 
   async send(id: string, message: string, mode: Delivery = "steer", options: ResumeOptions = {}): Promise<AgentView> {
@@ -225,8 +257,10 @@ export class AgentManager {
     const spec = this.spec(id);
     if (!spec.workspace && (options.baseline !== undefined || options.includeUncommitted !== undefined)) throw new Error("Baseline choices require a managed workspace");
     const beforeSync = async (): Promise<void> => {
-      const state = this.get(id);
+      let state = this.get(id);
       if (["starting", "running", "waiting", "stopping", "unreachable"].includes(state.phase)) throw new Error("Cannot sync a running or uncertain instance; wait for it to finish or inspect it first");
+      if (state.phase === "idle") { await this.close(id, true); state = this.get(id); }
+      await this.waitForRelease(state, "Sync writer release", 15_000);
       const session = nativeSession(state.session ?? (state.sessionFile && state.sessionId ? { sessionFile: state.sessionFile, sessionId: state.sessionId } : undefined));
       if (!session || session.cli !== (spec.cli ?? "pi")) throw new Error("No resumable original session; cannot sync for continuation");
       if (session.cli === "pi") {
@@ -247,10 +281,10 @@ export class AgentManager {
       const prompt = notice ? `${message}\n\n[Workspace baseline]\n${notice}` : message;
       let state = this.get(id);
       if (state.phase === "unreachable") throw new Error(state.error);
+      if (state.phase === "idle") return this.view(id, await this.request(id, { type: "start", message: prompt }));
       if (["starting", "running", "waiting"].includes(state.phase)) {
         if (spec.cli === "codex" && mode === "followUp") throw new Error("Codex followUp while running is not supported; wait for this run to finish");
-        await this.request(id, { type: "send", message: prompt, mode });
-        return this.get(id);
+        return this.view(id, await this.request(id, { type: "send", message: prompt, mode }));
       }
       await this.waitForRelease(state, "Previous worker release", 15_000);
       state = this.get(id);
@@ -263,7 +297,7 @@ export class AgentManager {
     if (!spec.workspace) return send();
     return this.workspaces.runAgent(spec.workspace, id, async (ws, notice) => {
       const state = await send(notice);
-      if (state.accepted || state.phase === "completed") writeJson(path.join(this.directory(id), "spec.json"), {
+      if (state.accepted || state.phase === "completed" || state.lastStatus === "completed") writeJson(path.join(this.directory(id), "spec.json"), {
         ...spec, workspaceBaseline: { commit: ws.baseCommit, revision: ws.revision },
       });
       return this.get(id);
@@ -274,25 +308,25 @@ export class AgentManager {
   private async waitForRelease(state: AgentView, label: string, timeout: number): Promise<void> {
     const file = path.join(this.directory(state.id), "owner.lock");
     await waitUntil(label, () => {
-      const owner = readJson<{ pid: number; runId: string }>(file);
+      const owner = readJson<{ pid: number; runId: string; runtimeId?: string }>(file);
       if (owner === undefined) return true;
-      if (!owner || owner.pid !== state.workerPid || owner.runId !== state.runId || !processAlive(owner.pid))
+      if (!owner || owner.pid !== state.workerPid || (state.protocolVersion === 2 ? owner.runtimeId !== state.runtimeId : owner.runId !== state.runId) || !processAlive(owner.pid))
         throw new Error(`A different owner or stale lock remains at ${file}; inspect it before retrying. No lock was reclaimed.`);
       return undefined;
     }, timeout);
   }
 
-  async close(id: string): Promise<AgentView> {
+  async close(id: string, onlyIdle = false): Promise<AgentView> {
     const state = this.get(id);
-    if (state.phase === "unreachable") throw new Error(state.error);
-    if (!["completed", "failed", "stopped", "stopping"].includes(state.phase)) await this.request(id, { type: "close" });
+    if (state.phase === "unreachable" && (!state.runtimeId || !processAlive(state.workerPid))) throw new Error(state.error);
+    if (onlyIdle && state.phase !== "idle") throw new Error("Runtime is no longer idle; it was not closed");
+    if (!["completed", "failed", "stopped", "stopping", "closed"].includes(state.phase)) await this.request(id, { type: "close", ...(onlyIdle ? { onlyIdle: true } : {}) });
     await this.waitForRelease(state, "Subagent shutdown", 30_000);
     return this.get(id);
   }
 
   async reply(id: string, questionId: string, answer: Pick<Extract<Control, { type: "reply" }>, "value" | "answers" | "confirmed" | "cancelled">, decision: { actor: "human" | "parent"; reason?: string } = { actor: "human" }): Promise<AgentView> {
-    await this.request(id, { type: "reply", id: questionId, ...answer, ...decision });
-    return this.get(id);
+    return this.view(id, await this.request(id, { type: "reply", id: questionId, ...answer, ...decision }));
   }
 
   reports(now = Date.now(), states: readonly AgentView[] = this.list()): Report[] {
@@ -324,7 +358,7 @@ export class AgentManager {
         }
       }
       if (state.phase === "unreachable") reports.push({
-        notificationId: `${state.runId}-unreachable`, agentId: state.id, runId: state.runId, parentFile: this.parentFile,
+        notificationId: `${state.runtimeId ?? state.runId}-unreachable`, agentId: state.id, runId: state.runId, parentFile: this.parentFile,
         status: "failed", time: state.updatedAt, text: "", error: state.error, logFile: state.logFile,
       });
       if (["running", "starting"].includes(state.phase) && now - state.updatedAt >= 15 * 60_000) reports.push({

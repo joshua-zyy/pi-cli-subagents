@@ -149,7 +149,7 @@ export class WorkspaceStore {
       const state = readJson<AgentState>(path.join(dir, "state.json"));
       // The worker releases owner.lock only after reaping its CLI. A terminal PID alone can
       // refer to an unrelated, reused process; missing/active state still fails closed.
-      return existsSync(path.join(dir, "owner.lock")) || !state || !["completed", "failed", "stopped"].includes(state.phase);
+      return existsSync(path.join(dir, "owner.lock")) || !state || !["completed", "failed", "stopped", "closed"].includes(state.phase);
     });
   }
   private assertIdle(ws: Workspace, except?: string): void {
@@ -242,7 +242,7 @@ export class WorkspaceStore {
     if (options.includeUncommitted !== undefined && (options.baseline !== "sync" || !options.includeUncommitted?.reason?.trim())) throw new Error("Only sync may inherit uncommitted changes, with an explicit authorization reason");
     const run = () => locked(path.join(this.directory(id), "operation.lock"), `agent:${agentId}`, async () => {
       const ws = this.get(id);
-      this.assertIdle(ws, options.baseline === "sync" ? undefined : agentId);
+      this.assertIdle(ws, agentId);
       await this.validate(ws);
       if (options.expectedRevision !== undefined && ws.revision !== options.expectedRevision) throw new Error("Workspace baseline changed during confirmation; inspect and choose again");
       const spec = readJson<AgentSpec>(path.join(this.root, agentId, "spec.json"));
@@ -250,7 +250,14 @@ export class WorkspaceStore {
       if (!options.baseline && (stale || (!spec && ws.integration && !ws.continuation))) {
         throw new WorkspaceDecisionRequired("baseline", ws, `Workspace ${id} was integrated or its baseline changed. Choose baseline keep (current workspace, no parent sync) or sync (only with no unintegrated or staged changes). Resume the original instance deliberately before spawning new work here.`);
       }
-      if (options.baseline === "sync") await this.synchronize(ws, options, beforeSync);
+      if (options.baseline === "sync") {
+        // Reject stale metadata before closing. Content/preflight checks may still refuse
+        // after close: idle can have background writes, so sync requires a released writer.
+        await beforeSync?.();
+        this.assertIdle(ws);
+        await this.validate(ws);
+        await this.synchronize(ws, options);
+      }
       if (options.baseline === "keep" && ws.integration) { ws.continuation = true; this.save(ws); }
       let notice: string | undefined;
       if (options.baseline || stale || (!spec && ws.integration)) {
@@ -291,7 +298,7 @@ export class WorkspaceStore {
     });
     return options.baseline === "sync" ? this.parentOperation("sync", run) : run();
   }
-  private async synchronize(ws: Workspace, options: ResumeOptions, beforeSync?: () => Promise<void>): Promise<void> {
+  private async synchronize(ws: Workspace, options: ResumeOptions): Promise<void> {
     const folder = path.join(this.directory(ws.id), "syncs", randomUUID());
     const currentTree = await this.snapshot(ws.path, ws.baseCommit, path.join(folder, "current"));
     const checkpoint = ws.integration?.tree ?? (await git(ws.path, ["rev-parse", `${ws.baseCommit}^{tree}`])).toString().trim();
@@ -310,9 +317,6 @@ export class WorkspaceStore {
         if ((await git(ws.path, ["cat-file", "-t", `${tree}:${prefix}`])).toString().trim() !== "tree") throw new Error("not a directory");
       } catch (error) { throw new Error(`The sync baseline does not contain the original child cwd ${ws.cwd}; choose keep or a new workspace. ${(error as Error).message}`); }
     }
-    // The execution backend verifies the original session under this workspace's lock,
-    // after Git/authorization checks but before changing the baseline. Not a cross-system transaction.
-    await beforeSync?.();
     const nextBase = await this.internalCommit(ws.repo, tree, parentCommit);
     if (nextBase === ws.baseCommit && !ws.integration) return;
     const changedFiles = split(await git(ws.path, ["diff", "--no-renames", "--name-only", "-z", currentTree, tree, "--"]));

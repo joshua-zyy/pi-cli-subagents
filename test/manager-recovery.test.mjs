@@ -9,10 +9,17 @@ import { readJson, writeJson, waitUntil } from '../dist/storage.js';
 import { deliverReports } from '../dist/notifier.js';
 import { tempDir } from './helpers/tmp.mjs';
 const launch = { command: process.execPath, args: [fileURLToPath(new URL('./fixtures/pi.mjs', import.meta.url))] };
-const released = (m, id) => waitUntil('terminal owner release', () => {
-  const s = m.get(id);
-  return ['completed', 'failed', 'stopped'].includes(s.phase) && !fs.existsSync(path.join(m.root, id, 'owner.lock')) ? s : undefined;
-}, 10000);
+const released = async (m, id) => {
+  const result = await waitUntil('run result before release', () => {
+    const s = m.get(id);
+    return ['idle', 'closed'].includes(s.phase) ? s : undefined;
+  }, 10000);
+  assert.equal(result.lastStatus, 'completed');
+  const closed = await m.close(id);
+  assert.equal(closed.phase, 'closed'); assert.equal(closed.lastStatus, result.lastStatus);
+  assert.equal(fs.existsSync(path.join(m.root, id, 'owner.lock')), false);
+  return closed;
+};
 function setup(t) {
   const cwd = tempDir('manager-recovery');
   const m = new AgentManager(path.join(cwd, 'parent.jsonl'), launch);

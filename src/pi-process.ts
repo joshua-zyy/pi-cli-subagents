@@ -35,13 +35,17 @@ export function childEnvironment(): NodeJS.ProcessEnv {
 export class PiProcess {
   readonly child: ChildProcessWithoutNullStreams;
   readonly closed: Promise<Exit>;
-  private pending = new Map<string, { resolve: (value: Record<string, unknown>) => void; reject: (error: Error) => void }>();
+  private pending = new Map<string, { resolve: (value: Record<string, unknown>) => void; reject: (error: Error, nativeRejected?: boolean) => void }>();
   private nextId = 0;
   private exitError?: Error;
   private buffer = "";
   private forced = false;
+  private closing = false;
+  private poisoned?: Error;
+  private interrupting?: Promise<void>;
+  private run?: { started: boolean; validating: boolean; done: Promise<void>; resolve: () => void };
 
-  constructor(launch: Launch, args: string[], cwd: string, logFile: string, onRecord: (record: WireRecord) => void) {
+  constructor(launch: Launch, args: string[], cwd: string, logFile: string, private readonly onRecord: (record: WireRecord) => void, private readonly timeout = 30_000) {
     const output = createWriteStream(logFile, { flags: "a", mode: 0o600 });
     const stderr = createWriteStream(`${logFile}.stderr`, { flags: "a", mode: 0o600 });
     // The launch is a trusted CLI path, each option is a separate argv element; never invoke a shell.
@@ -73,8 +77,8 @@ export class PiProcess {
           if (record.type === "response" && entry) {
             this.pending.delete(record.id!);
             if (record.success === true) entry.resolve(record.data ?? {});
-            else entry.reject(new Error(String(record.error ?? "RPC command failed")));
-          } else onRecord(record);
+            else entry.reject(new Error(String(record.error ?? "RPC command failed")), record.success === false);
+          } else this.record(record);
         } catch (error) { fail(error as Error); void this.kill(); return; }
       }
     });
@@ -89,32 +93,108 @@ export class PiProcess {
     });
   }
 
-  request<T = WireRecord>(command: WireRecord, timeout = 30_000): Promise<T> {
+  private record(record: WireRecord): void {
+    const run = this.run;
+    if (record.type === "agent_start" && run) run.started = true;
+    if (record.type === "agent_settled") {
+      if (!run?.started || run.validating) return;
+      run.validating = true;
+      // Pi events have no native turn ID. Fence the captured local token with an
+      // idle state response on the same ordered stream; stale terminals cannot
+      // settle a later streaming run. agent_end alone is never a terminal.
+      void this.request<{ isStreaming?: boolean; isCompacting?: boolean; pendingMessageCount?: number }>({ type: "get_state" }).then(state => {
+        if (this.run !== run) return;
+        if (state.isStreaming !== false || state.isCompacting || state.pendingMessageCount) { run.validating = false; return; }
+        this.run = undefined;
+        this.onRecord(record);
+        run.resolve();
+      }).catch(error => { this.poisoned = error; void this.kill(); });
+      return;
+    }
+    this.onRecord(record);
+  }
+
+  /** Check before an adapter resets its run-local buffers as well as before writing. */
+  assertPromptAllowed(streaming = false): void {
+    if (this.exitError) throw this.exitError;
+    if (this.poisoned) throw this.poisoned;
+    if (this.closing) throw new Error("Pi runtime is closing");
+    if (this.interrupting) throw new Error("Pi interrupt is still pending");
+    if (streaming && this.run?.validating) throw new Error("Pi terminal validation is still pending; wait for this run to settle");
+    if (!streaming && this.run) throw new Error("Pi already has an active run");
+    if (streaming && !this.run) throw new Error("Pi has no active run");
+  }
+
+  request<T = WireRecord>(command: WireRecord, timeout = this.timeout): Promise<T> {
     if (this.exitError) return Promise.reject(this.exitError);
-    const id = `cli-subagents-${++this.nextId}`;
-    return new Promise((resolve, reject) => {
+    if (command.type === "prompt") {
+      try { this.assertPromptAllowed(!!command.streamingBehavior); } catch (error) { return Promise.reject(error); }
+      if (!command.streamingBehavior) {
+        let resolve!: () => void;
+        const done = new Promise<void>(r => { resolve = r; });
+        this.run = { started: false, validating: false, done, resolve };
+      }
+    }
+    const id = `cli-subagents-${++this.nextId}`, reserved = this.run;
+    let nativeRejected = false;
+    return new Promise<T>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
-        reject(new Error(`Pi RPC ${command.type} timed out; acceptance is uncertain. Inspect the instance before retrying.`));
+        reject(new Error(`Pi RPC ${command.type} timed out; acceptance is uncertain. Stop/release the runtime before retrying.`));
       }, timeout);
       this.pending.set(id, {
         resolve: (value) => { clearTimeout(timer); resolve(value as T); },
-        reject: (error) => { clearTimeout(timer); reject(error); },
+        reject: (error, confirmed = false) => { clearTimeout(timer); nativeRejected = confirmed; reject(error); },
       });
       this.child.stdin.write(`${JSON.stringify({ ...command, id })}\n`, (error) => {
         if (error) { this.pending.get(id)?.reject(error); this.pending.delete(id); }
       });
+    }).catch(error => {
+      if (command.type === "prompt") {
+        // An explicit refusal before agent_start did not admit this run. Preserve the
+        // existing RPC ability to submit different work; ambiguous/started failures poison.
+        if (nativeRejected && !command.streamingBehavior && reserved && this.run === reserved && !reserved.started) {
+          this.run = undefined; reserved.resolve();
+        } else this.poisoned = error;
+      }
+      throw error;
     });
+  }
+
+  interrupt(): Promise<void> {
+    if (this.poisoned) return Promise.reject(this.poisoned);
+    if (this.interrupting) return this.interrupting;
+    const run = this.run;
+    if (!run) return Promise.resolve();
+    let timer: NodeJS.Timeout;
+    const operation = (async () => {
+      await this.request({ type: "clear_queue" });
+      // Do not abort a replacement run after an asynchronous queue response.
+      if (this.run === run) await this.request({ type: "abort" });
+      await run.done;
+    })();
+    this.interrupting = Promise.race([operation, this.closed.then(() => {}), new Promise<void>((_, reject) => {
+      timer = setTimeout(() => reject(new Error("Pi interrupt timed out; runtime is uncertain. Stop/release before new work.")), this.timeout);
+    })]).catch(error => { this.poisoned = error; throw error; }).finally(() => {
+      clearTimeout(timer); this.interrupting = undefined;
+    });
+    return this.interrupting;
   }
 
   async reply(record: Record<string, unknown>): Promise<void> {
     if (this.exitError) throw this.exitError;
+    if (this.poisoned) throw this.poisoned;
+    if (this.interrupting || this.closing) throw new Error("Pi interrupt or shutdown pending; interaction is no longer active");
     await new Promise<void>((resolve, reject) => {
       this.child.stdin.write(`${JSON.stringify({ ...record, type: "extension_ui_response" })}\n`, (error) => error ? reject(error) : resolve());
+    }).catch(error => {
+      this.poisoned = new Error(`Pi question delivery is uncertain; stop/release before new work: ${(error as Error).message}`);
+      throw this.poisoned;
     });
   }
 
   async end(): Promise<{ exit: Exit; forced: boolean }> {
+    this.closing = true;
     if (!this.child.stdin.destroyed) this.child.stdin.end();
     const timer = setTimeout(() => { void this.kill(); }, 5000);
     try { return { exit: await this.closed, forced: this.forced }; }
@@ -122,11 +202,16 @@ export class PiProcess {
   }
 
   async stop(): Promise<{ exit: Exit; forced: boolean }> {
+    this.closing = true;
+    const timer = setTimeout(() => { void this.kill(); }, 5000);
     try {
-      await this.request({ type: "clear_queue" }, 5000);
-      await this.request({ type: "abort" }, 10_000);
-    } catch { await this.kill(); }
-    return this.end();
+      // Release always clears queued work, even while already idle or poisoned.
+      try {
+        await this.request({ type: "clear_queue" }, Math.min(this.timeout, 5000));
+        if (!this.poisoned) await this.interrupt();
+      } catch { /* Closing stdin and the stop deadline still release the tree. */ }
+      return await this.end();
+    } finally { clearTimeout(timer); }
   }
 
   private async kill(): Promise<void> {

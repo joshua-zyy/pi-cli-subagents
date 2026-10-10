@@ -17,6 +17,23 @@ const theme = { fg: (_color, text) => text, bold: (text) => text };
 const keys = { up: '\u001b[A', down: '\u001b[B', enter: '\r', escape: '\u001b' };
 const json = (text) => JSON.parse(text.slice(text.indexOf('{'), text.lastIndexOf('}') + 1));
 
+function waitForIdle(manager, id, lastStatus = 'completed') {
+  return waitUntil(`run ${lastStatus} with resident runtime`, () => {
+    const state = manager.get(id);
+    return state.phase === 'idle' && state.lastStatus === lastStatus ? state : undefined;
+  });
+}
+
+/** Native restart and workspace handoff need release, not just a finished run. */
+async function closeCompleted(manager, id) {
+  const idle = await waitForIdle(manager, id);
+  const closed = await manager.close(id);
+  assert.equal(closed.phase, 'closed');
+  assert.equal(closed.lastStatus, idle.lastStatus, 'release must preserve the completed run outcome');
+  await waitUntil('runtime owner released', () => !fs.existsSync(path.join(manager.root, id, 'owner.lock')));
+  return closed;
+}
+
 function harness(t) {
   const cwd = tempDir('ui-loop');
   const parent = path.join(cwd, 'parent.jsonl'); fs.writeFileSync(parent, '{}\n');
@@ -73,7 +90,7 @@ function harness(t) {
   process.argv[1] = fixture;
   t.after(async () => {
     handlers.session_shutdown?.();
-    for (const agent of manager.list()) if (processAlive(agent.workerPid)) await manager.close(agent.id);
+    for (const agent of manager.list()) if (fs.existsSync(path.join(manager.root, agent.id, 'owner.lock'))) await manager.close(agent.id);
     process.argv[1] = savedArgv;
   });
   return {
@@ -130,6 +147,7 @@ test('one monitor tick shares one live snapshot across reports, status and fleet
     assert.equal(components.length, 2);
     t.mock.timers.tick(500);
     assert.equal(calls, 1, 'animation between monitor ticks must not read another snapshot');
+    // This synthetic record has no protocolVersion: legacy completion stays readable.
     phase = 'completed'; t.mock.timers.tick(200);
     assert.equal(calls, 2);
     assert.ok(components.every(component => /completed/i.test(component.render(120).join('\n'))));
@@ -142,16 +160,19 @@ test('status widget registers only in TUI, shows agents and unregisters at shutd
   const h = harness(t);
   h.start();
   const agent = await h.spawn('REMEMBER widget');
-  await waitUntil('completed', () => h.manager.get(agent.id).phase === 'completed' && !processAlive(h.manager.get(agent.id).workerPid));
+  const idle = await waitForIdle(h.manager, agent.id);
+  assert.equal(idle.protocolVersion, 2);
+  assert.equal(processAlive(idle.workerPid), true, 'run completion must leave the worker resident');
+  assert.ok(fs.existsSync(path.join(h.manager.root, agent.id, 'owner.lock')));
   const registered = await waitUntil('widget registration', () => h.widgetCalls.find((call) => typeof call.content === 'function'));
   assert.equal(registered.key, 'cli-subagents');
   const component = registered.content({ terminal: { columns: 120 }, requestRender() {} }, theme);
   const rendered = () => component.render(120).join('\n');
   assert.match(rendered(), /worker/, 'widget must show the role');
   assert.match(rendered(), /\d+\.\d+s/, 'widget must show elapsed time');
-  // Wait for the periodic snapshot refresh to collapse the finished instance.
-  await waitUntil('widget reflects completion', () => rendered().includes('Completed'));
-  assert.match(rendered(), /└─ ✓ worker/);
+  // A finished run collapses to one idle row; the owner is still available for release.
+  await waitUntil('widget reflects idle completion', () => /Idle.*last Completed/.test(rendered()));
+  assert.match(rendered(), /└─ ○ worker/);
   component.invalidate();
   h.handlers.session_shutdown?.();
   for (const key of ['cli-subagents','cli-subagents-fleet']) {
@@ -165,9 +186,10 @@ test('roster pane resumes the original session, confirms stops, and rejects non-
   const h = harness(t);
   h.start();
   const agent = await h.spawn('REMEMBER panel-token');
-  await waitUntil('first completion', () => h.manager.get(agent.id).phase === 'completed');
-  const sessionId = h.manager.get(agent.id).sessionId;
-  const firstRun = h.manager.get(agent.id).runId;
+  // This case specifically tests native resume, not an idle same-runtime continuation.
+  const original = await closeCompleted(h.manager, agent.id);
+  const sessionId = original.sessionId;
+  const firstRun = original.runId;
 
   // Open details, send through the editor, then close the restored roster.
   h.editorAnswer = 'RECALL';
@@ -180,8 +202,10 @@ test('roster pane resumes the original session, confirms stops, and rejects non-
   assert.match(h.editors[0], /Resume worker/);
   assert.equal(h.widgetCalls.filter(call => call.key === 'cli-subagents-agents').at(-1).content, undefined, 'the pane is removed from above the editor');
   await waitUntil('resumed report', () => h.messages.some((entry) => entry.message.content.includes('panel-token')));
-  assert.equal(h.manager.get(agent.id).sessionId, sessionId, 'resume must retain the original session');
-  assert.notEqual(h.manager.get(agent.id).runId, firstRun);
+  const resumed = await waitForIdle(h.manager, agent.id);
+  assert.equal(resumed.sessionId, sessionId, 'resume must retain the original session');
+  assert.notEqual(resumed.runId, firstRun);
+  assert.notEqual(resumed.runtimeId, original.runtimeId, 'native resume starts a new runtime');
 
   // HOLD is second by start time; stopping an active child needs confirmation.
   const holding = await h.spawn('HOLD');
@@ -191,9 +215,11 @@ test('roster pane resumes the original session, confirms stops, and rejects non-
   await stop.press(keys.escape); await stop.running;
   assert.equal(h.confirms.length, 1);
   assert.match(h.confirms[0].title, /Stop/);
-  assert.equal(h.manager.get(holding.id).phase, 'stopped');
-  assert.equal(h.manager.get(agent.id).phase, 'completed', 'only the selected child is stopped');
-  assert.equal(processAlive(h.manager.get(holding.id).workerPid), false);
+  assert.equal(h.manager.get(holding.id).phase, 'closed');
+  assert.equal(h.manager.get(holding.id).lastStatus, 'stopped');
+  assert.equal(h.manager.get(agent.id).phase, 'idle', 'only the selected child is stopped');
+  assert.equal(h.manager.get(agent.id).lastStatus, 'completed');
+  assert.equal(fs.existsSync(path.join(h.manager.root, holding.id, 'owner.lock')), false, 'stop confirms runtime release');
 
   // Non-TUI clients do not open a panel.
   h.mode = 'rpc';
@@ -243,7 +269,9 @@ test('direct human actions are recorded for the parent without interrupting it',
   await stop.press(keys.escape); await stop.running;
   await waitUntil('stop recorded', () => human().length === 3);
   assert.match(human()[2].message.content, new RegExp(`${holding.id}.*Stopped active work`, 's'));
-  assert.equal(h.manager.get(holding.id).phase, 'stopped');
+  assert.equal(h.manager.get(holding.id).phase, 'closed');
+  assert.equal(h.manager.get(holding.id).lastStatus, 'stopped');
+  assert.equal(fs.existsSync(path.join(h.manager.root, holding.id, 'owner.lock')), false);
 
   // Report delivery still works alongside the new entries.
   await waitUntil('child reports still arrive', () => h.messages.some((entry) => entry.message.customType === 'cli-subagents-report'));
@@ -265,7 +293,9 @@ test('Codex choice dialogs retain the command details and cancel without a persi
     const dialog = h.state.selections.at(-1);
     assert.match(dialog.title, /Command: write fixture-only/); assert.match(dialog.title, /Directory:/);
     assert.match(dialog.title, /Cancel turn ends this turn/); assert.deepEqual(dialog.options, ['Approve once', 'Cancel turn']);
-    await waitUntil('cancelled native task', () => manager.get(child.id).phase === 'stopped');
+    const cancelled = await waitForIdle(manager, child.id, 'stopped');
+    assert.equal(processAlive(cancelled.workerPid), true, 'Cancel turn must not close the resident runtime');
+    assert.ok(fs.existsSync(path.join(manager.root, child.id, 'owner.lock')));
     assert.ok(h.messages.some(e => e.message.customType === 'cli-subagents-human-action' && e.message.content.includes('Cancel turn')));
   }
   assert.equal(h.confirms.length, 0, 'no boolean dialog may hide cancel-vs-decline semantics');
@@ -325,7 +355,9 @@ test('inline message from the viewer reaches the running child in the same sessi
     viewer.handleInput('\r'); // open the inline composer
     for(const key of 'PING') viewer.handleInput(key);
     viewer.handleInput('\r');
-    await waitUntil('child finished with the steer text',()=>h.manager.get(agent.id).phase==='completed');
+    const finished = await waitForIdle(h.manager, agent.id);
+    assert.equal(finished.runId, agent.runId, 'steering must finish the existing run');
+    assert.equal(finished.runtimeId, agent.runtimeId, 'steering must keep the same runtime');
     assert.equal(h.manager.get(agent.id).sessionId,sessionId,'steering must stay in the original session');
     assert.equal(h.manager.get(agent.id).text,'PING');
     viewer.handleInput('q');
@@ -347,7 +379,7 @@ test('conversation is wired to live worker logs and remains open after completio
     await waitUntil('streaming tool details', () => text().includes('partial fixture output'));
     assert.match(text(), /src\/example.ts/);
     await waitUntil('final tool output', () => text().includes('final fixture output'));
-    await waitUntil('child completed', () => h.manager.get(agent.id).phase === 'completed');
+    await waitForIdle(h.manager, agent.id);
     assert.match(text(), /Implementation complete/);
     viewer.handleInput('q');
   });
@@ -355,7 +387,8 @@ test('conversation is wired to live worker logs and remains open after completio
   await pane.press(keys.enter);
   await pane.press(keys.escape); await pane.running;
   assert.equal(h.customCalls, 1, 'closing the viewer returns to the pane instead of a second overlay');
-  assert.equal(h.manager.get(agent.id).phase, 'completed');
+  assert.equal(h.manager.get(agent.id).phase, 'idle');
+  assert.equal(h.manager.get(agent.id).lastStatus, 'completed');
   assert.equal(h.manager.eventLogs(agent.id).length, 1);
   assert.throws(() => h.manager.eventLogs('foreign'), /id/);
 });
@@ -363,7 +396,7 @@ test('conversation is wired to live worker logs and remains open after completio
 test('the viewer reads a bounded tail, pages older history on demand and reuses the window when reopened', { timeout: 40_000 }, async t => {
   const h = harness(t); h.start();
   const agent = await h.spawn('STREAM');
-  await waitUntil('first run completed', () => h.manager.get(agent.id).phase === 'completed');
+  await waitForIdle(h.manager, agent.id);
   const logFile = h.manager.eventLogs(agent.id)[0];
   const before = fs.readFileSync(logFile);
   // An older run with more than one page of history, so the bounded tail cannot reach its first record.
@@ -415,7 +448,7 @@ test('roster pane and inline messages cannot bypass managed workspace review or 
   h.ctx.cwd = repo;
   const ws = JSON.parse(await h.invoke('subagent_workspace', { action: 'create',}));
   const worker = json(await h.invoke('subagent', { action: 'start', role: 'worker', task: 'CWD', workspace: ws.id }));
-  await waitUntil('worker released', () => h.manager.get(worker.id).phase === 'completed' && !processAlive(h.manager.get(worker.id).workerPid));
+  await closeCompleted(h.manager, worker.id);
   const reviewer = json(await h.invoke('subagent', { action: 'start', role: 'reviewer', task: 'HOLD review', workspace: ws.id }));
   h.editorAnswer = 'CWD';
   const occupied = await h.openAgents();
@@ -424,7 +457,7 @@ test('roster pane and inline messages cannot bypass managed workspace review or 
   assert.ok(h.notices.some(notice => /occupied/.test(notice.message)));
   assert.equal(h.manager.get(worker.id).runCount, 1);
   await h.manager.send(reviewer.id, 'review complete');
-  await waitUntil('reviewer released', () => h.manager.get(reviewer.id).phase === 'completed' && !processAlive(h.manager.get(reviewer.id).workerPid));
+  await closeCompleted(h.manager, reviewer.id);
   fs.writeFileSync(path.join(ws.path, 'base.txt'), 'new\n');
   await h.invoke('subagent_workspace', { action: 'integrate', workspace: ws.id });
   const integrated = await h.openAgents();
@@ -454,7 +487,7 @@ test('TUI sync requires dirty-state confirmation and inline continuation preserv
   h.ctx.cwd = repo;
   const ws = JSON.parse(await h.invoke('subagent_workspace', { action: 'create',}));
   const worker = json(await h.invoke('subagent', { action: 'start', role: 'worker', task: 'CWD', workspace: ws.id }));
-  await waitUntil('worker released', () => h.manager.get(worker.id).phase === 'completed' && !processAlive(h.manager.get(worker.id).workerPid));
+  await closeCompleted(h.manager, worker.id);
   fs.writeFileSync(path.join(ws.path, 'base.txt'), 'integrated\n'); await h.invoke('subagent_workspace', { action: 'integrate', workspace: ws.id });
   fs.writeFileSync(path.join(repo, 'parent-new.txt'), 'new parent content');
   h.state.selectAnswer = (_title, choices) => choices[1]; h.state.confirmAnswer = false; h.editorAnswer = 'CWD';
@@ -474,7 +507,9 @@ test('TUI sync requires dirty-state confirmation and inline continuation preserv
   const inline = await h.openAgents();
   await inline.press(keys.enter);
   await inline.press(keys.escape); await inline.running;
-  await waitUntil('resumed instance completed', () => h.manager.get(worker.id).runCount === 2 && h.manager.get(worker.id).phase === 'completed' && !processAlive(h.manager.get(worker.id).workerPid));
+  const resumed = await waitForIdle(h.manager, worker.id);
+  assert.equal(resumed.runCount, 2);
+  assert.notEqual(resumed.runId, worker.runId);
   assert.equal(h.manager.get(worker.id).sessionId, worker.sessionId);
   assert.equal(fs.readFileSync(path.join(ws.path, 'parent-new.txt'), 'utf8'), 'new parent content');
   assert.equal(git('-C', ws.path, 'status', '--porcelain'), '');
@@ -491,7 +526,7 @@ test('TUI refuses parent changes made after the inheritance dialog was displayed
   h.ctx.cwd = repo;
   const ws = JSON.parse(await h.invoke('subagent_workspace', { action: 'create',}));
   const worker = json(await h.invoke('subagent', { action: 'start', role: 'worker', task: 'CWD', workspace: ws.id }));
-  await waitUntil('worker released', () => h.manager.get(worker.id).phase === 'completed' && !processAlive(h.manager.get(worker.id).workerPid));
+  await closeCompleted(h.manager, worker.id);
   fs.writeFileSync(path.join(ws.path, 'base.txt'), 'integrated\n'); await h.invoke('subagent_workspace', { action: 'integrate', workspace: ws.id });
   h.state.selectAnswer = (_title, choices) => choices[1]; h.editorAnswer = 'CWD';
   h.ctx.ui.confirm = async () => { fs.writeFileSync(path.join(repo, 'unconfirmed.txt'), 'arrived during dialog'); return true; };

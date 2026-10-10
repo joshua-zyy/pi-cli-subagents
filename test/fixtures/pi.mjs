@@ -13,6 +13,12 @@ let active = false, buffer = '', question = false, settling;
 const emit = (record) => process.stdout.write(JSON.stringify(record) + '\n');
 const response = (cmd, data = {}) => emit({ type: 'response', id: cmd.id, command: cmd.type, success: true, data });
 const dialogs = new Map();
+const independentDialogs = new Map();
+let startupDialogOpened = false;
+function independentDialog(record, onReply = () => {}) {
+  independentDialogs.set(record.id, onReply);
+  emit({ type: 'extension_ui_request', ...record });
+}
 async function askParent() {
   const at = process.argv.findIndex((value, i) => value === '--extension' && path.basename(process.argv[i + 1] ?? '') === 'pi-question-tool.js');
   if (at < 0) throw new Error('The child question resource was not explicitly loaded');
@@ -45,11 +51,33 @@ function finish(text, stopReason = 'stop') {
   settling = setTimeout(() => { active = false; emit({ type: 'agent_settled' }); }, 100);
 }
 function handle(cmd) {
-  if (cmd.type === 'get_state') return response(cmd, { sessionId: session.id, sessionFile, isStreaming: active });
+  if (cmd.type === 'fixture/emit') { for (const record of cmd.records) emit(record); return; }
+  if (cmd.type === 'fixture/dialog') return independentDialog(cmd.dialog);
+  if (cmd.type === 'get_state') {
+    const state = { sessionId: session.id, sessionFile, isStreaming: active };
+    if (!startupDialogOpened && ['--startup-dialog', '--startup-dialog-after-state', '--startup-dialog-with-state'].some(flag => process.argv.includes(flag))) {
+      startupDialogOpened = true;
+      const afterState = process.argv.includes('--startup-dialog-after-state'), withState = process.argv.includes('--startup-dialog-with-state');
+      if (afterState) response(cmd, state);
+      independentDialog({ id: 'startup-dialog', method: 'confirm', title: 'Confirm fixture startup', message: 'Fixture session_start dialog' },
+        () => { if (!afterState && !withState) response(cmd, state); });
+      if (withState) response(cmd, state);
+      return;
+    }
+    return response(cmd, state);
+  }
   if (cmd.type === 'get_messages') return response(cmd, { messages: session.messages });
   if (cmd.type === 'clear_queue') return response(cmd);
-  if (cmd.type === 'abort') { clearTimeout(settling); active = false; finish('ABORTED', 'aborted'); return response(cmd); }
+  if (cmd.type === 'abort') {
+    if (process.argv.includes('--ignore-interrupt')) return;
+    if (process.argv.includes('--ack-interrupt-only')) return response(cmd);
+    clearTimeout(settling); finish('ABORTED', 'aborted'); return response(cmd);
+  }
   if (cmd.type === 'extension_ui_response') {
+    if (independentDialogs.has(cmd.id)) {
+      const onReply = independentDialogs.get(cmd.id); independentDialogs.delete(cmd.id);
+      (session.fixtureReplies ??= []).push(cmd); save(); onReply(cmd); return;
+    }
     if (dialogs.has(cmd.id)) { const resolve=dialogs.get(cmd.id); dialogs.delete(cmd.id); resolve(cmd.cancelled ? undefined : cmd.value); return; }
     if (!question || cmd.id !== 'permission-1') throw new Error('wrong UI response');
     question = false; return finish(cmd.cancelled ? 'CANCELLED' : cmd.value ?? (cmd.confirmed ? 'ALLOW' : 'DENY'));
@@ -63,6 +91,10 @@ function handle(cmd) {
   active = true; response(cmd); emit({ type: 'agent_start' });
   if (cmd.message.startsWith('HOLD')) return;
   if (cmd.message === 'ASK_PARENT') { void askParent().catch(error=>finish(error.message,'error')); return; }
+  if (cmd.message === 'RUNTIME_UI') {
+    independentDialog({ id: 'runtime-dialog', method: 'confirm', title: 'Independent fixture configuration' });
+    return finish('original-result');
+  }
   if (cmd.message === 'STREAM') {
     emit({ type: 'message_start', message: { role: 'assistant', content: [] } });
     emit({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', contentIndex: 0, delta: 'Inspecting implementation' } });

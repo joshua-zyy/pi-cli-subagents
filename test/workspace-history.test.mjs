@@ -18,9 +18,16 @@ function setup(t) {
   const home = path.join(cwd, 'home'); fs.mkdirSync(home); fs.writeFileSync(path.join(home, 'fixture-home'), '');
   const codexLaunch = { command: process.execPath, args: [codex] };
   const m = new AgentManager(path.join(cwd, 'parent.jsonl'), { command: process.execPath, args: [pi] }, { launch: codexLaunch, home });
-  const release = (id, phase = 'completed') => waitUntil('workspace history owner release', () => {
-    const s = m.get(id); return s.phase === phase && !fs.existsSync(path.join(m.root, id, 'owner.lock')) ? s : undefined;
-  }, 12000);
+  const release = async (id, status = 'completed') => {
+    const result = await waitUntil('workspace history run result', () => {
+      const s = m.get(id); return ['idle', 'closed'].includes(s.phase) ? s : undefined;
+    }, 12000);
+    assert.equal(result.lastStatus, status);
+    const closed = await m.close(id);
+    assert.equal(closed.phase, 'closed'); assert.equal(closed.lastStatus, status);
+    assert.equal(fs.existsSync(path.join(m.root, id, 'owner.lock')), false);
+    return closed;
+  };
   t.after(async () => {
     for (const s of m.list()) if (s.runId && fs.existsSync(path.join(m.root, s.id, 'owner.lock'))) await m.close(s.id);
     assert.equal(git('rev-parse', 'HEAD'), head); assert.equal(git('show-ref'), refs);
