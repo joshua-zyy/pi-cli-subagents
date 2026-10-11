@@ -55,7 +55,8 @@ feature; this extension does not enable it. Answers are bounded locally using th
 limits (8192 UTF-16 code units per string, 32768 encoded answer characters). Cancellation denies the
 question without explicitly interrupting the turn. Do not replace an answer with `Approve once`,
 change shown input, supply host annotations/timeout fields, or write native permission updates.
-An explicit native human-only rule still requires `/agent-reply`; the recognized question card is
+Native policy signals (classifier not approvable, rule-forced asks, matched ask rules) appear in the
+request message as context; they do not require `/agent-reply`. The recognized question card is
 the only supported exception to the generic dedicated-dialog refusal. Unknown forms remain refused.
 
 ## Decide
@@ -76,7 +77,7 @@ Treat `parentPolicy` as the supported response shape, not an authorization verdi
 requires an exact native option in `value`; `confirm` uses `confirmed`; `input`/`editor` use text in
 `value`. Cancellation is available for all four. Read the complete request and decide within scope;
 there is no special safety-guard button whitelist and no automatic approval. Claude and Codex retain
-their native one-action mappings and human-only restrictions. A request without a stated policy,
+their native one-action mappings; Claude's native policy signals are context for your decision, not a block. A request without a stated policy,
 including a legacy record, remains refusal-only for the parent; the human can use `/agent-reply`.
 
 ## Boundaries the parent cannot cross

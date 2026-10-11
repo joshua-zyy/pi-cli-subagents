@@ -106,20 +106,19 @@ test('Claude public query and parent reply preserve the native task, report fiel
   await assert.rejects(invoke('subagent_reply',{...reply,answers}),/ended|exist|exited|finished/i);
 });
 
-test('Claude native rule-forced questions reject the parent but accept one complete human form', {timeout:20000}, async t=>{
+test('Claude native rule-forced questions show the signal to the parent and still accept one complete human form', {timeout:20000}, async t=>{
   const {m,cwd,parent,done}=setup(t);let multiPrompts=0;
   const {ctx,commands,notices,messages}=publicApi(parent,cwd,{
     select:async(title,options)=>{
-      assert.match(title,/human/i);
+      assert.doesNotMatch(title,/Human response required/);
       if(title.includes('Which checks?'))return options[0];
       assert.match(title,/Which outputs/);return multiPrompts++===0?options[0]:options.find(value=>/^\d+\. Finish selection\./.test(value));
     },
     input:async title=>title.includes('What marker?')?'HUMAN-CONTEXT':'4',
   });
   const child=await m.spawn('claude',role,cwd,'QUESTION_RULE');
-  const q=await waitUntil('native manual form',()=>m.get(child.id).questions[0]);assert.equal(q.humanOnly,true);
-  const answers=Object.fromEntries(q.fields.map(field=>[field.id,[]]));
-  await assert.rejects(m.reply(child.id,q.id,{answers},{actor:'parent',reason:'Would bypass the user rule'}),/human/i);
+  const q=await waitUntil('native rule-forced form',()=>m.get(child.id).questions[0]);
+  assert.notEqual(q.humanOnly,true);assert.deepEqual(q.parentPolicy,{answers:true});
   await commands.get('agent-reply').handler(`${child.id} ${q.id}`,ctx);const result=await done(child.id);
   assert.deepEqual(JSON.parse(result.text),{'Which checks?':'Read, write','Which outputs?':['Logs'],'What marker?':'HUMAN-CONTEXT','How many items?':'4'});
   assert(notices.some(message=>/Human response accepted/.test(message)));
@@ -128,14 +127,14 @@ test('Claude native rule-forced questions reject the parent but accept one compl
   assert.equal(audit.length,1);assert.equal(audit[0].actor,'human');assert.equal(audit[0].decision,'answered');
 });
 
-test('Claude parent/human decisions are scoped and audited; close retains native history', {timeout:25000}, async t=>{
+test('Claude parent decisions on signalled approvals are scoped and audited; close retains native history', {timeout:25000}, async t=>{
   const {m,cwd,done}=setup(t);
   const child=await m.spawn('claude',role,cwd,'APPROVAL_MANUAL');
   const waiting=await waitUntil('Claude waiting',()=>{const s=m.get(child.id);return s.questions.length?s:undefined;});const q=waiting.questions[0];
-  await assert.rejects(m.reply(child.id,q.id,{value:'Approve once'},{actor:'parent',reason:'task scope'}),/human/);
-  await m.reply(child.id,q.id,{value:'Approve once'},{actor:'human'});const finished=await done(child.id);assert.equal(finished.text,'ALLOW');
+  assert.notEqual(q.humanOnly,true);assert.deepEqual(q.parentPolicy,{values:['Deny once','Approve once','Cancel turn']});
+  await m.reply(child.id,q.id,{value:'Approve once'},{actor:'parent',reason:'task scope'});const finished=await done(child.id);assert.equal(finished.text,'ALLOW');
   const audit=fs.readFileSync(path.join(m.root,child.id,'runs',finished.runId,'permissions.jsonl'),'utf8').trim().split('\n').map(JSON.parse);
-  assert.equal(audit.length,1);assert.equal(audit[0].actor,'human');assert.equal(audit[0].selectedOption,'Approve once');
+  assert.equal(audit.length,1);assert.equal(audit[0].actor,'parent');assert.equal(audit[0].reason,'task scope');assert.equal(audit[0].selectedOption,'Approve once');
   const held=await m.spawn('claude',role,cwd,'HOLD');await assert.rejects(m.send(held.id,'steer'),/steer.*not supported/);
   await m.close(held.id);const stopped=await done(held.id,'stopped');assert(stopped.sessionId);assert.equal(stopped.forced,false);
   await m.send(held.id,'RECALL');assert.equal((await done(held.id)).sessionId,stopped.sessionId);

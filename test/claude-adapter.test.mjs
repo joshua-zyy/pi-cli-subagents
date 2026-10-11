@@ -159,18 +159,18 @@ test('Claude approvals preserve exact input and never write persistent permissio
   assert(replies.every(r => !('updatedPermissions' in r.response.response)));
 });
 
-test('Claude manual approval cannot be supplied by parent; unsafe, duplicate and expired requests fail closed', async t => {
+test('Claude native policy signals stay visible but do not block the parent; unsafe, duplicate and expired requests fail closed', async t => {
   const {client, requests} = setup(t); const manual = client(); await manual.c.ready(); await manual.c.start('APPROVAL_MANUAL');
-  const q = await question(manual.events); assert.equal(q.humanOnly, true);
-  await assert.rejects(manual.c.reply({type:'reply', id:q.id, value:'Approve once', actor:'parent'}), /human/i);
-  await manual.c.reply({type:'reply', id:q.id, value:'Deny once', actor:'parent'}); await terminal(manual.events); await manual.c.end();
+  const q = await question(manual.events); assert.notEqual(q.humanOnly, true);
+  assert.match(q.message, /^Native policy signals: classifier not approvable\./); assert.deepEqual(q.parentPolicy, { values: ['Deny once', 'Approve once', 'Cancel turn'] });
+  await manual.c.reply({type:'reply', id:q.id, value:'Approve once', actor:'parent'}); assert.equal((await terminal(manual.events)).text, 'ALLOW'); await manual.c.end();
   for (const task of ['APPROVAL_DIALOG', 'APPROVAL_UNSCOPED', 'APPROVAL_NO_NAME', 'APPROVAL_DUPLICATE', 'APPROVAL_EXPIRED']) {
     const {c, events} = client(); await c.ready(); await c.start(task);
     const result = await terminal(events); assert.equal(result.status, task === 'APPROVAL_EXPIRED' ? 'completed' : 'failed');
     for (const e of events.filter(e=>e.type==='question')) await assert.rejects(c.reply({type:'reply', id:e.question.id, value:'Approve once'}), /pending|answered/i);
     await c.stop();
   }
-  assert(!requests().some(r=>r.response?.response?.behavior==='allow'));
+  assert.equal(requests().filter(r=>r.response?.response?.behavior==='allow').length, 1, 'only the parent-approved manual request was allowed');
 });
 
 test('Claude AskUserQuestion returns one correlated structured answer, never a blanket approval', async t => {
@@ -200,13 +200,14 @@ test('Claude AskUserQuestion returns one correlated structured answer, never a b
   assert.equal(events.filter(e=>e.type==='resolved'&&e.id===q.id).length,1);
 });
 
-test('Claude task forms preserve native human-only limits while cancellation denies only the question', async t => {
+test('Claude task forms surface native policy signals as context, stay parent-answerable, and cancellation denies only the question', async t => {
   const {client,requests} = setup(t);
-  for(const task of ['QUESTION_MANUAL','QUESTION_RULE','QUESTION_REASON_RULE']) {
+  const signals = {QUESTION_MANUAL:'classifier not approvable',QUESTION_RULE:'matched ask rule',QUESTION_REASON_RULE:'decision reason: rule'};
+  for(const task of Object.keys(signals)) {
     const {c,events} = client(); await c.ready(); await c.start(task); const q = await taskQuestion(events);
-    assert.equal(q.humanOnly,true); assert.notEqual(q.parentPolicy?.answers,true);
-    await assert.rejects(c.reply({type:'reply',id:q.id,answers:skipped(q),actor:'parent'}),/human/i);
-    if(task==='QUESTION_MANUAL') await c.reply({type:'reply',id:q.id,answers:skipped(q),actor:'human'});
+    assert.notEqual(q.humanOnly,true); assert.deepEqual(q.parentPolicy,{answers:true});
+    assert.match(q.message,new RegExp('^Native policy signals: '+signals[task]+'\\.'));
+    if(task==='QUESTION_MANUAL') await c.reply({type:'reply',id:q.id,answers:skipped(q),actor:'parent'});
     else await c.reply({type:'reply',id:q.id,cancelled:true,actor:'parent'});
     const result = await terminal(events); assert.equal(result.status,'completed');
     if(task!=='QUESTION_MANUAL') assert.equal(result.text,'QUESTION_CANCELLED'); await c.end();
@@ -215,7 +216,7 @@ test('Claude task forms preserve native human-only limits while cancellation den
   assert.equal(replies.length,3); assert.equal(replies.filter(r=>r.behavior==='allow').length,1);
   for(const task of ['QUESTION_HOOK','QUESTION_MODE']) {
     const {c,events}=client();await c.ready();await c.start(task);const q=await taskQuestion(events);
-    assert.notEqual(q.humanOnly,true,'a reason category alone is not proof of a native human-only restriction');
+    assert.notEqual(q.humanOnly,true); assert.doesNotMatch(q.message,/Native policy signals/,'a reason category alone is not a native policy signal');
     await c.reply({type:'reply',id:q.id,answers:skipped(q),actor:'parent'});
     assert.equal((await terminal(events)).status,'completed');await c.end();
   }

@@ -52,7 +52,7 @@ export function inspectClaudeSession(spec: AgentSpec, session: ClaudeSession): s
   return files[0];
 }
 
-type Approval = { id: string; requestId: string; toolId: string; input: Json; messageId: string; humanOnly: boolean; attempted: boolean; fields?: QuestionField[] };
+type Approval = { id: string; requestId: string; toolId: string; input: Json; messageId: string; attempted: boolean; fields?: QuestionField[] };
 /** Native stream-json stays inside this adapter; the worker retains ownership and audit. */
 export class ClaudeAdapter implements CliAdapter {
   readonly resident = false;
@@ -235,18 +235,19 @@ export class ClaudeAdapter implements CliAdapter {
       this.fail(new Error("Claude interaction is unsupported, unscoped or requires a dedicated user dialog; not approved")); return;
     }
     this.seenRequests.add(requestId);
-    const humanOnly = p.classifier_approvable === false || p.decision_reason_type === "rule" || p.matched_ask_rule != null;
-    const approval: Approval = { id: randomUUID(), requestId, toolId: p.tool_use_id, input: structuredClone(p.input), messageId: this.activeMessage!, humanOnly, attempted: false, ...(fields ? { fields } : {}) };
+    // Native policy signals are context for the parent's in-scope decision, not a human-only block:
+    // neither Paseo nor Lody reserves such requests for a human (decision recorded in the port plan §8.4).
+    const signals = [p.classifier_approvable === false && "classifier not approvable", p.decision_reason_type === "rule" && "decision reason: rule",
+      p.matched_ask_rule != null && "matched ask rule"].filter((s): s is string => typeof s === "string");
+    const hint = signals.length ? `Native policy signals: ${signals.join("; ")}. Decide within the user's authorization; escalate when unclear.\n` : "";
+    const approval: Approval = { id: randomUUID(), requestId, toolId: p.tool_use_id, input: structuredClone(p.input), messageId: this.activeMessage!, attempted: false, ...(fields ? { fields } : {}) };
     this.approvals.set(approval.id, approval);
     if (fields) {
       this.emit({ type: "question", question: { id: approval.id, method: "form", kind: "question", title: p.input.title || "Claude task questions", fields,
-        message: `${humanOnly ? "Human response required by native policy; the parent may only cancel.\n" : "Answers supply task context, not permission to take new actions.\n"}${details}`,
-        parentPolicy: humanOnly ? {} : { answers: true }, ...(humanOnly ? { humanOnly: true } : {}) } });
+        message: `${hint}Answers supply task context, not permission to take new actions.\n${details}`, parentPolicy: { answers: true } } });
     } else {
       const options = ["Deny once", "Approve once", "Cancel turn"];
-      this.emit({ type: "question", question: { id: approval.id, method: "select", title: "Approve one Claude tool call?",
-        message: `${humanOnly ? "Human approval required; the parent may only deny or cancel.\n" : ""}${details}`, options,
-        parentPolicy: { values: humanOnly ? ["Deny once", "Cancel turn"] : options }, ...(humanOnly ? { humanOnly: true } : {}) } });
+      this.emit({ type: "question", question: { id: approval.id, method: "select", title: "Approve one Claude tool call?", message: `${hint}${details}`, options, parentPolicy: { values: options } } });
     }
   }
   async ready(): Promise<NativeSession> {
@@ -280,13 +281,11 @@ export class ClaudeAdapter implements CliAdapter {
     if (a.fields) {
       if (Number(answer.cancelled === true) + Number(answer.answers !== undefined) !== 1 || answer.value !== undefined || answer.confirmed !== undefined)
         throw new Error("Claude task forms require answers or cancellation, not an approval");
-      if (!answer.cancelled && a.humanOnly && answer.actor !== "human") throw new Error("This Claude request requires a human response");
       response = answer.cancelled ? { behavior: "deny", message: "Delegated-task controller declined to answer the questions", interrupt: false } :
         { behavior: "allow", updatedInput: { ...a.input, answers: claudeQuestionAnswers(a.fields, answer.answers) } };
     } else {
       if (Number(answer.cancelled === true) + Number(typeof answer.value === "string") !== 1 || answer.confirmed !== undefined || answer.answers !== undefined || answer.value !== undefined && !["Deny once", "Approve once", "Cancel turn"].includes(answer.value)) throw new Error("Claude requires one of the explicit choices offered");
       const allow = answer.value === "Approve once";
-      if (allow && a.humanOnly && answer.actor !== "human") throw new Error("This Claude request requires human approval");
       response = allow ? { behavior: "allow", updatedInput: a.input } :
         { behavior: "deny", message: "Denied by delegated-task controller", interrupt: answer.cancelled === true || answer.value === "Cancel turn" };
     }

@@ -30,7 +30,7 @@ Handle task-scoped requests yourself; do not pass routine approvals to the human
 request with `subagent_query({ action: "get", id })` when its content or policy is missing, truncated or
 stale. Follow its type and stated `parentPolicy`, not guesses. Send the answer through `subagent_reply`,
 not `subagent` send. See [references/approvals.md](references/approvals.md) for
-single-action authorization and human-only requests.
+single-action authorization and native policy signals.
 
 ## Managed worktrees
 

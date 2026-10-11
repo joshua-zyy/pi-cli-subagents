@@ -80,15 +80,15 @@ export interface Question {
   placeholder?: string;
   prefill?: string;
   expiresAt?: number;
-  /** Native policy requires a human for approval; parent denial/cancellation remains safe. */
+  /** Reserved for requests a human must answer; no backend derives it from native policy signals (port plan §8.4). */
   humanOnly?: boolean;
   /**
    * Supported parent response shapes, not proof of user authorization or single-action effects.
    * Pi dialogs expose their native choices; the parent judges scope and user-required escalation.
    * Absent policy preserves legacy refusal-only behavior (`cancelled`, or `confirmed: false`).
    * `text` permits input/editor text and custom answers for recognized logical question selects.
-   * `answers` permits a scoped Codex or Claude task form, not native MCP approval forms. Explicit
-   * human-only restrictions remain; the parent must not invent or broaden authorization.
+   * `answers` permits a scoped Codex or Claude task form, not native MCP approval forms. An explicit
+   * `humanOnly` flag remains binding; the parent must not invent or broaden authorization.
    */
   parentPolicy?: { values?: string[]; confirm?: boolean; text?: true; answers?: true };
 }
