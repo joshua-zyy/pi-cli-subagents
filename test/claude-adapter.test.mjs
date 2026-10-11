@@ -159,18 +159,31 @@ test('Claude approvals preserve exact input and never write persistent permissio
   assert(replies.every(r => !('updatedPermissions' in r.response.response)));
 });
 
-test('Claude native policy signals stay visible but do not block the parent; unsafe, duplicate and expired requests fail closed', async t => {
+test('Claude native policy signals stay visible but do not block the parent; unsupported, duplicate and expired requests are refused per request', async t => {
   const {client, requests} = setup(t); const manual = client(); await manual.c.ready(); await manual.c.start('APPROVAL_MANUAL');
   const q = await question(manual.events); assert.notEqual(q.humanOnly, true);
   assert.match(q.message, /^Native policy signals: classifier not approvable\./); assert.deepEqual(q.parentPolicy, { values: ['Deny once', 'Approve once', 'Cancel turn'] });
   await manual.c.reply({type:'reply', id:q.id, value:'Approve once', actor:'parent'}); assert.equal((await terminal(manual.events)).text, 'ALLOW'); await manual.c.end();
-  for (const task of ['APPROVAL_DIALOG', 'APPROVAL_UNSCOPED', 'APPROVAL_NO_NAME', 'APPROVAL_DUPLICATE', 'APPROVAL_EXPIRED']) {
+  for (const task of ['APPROVAL_DIALOG', 'APPROVAL_UNSCOPED', 'APPROVAL_NO_NAME']) {
     const {c, events} = client(); await c.ready(); await c.start(task);
-    const result = await terminal(events); assert.equal(result.status, task === 'APPROVAL_EXPIRED' ? 'completed' : 'failed');
-    for (const e of events.filter(e=>e.type==='question')) await assert.rejects(c.reply({type:'reply', id:e.question.id, value:'Approve once'}), /pending|answered/i);
-    await c.stop();
+    const result = await terminal(events); assert.equal(result.status, 'completed', task); assert.equal(result.text, 'DENY', task);
+    assert.equal(events.some(e=>e.type==='question'), false, task);
+    assert(events.some(e=>e.type==='activity'&&/^interaction refused: can_use_tool$/.test(e.detail)), task);
+    assert.equal(c.child.exitCode, null, 'a refused interaction must not kill the runtime'); await c.end();
   }
+  { const {c, events} = client(); await c.ready(); await c.start('APPROVAL_DUPLICATE'); const dup = await question(events);
+    assert.equal(events.filter(e=>e.type==='question').length, 1, 'a duplicate request id must not open a second question');
+    const before = requests().filter(r=>r.type==='control_response').length;
+    await c.reply({type:'reply', id:dup.id, value:'Deny once', actor:'parent'}); assert.equal((await terminal(events)).text, 'DENY');
+    assert.equal(requests().filter(r=>r.type==='control_response').length - before, 1, 'the duplicate request id receives no second response');
+    assert(events.some(e=>e.type==='activity'&&/duplicate request id ignored/.test(e.detail))); await c.end(); }
+  { const {c, events} = client(); await c.ready(); await c.start('APPROVAL_EXPIRED');
+    assert.equal((await terminal(events)).status, 'completed');
+    for (const e of events.filter(e=>e.type==='question')) await assert.rejects(c.reply({type:'reply', id:e.question.id, value:'Approve once'}), /pending|answered/i);
+    await c.stop(); }
   assert.equal(requests().filter(r=>r.response?.response?.behavior==='allow').length, 1, 'only the parent-approved manual request was allowed');
+  const refusals = requests().filter(r=>r.response?.response?.behavior==='deny'&&/not approved by the delegated-task controller/.test(r.response.response.message));
+  assert.equal(refusals.length, 3); assert(refusals.every(r=>r.response.response.interrupt===false&&typeof r.response.response.toolUseID==='string'));
 });
 
 test('Claude AskUserQuestion returns one correlated structured answer, never a blanket approval', async t => {
@@ -223,15 +236,27 @@ test('Claude task forms surface native policy signals as context, stay parent-an
   assert(replies.filter(r=>r.behavior==='deny').every(r=>r.interrupt===false&&r.updatedInput===undefined&&r.updatedPermissions===undefined));
 });
 
-test('Claude malformed or host-owned forms never fall back to approval, and closed requests cannot be replayed', async t => {
+test('Claude malformed or host-owned forms are denied per request without approval, and closed requests cannot be replayed', async t => {
   const {client,requests} = setup(t);
-  for(const task of ['QUESTION_HOST_FIELDS','QUESTION_INVALID','QUESTION_MCP','QUESTION_BROWSER','QUESTION_OVERSIZED','QUESTION_DUPLICATE','QUESTION_EXPIRED']) {
+  for(const task of ['QUESTION_HOST_FIELDS','QUESTION_INVALID','QUESTION_MCP','QUESTION_BROWSER','QUESTION_OVERSIZED']) {
     const {c,events} = client(); await c.ready(); await c.start(task);
-    const result = await terminal(events); assert.equal(result.status,task==='QUESTION_EXPIRED'?'completed':'failed',task);
-    for(const e of events.filter(e=>e.type==='question')) await assert.rejects(c.reply({type:'reply',id:e.question.id,answers:skipped(e.question),actor:'parent'}),/pending|answered/);
-    await c.stop();
+    const result = await terminal(events); assert.equal(result.status,'completed',task); assert.equal(result.text,'QUESTION_CANCELLED',task);
+    assert.equal(events.some(e=>e.type==='question'),false,task); assert(events.some(e=>e.type==='activity'&&/^interaction refused: can_use_tool$/.test(e.detail)),task);
+    assert.equal(c.child.exitCode,null,task); await c.end();
   }
-  assert(!requests().some(r=>r.response?.response?.behavior==='allow'));
+  { const {c,events} = client(); await c.ready(); await c.start('QUESTION_DUPLICATE'); const q = await taskQuestion(events);
+    assert.equal(events.filter(e=>e.type==='question').length,1,'a duplicate request id must not open a second question');
+    const before = requests().filter(r=>r.type==='control_response').length;
+    await c.reply({type:'reply',id:q.id,answers:skipped(q),actor:'parent'}); assert.equal((await terminal(events)).status,'completed');
+    assert.equal(requests().filter(r=>r.type==='control_response').length-before,1,'the duplicate request id receives no second response');
+    assert(events.some(e=>e.type==='activity'&&/duplicate request id ignored/.test(e.detail))); await c.end(); }
+  { const {c,events} = client(); await c.ready(); await c.start('QUESTION_EXPIRED');
+    assert.equal((await terminal(events)).status,'completed');
+    for(const e of events.filter(e=>e.type==='question')) await assert.rejects(c.reply({type:'reply',id:e.question.id,answers:skipped(e.question),actor:'parent'}),/pending|answered/);
+    await c.stop(); }
+  const denials = requests().filter(r=>r.response?.response?.behavior==='deny');
+  assert.equal(denials.length,5); assert(denials.every(r=>r.response.subtype==='success'&&r.response.response.interrupt===false&&typeof r.response.response.toolUseID==='string'));
+  assert.equal(requests().filter(r=>r.response?.response?.behavior==='allow').length,1,'only the duplicate case was answered, once');
 });
 
 test('Claude simultaneous task forms keep native request IDs separate when answered in reverse order', async t => {
@@ -260,9 +285,11 @@ test('Claude uncertain question writes are attempted once and never automaticall
   } finally {c.child.stdin.write=write;await c.stop();}
 });
 
-test('Claude early unscoped approval, malformed stdout and process death are not completions', async t => {
+test('Claude early unscoped approval is denied without aborting startup; malformed stdout and process death are not completions', async t => {
   const {client} = setup(t);
-  const early = client(undefined, ['--early-approval']); await assert.rejects(early.c.ready(), /interaction|scope|failed/i); await early.c.stop();
+  const early = client(undefined, ['--early-approval']); await early.c.ready();
+  assert.equal(early.events.some(e=>e.type==='question'||e.type==='settled'),false); assert(early.events.some(e=>e.type==='activity'&&/^interaction refused: can_use_tool$/.test(e.detail)));
+  await early.c.stop();
   for (const task of ['NOISE', 'CRASH']) {
     const {c, events} = client(); await c.ready(); await assert.rejects(c.start(task), /JSON|exited|record/i);
     assert(!events.some(e=>e.type==='settled' && e.status==='completed')); await c.stop();

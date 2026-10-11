@@ -229,10 +229,19 @@ export class ClaudeAdapter implements CliAdapter {
     if (!scoped || isTaskQuestion && !fields ||
       p.requires_user_interaction !== undefined && typeof p.requires_user_interaction !== "boolean" || p.requires_user_interaction === true && !fields ||
       p.classifier_approvable !== undefined && typeof p.classifier_approvable !== "boolean" || details.length > 12_000) {
-      // Only the built-in, fully decoded question card can satisfy requires_user_interaction.
-      // Other dedicated/local-only dialogs still cannot be approved over this wire.
-      void this.write({ type: "control_response", response: { subtype: "error", request_id: requestId, error: "Unsupported or unscoped interaction; open the original Claude session to inspect" } }).catch(() => {});
-      this.fail(new Error("Claude interaction is unsupported, unscoped or requires a dedicated user dialog; not approved")); return;
+      // Refuse this interaction alone and keep the turn running: Lody cancels per request and a
+      // Paseo deny leaves the turn alive (port plan §8.4). Only transport/identity corruption stays fatal.
+      const validId = typeof requestId === "string" && requestId.trim() !== "";
+      const duplicate = validId && this.seenRequests.has(requestId);
+      if (validId && !duplicate) {
+        this.seenRequests.add(requestId);
+        const canUseTool = object(p) && p.subtype === "can_use_tool";
+        void this.write({ type: "control_response", response: canUseTool
+          ? { subtype: "success", request_id: requestId, response: { behavior: "deny", message: "Unsupported, unscoped or oversized interaction; not approved by the delegated-task controller", interrupt: false, ...(typeof p.tool_use_id === "string" ? { toolUseID: p.tool_use_id } : {}) } }
+          : { subtype: "error", request_id: requestId, error: "Unsupported control request" } }).catch(() => {});
+      }
+      this.emit({ type: "activity", detail: `interaction refused: ${object(p) && typeof p.subtype === "string" ? p.subtype : "control_request"}${duplicate ? " (duplicate request id ignored)" : ""}` });
+      return;
     }
     this.seenRequests.add(requestId);
     // Native policy signals are context for the parent's in-scope decision, not a human-only block:

@@ -84,7 +84,8 @@ including a legacy record, remains refusal-only for the parent; the human can us
 
 - A response outside the request's stated policy cannot be approved by the parent. Prefer the offered
   one-action choice when it covers the authorized work; missing authorization must be resolved by the user.
-- Unrecognized dedicated native dialogs and unscoped requests fail closed. A refusal is not something to work around
+- Unrecognized dedicated native dialogs and unscoped requests are refused per request with a native deny or
+  cancel while the turn continues; the child sees the refusal and reports. A refusal is not something to work around
   with a raw `cwd`, a replacement instance or a hand-edited record.
 - Native permission requests from Pi, Codex and Claude Code offer their own choice values, including
   `Deny once`, `Approve once` and `Cancel turn`. Respond with an **exact offered value**.

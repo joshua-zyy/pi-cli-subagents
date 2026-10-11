@@ -348,7 +348,7 @@ test('Codex distinguishes callbacks with the same itemId and rejects duplicate/e
   assert.deepEqual(requests().filter(r => !r.method && r.result?.decision).map(r => r.id), [18, 17]);
 });
 
-test('Codex auto-resolved approval cannot be answered, unsupported or broad approvals fail closed', async t => {
+test('Codex auto-resolved approval cannot be answered; unsupported or broad approvals are declined per request and the turn continues', async t => {
   const { client, requests } = setup(t);
   const auto = client(); await auto.c.ready(); await auto.c.start('APPROVAL_AUTO_RESOLVE');
   const q = await waitUntil('auto approval', () => auto.events.find(e => e.type === 'question')?.question);
@@ -357,26 +357,28 @@ test('Codex auto-resolved approval cannot be answered, unsupported or broad appr
   assert.equal((await settled(auto.events)).text, 'AUTO-RESOLVED'); await auto.c.end();
   for (const task of ['APPROVAL_NO_DETAILS', 'APPROVAL_FILE_GRANT_ROOT', 'APPROVAL_WRITE_STDIN', 'APPROVAL_WRONG_SCOPE', 'APPROVAL_EXTRA_PERMISSIONS', 'APPROVAL_EXTRA_PERMISSIONS_NETWORK', 'APPROVAL_ONLY_SESSION']) {
     const { c, events } = client(); await c.ready(); await c.start(task);
-    assert.equal((await settled(events)).status, 'failed', task);
+    const result = await settled(events); assert.equal(result.status, 'completed', task); assert.equal(result.text, 'DENY', task);
     assert.equal(events.some(e => e.type === 'question'), false, task);
-    await c.stop();
+    assert(events.some(e => e.type === 'activity' && /^interaction refused: item\/(commandExecution|fileChange)\/requestApproval$/.test(e.detail)), task);
+    assert.equal(c.child.exitCode, null, `${task}: a refused approval must not release the runtime`); await c.end();
   }
-  assert.ok(!requests().some(r => r.result?.decision === 'accept'));
+  const written = requests().filter(r => !r.method && r.result?.decision);
+  assert.equal(written.filter(r => r.result.decision === 'decline').length, 7, 'every refused approval received a native decline');
+  assert.ok(!written.some(r => r.result.decision === 'accept'));
 });
 
-test('Codex rejects approvals without a valid active turn even when both IDs match', async t => {
+test('Codex declines approvals without a valid active turn and keeps the runtime usable', async t => {
   const { client, requests } = setup(t);
   for (const params of [{}, { activeTurnId: '', turnId: '' }, { activeTurnId: ' ', turnId: ' ' },
     { activeTurnId: 'valid-turn' }, { activeTurnId: 'valid-turn', turnId: '' }, { activeTurnId: 'valid-turn', turnId: 'foreign' }]) {
-    const { c, events } = client(); await c.ready();
+    const { c, events } = client(); await c.ready(); const before = requests().filter(r => r.id === 17 && !r.method).length;
     c.child.stdin.write(JSON.stringify({ method: 'fixture/approvalScope', params }) + '\n');
-    const event = await waitUntil('approval rejected or exposed', () => events.find(e => e.type === 'settled' || e.type === 'question'));
-    assert.equal(event.type, 'settled', JSON.stringify(params));
-    assert.equal(event.status, 'failed');
-    assert.equal(events.some(e => e.type === 'question'), false);
-    await c.end();
+    await waitUntil('scope refusal written', () => requests().filter(r => r.id === 17 && !r.method).length === before + 1);
+    assert(events.some(e => e.type === 'activity' && e.detail === 'interaction refused: item/commandExecution/requestApproval'), JSON.stringify(params));
+    assert.equal(events.some(e => e.type === 'question' || e.type === 'settled'), false, JSON.stringify(params));
+    assert.equal(c.child.exitCode, null); await c.end();
   }
-  assert.ok(requests().filter(r => r.id === 17 && !r.method).every(r => r.error), 'unscoped requests receive no approval decision');
+  assert.ok(requests().filter(r => r.id === 17 && !r.method).every(r => r.result?.decision === 'decline'), 'unscoped approvals receive a native decline, never an acceptance');
 });
 
 test('Codex rechecks malformed pending scope before writing an approval response', async t => {
@@ -446,10 +448,12 @@ test('Codex does not reclassify MCP approval forms or action-owned input as task
   for (const task of ['QUESTION_MCP_APPROVAL', 'QUESTION_MCP_ITEM']) {
     const { c, events } = client(); await c.ready(); await c.start(task);
     assert.equal(events.some(e => e.type === 'question'), false, 'do not publish agent-answerable approval forms');
-    assert.equal((await settled(events)).status, 'failed'); await c.stop();
+    const result = await settled(events); assert.equal(result.status, 'completed', task); assert.equal(result.text, '{}', task);
+    assert(events.some(e => e.type === 'activity' && e.detail === 'interaction refused: item/tool/requestUserInput'), task);
+    assert.equal(c.child.exitCode, null, task); await c.end();
   }
   const replies = requests().filter(r => !r.method);
-  assert.equal(replies.length, 2); assert(replies.every(r => r.error && !r.result), 'neither answer maps nor permission grants reach the CLI');
+  assert.equal(replies.length, 2); assert(replies.every(r => !r.error && JSON.stringify(r.result) === '{"answers":{}}'), 'an empty answer set reaches the CLI; no answer maps or permission grants');
 });
 
 test('Codex MCP prefix approvals expose only single-action choices and return one correlated native answer', async t => {
@@ -484,15 +488,16 @@ test('Codex MCP prefix approvals expose only single-action choices and return on
   assert.equal(fs.existsSync(path.join(home, 'mcp-grants.jsonl')), false);
 });
 
-test('Codex MCP prefix approvals reject foreign, old, missing or completed call associations', async t => {
+test('Codex MCP prefix approvals with foreign, old, missing or completed call associations are cancelled natively, never approved', async t => {
   const { client, requests } = setup(t);
   for (const suffix of ['WRONG_THREAD', 'WRONG_TURN', 'WRONG_ITEM', 'WRONG_KEY', 'MISSING_ITEM', 'COMPLETED_ITEM', 'OLD_ITEM', 'NONBLOCKING']) {
     const { c, events } = client(); await c.ready(); await c.start(`MCP_APPROVAL_${suffix}`);
     assert.equal(events.some(e => e.type === 'question'), false, suffix);
-    assert.equal((await settled(events)).status, 'failed', suffix);
-    await c.stop();
+    const result = await settled(events); assert.equal(result.status, 'stopped', suffix); assert.equal(result.text, 'MCP:Cancel', suffix);
+    assert(events.some(e => e.type === 'activity' && /^interaction refused: (item\/)?tool\/requestUserInput$/.test(e.detail)), suffix);
+    assert.equal(c.child.exitCode, null, suffix); await c.end();
   }
-  assert.ok(requests().filter(r => !r.method).every(r => r.error && !r.result));
+  assert.ok(requests().filter(r => !r.method).every(r => !r.error && JSON.stringify(r.result) === '{"answers":{}}'), 'an empty answer set is the native abort; no acceptance reaches the CLI');
 });
 
 test('Codex MCP prefix approval rechecks the captured action before sending', async t => {
@@ -552,14 +557,16 @@ test('Codex MCP elicitation approves or refuses only one scoped action without p
   assert.equal(fs.existsSync(path.join(home, 'elicitation-grants.jsonl')), false);
 });
 
-test('Codex MCP elicitation refuses ambiguous scope, other kinds, data forms and URLs', async t => {
+test('Codex MCP elicitation with ambiguous scope, other kinds, data forms or URLs is cancelled natively, never accepted', async t => {
   const { client, requests } = setup(t);
   for (const suffix of ['WRONG_THREAD', 'WRONG_TURN', 'NULL_TURN', 'WRONG_SERVER', 'MISSING_ITEM', 'COMPLETED_ITEM', 'AMBIGUOUS', 'NO_META', 'SUGGESTION', 'DATA_FORM', 'URL']) {
     const { c, events } = client(); await c.ready(); await c.start(`MCP_ELICIT_${suffix}`);
     assert.equal(events.some(e => e.type === 'question'), false, suffix);
-    assert.equal((await settled(events)).status, 'failed', suffix); await c.stop();
+    const result = await settled(events); assert.equal(result.status, 'stopped', suffix); assert.equal(result.text, 'ELICITATION:cancel', suffix);
+    assert(events.some(e => e.type === 'activity' && e.detail === 'interaction refused: mcpServer/elicitation/request'), suffix);
+    assert.equal(c.child.exitCode, null, suffix); await c.end();
   }
-  assert.ok(requests().filter(r => !r.method).every(r => r.error && !r.result));
+  assert.ok(requests().filter(r => !r.method).every(r => !r.error && JSON.stringify(r.result) === '{"action":"cancel","content":null,"_meta":null}'), 'a native cancel reaches the CLI; no acceptance or persistence');
 });
 
 test('Codex MCP elicitation rechecks the action and never replays expired or uncertain replies', async t => {

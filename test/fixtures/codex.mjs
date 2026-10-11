@@ -222,16 +222,19 @@ function handle(cmd) {
       const answers = cmd.result?.answers;
       if (question.mcpQuestionId) {
         const selected = answers?.[question.mcpQuestionId]?.answers;
-        if (!answers || Object.keys(cmd.result).length !== 1 || Object.keys(answers).length !== 1 ||
-          !Array.isArray(selected) || selected.length !== 1 || !['Allow', 'Allow for this session', "Allow and don't ask me again", 'Cancel'].includes(selected[0])) throw Error('Malformed native MCP approval answer');
-        if (selected[0] !== 'Cancel') {
+        // Native parse_mcp_tool_approval_response treats a missing answer as ReviewDecision::Abort, i.e. Cancel.
+        const empty = answers && typeof answers === 'object' && !Array.isArray(answers) && Object.keys(answers).length === 0 && Object.keys(cmd.result).length === 1;
+        if (!empty && (!answers || Object.keys(cmd.result).length !== 1 || Object.keys(answers).length !== 1 ||
+          !Array.isArray(selected) || selected.length !== 1 || !['Allow', 'Allow for this session', "Allow and don't ask me again", 'Cancel'].includes(selected[0]))) throw Error('Malformed native MCP approval answer');
+        const decision = empty ? 'Cancel' : selected[0];
+        if (decision !== 'Cancel') {
           const effect = path.join(home, 'mcp-effect.txt');
           fs.writeFileSync(effect, String((fs.existsSync(effect) ? Number(fs.readFileSync(effect, 'utf8')) : 0) + 1));
-          if (selected[0] !== 'Allow') fs.appendFileSync(path.join(home, 'mcp-grants.jsonl'), JSON.stringify(selected[0]) + '\n');
+          if (decision !== 'Allow') fs.appendFileSync(path.join(home, 'mcp-grants.jsonl'), JSON.stringify(decision) + '\n');
         }
         if (!process.argv.includes('--no-resolved')) {
           notify('serverRequest/resolved', { threadId: thread.id, requestId: question.id }); questions.delete(key);
-          finish(`MCP:${selected[0]}`, selected[0] === 'Cancel' ? 'interrupted' : 'completed');
+          finish(`MCP:${decision}`, decision === 'Cancel' ? 'interrupted' : 'completed');
         }
         return;
       }

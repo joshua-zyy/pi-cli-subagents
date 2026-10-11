@@ -32,7 +32,6 @@ export class CodexAdapter implements CliAdapter {
   private exitError?: Error;
   private forced = false;
   private ending = false;
-  private failed = false;
   private activeTurn?: string;
   private run?: { runId?: string; settled: boolean; done: Promise<void>; resolve: () => void };
   private starting?: Promise<void>;
@@ -177,7 +176,7 @@ export class CodexAdapter implements CliAdapter {
       this.activeTurn = undefined;
       run.resolve();
       this.completion = this.completion.then(async () => {
-        if (this.ending || this.failed || this.run !== run) return;
+        if (this.ending || this.run !== run) return;
         const ids = new Set([...this.textByItem.keys(), ...this.completedItems.keys()]);
         const text = this.finalAnswerId ? this.completedItems.get(this.finalAnswerId) ?? "" :
           [...ids].filter(id => !this.asyncMessageIds.has(id)).map(id => this.completedItems.get(id) ?? this.textByItem.get(id) ?? "").join("\n");
@@ -193,7 +192,7 @@ export class CodexAdapter implements CliAdapter {
             result = (final.length ? final : messages).map((item: RecordValue) => item.text).join("\n");
           } catch (error) { this.emit({ type: "settled", status: "failed", text: "", error: `Could not verify Codex's empty completion: ${(error as Error).message}` }, run); return; }
         }
-        if (this.ending || this.failed || this.run !== run) return;
+        if (this.ending || this.run !== run) return;
         const status = turn.status === "completed" ? "completed" : turn.status === "interrupted" ? "stopped" : "failed";
         this.emit({ type: "settled", status, text: result, ...(status === "failed" ? { error: String(turn.error?.message ?? `Codex turn status: ${turn.status}`) } : {}) });
       }).catch(error => this.emit({ type: "settled", status: "failed", text: "", error: (error as Error).message }, run));
@@ -219,7 +218,6 @@ export class CodexAdapter implements CliAdapter {
   }
 
   private async serverRequest(record: RecordValue): Promise<void> {
-    const run = this.run;
     const rpcId = record.id;
     const command = record.method === "item/commandExecution/requestApproval";
     const file = record.method === "item/fileChange/requestApproval";
@@ -227,7 +225,7 @@ export class CodexAdapter implements CliAdapter {
     const item = object(p) ? this.approvalItems.get(p.itemId) : undefined;
     const turnScope = this.activeTurn?.trim() && this.thread && object(p) && p.threadId === this.thread.threadId && p.turnId === this.activeTurn;
     const scope = turnScope && typeof p.itemId === "string";
-    const openRequest = !this.failed && !this.ending && (typeof rpcId === "string" || Number.isSafeInteger(rpcId)) && !this.approvalByRpcId.has(requestKey(rpcId));
+    const openRequest = !this.ending && (typeof rpcId === "string" || Number.isSafeInteger(rpcId)) && !this.approvalByRpcId.has(requestKey(rpcId));
     // Form elicitation has no itemId. Only one live call on the named server may match;
     // never pick the first/last call when concurrent calls make attribution ambiguous.
     if (record.method === "mcpServer/elicitation/request" && turnScope && openRequest) {
@@ -280,9 +278,12 @@ export class CodexAdapter implements CliAdapter {
       details = `File changes:\n${item.changes.map((change: RecordValue) => `${JSON.stringify(change.kind)}: ${change.path}\n${change.diff}`).join("\n")}\nReason: ${String(p.reason ?? "Not provided")}`;
     if (details && scope && command && p.networkApprovalContext) details += `\nNetwork context: ${JSON.stringify(p.networkApprovalContext)}`;
     if (!scope || !(command || file) || !details || details.length > 12_000 || !(typeof rpcId === "string" || Number.isSafeInteger(rpcId)) || this.approvalByRpcId.has(requestKey(rpcId))) {
-      await this.write({ id: rpcId, ...(scope && (command || file) && (!command || !object(p) || p.availableDecisions == null || decisions?.includes("decline"))
-        ? { result: { decision: "decline" } } : { error: { code: -32601, message: "Unsupported or unscoped interaction" } }) }).catch(() => {});
-      if (this.run === run) this.rejectInteraction(`Codex interaction ${record.method} is not supported or lacks reviewable action details; not approved`);
+      // Refuse this request alone with a protocol-valid answer and keep the turn: Lody cancels per
+      // request and a Paseo deny leaves the turn running (port plan §8.4). Transport faults stay fatal.
+      const addressable = typeof rpcId === "string" || Number.isSafeInteger(rpcId);
+      const duplicate = addressable && this.approvalByRpcId.has(requestKey(rpcId));
+      if (addressable && !duplicate) await this.write({ id: rpcId, ...this.refusal(record.method, decisions) }).catch(() => {});
+      this.emit({ type: "activity", detail: `interaction refused: ${String(record.method)}${duplicate ? " (duplicate request id ignored)" : ""}` });
       return;
     }
     const id = randomUUID();
@@ -296,10 +297,21 @@ export class CodexAdapter implements CliAdapter {
       // Codex offers a one-time accept, a decline and a cancel; its session-wide decision is never sent.
       ...(cancelOnly ? { options: ["Approve once", "Cancel turn"], parentPolicy: { values: ["Approve once", "Cancel turn"] } } : { parentPolicy: { confirm: true } }) } });
   }
-  private rejectInteraction(error: string): void {
-    if (this.failed || this.ending) return;
-    this.failed = true;
-    this.emit({ type: "settled", status: "failed", text: "", error, stop: true });
+  /** Protocol-valid refusal for a server request this adapter will not present. It never grants anything. */
+  private refusal(method: unknown, decisions: unknown[] | undefined): RecordValue {
+    const decline = !decisions || decisions.includes("decline");
+    switch (method) {
+      case "item/commandExecution/requestApproval": case "item/fileChange/requestApproval":
+        return { result: { decision: decline ? "decline" : "cancel" } };
+      case "item/permissions/requestApproval":
+        return { result: { permissions: {}, scope: "turn", strictAutoReview: false } };
+      case "item/tool/requestUserInput": case "tool/requestUserInput":
+        return { result: { answers: {} } };
+      case "mcpServer/elicitation/request":
+        return { result: { action: "cancel", content: null, _meta: null } };
+      default:
+        return { error: { code: -32601, message: `Unsupported server request: ${String(method)}` } };
+    }
   }
 
   private checkedSession(thread: RecordValue | undefined): Extract<NativeSession, { cli: "codex" }> {
@@ -321,10 +333,10 @@ export class CodexAdapter implements CliAdapter {
       const { thread } = await this.request("thread/read", { threadId: previous.threadId, includeTurns: false });
       this.checkedSession(thread);
       if (!["idle", "notLoaded"].includes(thread?.status?.type)) throw new Error("Original Codex thread is not idle or its status is unknown; inspect before syncing");
-      if (this.failed || this.exitError) throw new Error("Codex preflight failed; inspect the native event log");
+      if (this.exitError) throw new Error("Codex preflight failed; inspect the native event log");
     } finally {
       const result = await this.end();
-      if (result.forced || result.exit.code !== 0 || this.failed) throw new Error("Codex preflight did not close cleanly; no synchronization was performed");
+      if (result.forced || result.exit.code !== 0) throw new Error("Codex preflight did not close cleanly; no synchronization was performed");
     }
   }
 
@@ -345,7 +357,7 @@ export class CodexAdapter implements CliAdapter {
 
   async start(message: string, runId?: string): Promise<void> {
     if (this.poisoned) throw this.poisoned;
-    if (!this.thread || this.activeTurn || this.starting || this.closing || this.ending || this.failed || this.interrupting || this.run && !this.run.settled)
+    if (!this.thread || this.activeTurn || this.starting || this.closing || this.ending || this.interrupting || this.run && !this.run.settled)
       throw new Error("Codex is not ready for a new turn (active, closing or interrupt pending)");
     let resolve!: () => void;
     const done = new Promise<void>(r => { resolve = r; });
@@ -369,7 +381,7 @@ export class CodexAdapter implements CliAdapter {
 
   async send(message: string, mode: Delivery): Promise<void> {
     if (this.poisoned) throw this.poisoned;
-    if (this.interrupting || this.closing || this.ending || this.failed) throw new Error("Codex interrupt or shutdown pending; cannot send");
+    if (this.interrupting || this.closing || this.ending) throw new Error("Codex interrupt or shutdown pending; cannot send");
     if (mode === "followUp") throw new Error("Codex followUp while running is not supported; wait for this run to finish");
     if (!this.thread || !this.activeTurn) throw new Error("Codex has no active turn; inspect the instance before retrying");
     const expectedTurnId = this.activeTurn;
