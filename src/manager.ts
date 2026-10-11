@@ -201,7 +201,7 @@ export class AgentManager {
     if (role.defaultModeQuestions !== undefined && (role.cli !== "codex" || typeof role.defaultModeQuestions !== "boolean")) throw new Error("defaultModeQuestions requires cli: codex and a boolean");
     if (role.cli === "claude" && role.provider) throw new Error("Claude does not accept a Pi provider");
     if (role.cli === "claude" && role.thinking !== undefined && !["low", "medium", "high", "xhigh", "max"].includes(role.thinking)) throw new Error("Claude thinking must be low, medium, high, xhigh or max");
-    if (role.cli === "codex" && (!role.model || role.provider || role.thinking)) throw new Error("Codex requires an explicit model without Pi provider/thinking fields");
+    if (role.cli === "codex" && (role.provider || role.thinking)) throw new Error("Codex role does not accept Pi provider/thinking fields");
     if (role.cli !== "codex" && role.effort) throw new Error("Codex effort requires cli: codex");
     if (role.mode !== undefined) { const invalid = modeError(role.cli, role.mode); if (invalid) throw new Error(invalid); }
     const id = randomUUID(), dir = this.directory(id);

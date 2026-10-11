@@ -312,6 +312,18 @@ test('Codex cancelled/auto-resolved interactions do not remain answerable', { ti
   assert.ok(manager.reports().every(r => r.status !== 'waiting'));
 });
 
+test('Codex spawns a role without a model through the manager and inherits the native default', { timeout: 20_000 }, async t => {
+  const { cwd, home, manager, done, release } = setup(t);
+  const started = await manager.spawn('codex-worker', { ...role, model: undefined }, cwd, 'REMEMBER inherit');
+  const finished = await done(started.id);
+  assert.equal(finished.lastStatus, 'completed'); assert.equal(finished.text, 'OK'); assert.equal(finished.runCount, 1);
+  assert.equal(readJson(path.join(manager.root, started.id, 'spec.json')).role.model, undefined, 'the spec keeps the omission');
+  const threadStart = fs.readFileSync(path.join(home, 'requests.jsonl'), 'utf8').trim().split('\n').map(JSON.parse).find(r => r.method === 'thread/start');
+  assert.equal('model' in threadStart.params, false, 'no model is sent when the role omits one');
+  assert.equal('allowProviderModelFallback' in threadStart.params, false, 'fallback policy stays native');
+  await release(started.id);
+});
+
 test('Codex rejects an invalid workspace and invalid defaultModeQuestions before creating instances', async t => {
   const { cwd, manager } = setup(t);
   await assert.rejects(manager.spawn('codex-worker', role, cwd, 'DO', 'any-workspace'), /Invalid workspace/);

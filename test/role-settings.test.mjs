@@ -158,6 +158,7 @@ test('summaries describe the effective runtime without exposing the whole role',
   assert.match(roleSummary({ ...base, cli: 'claude', model: 'opus', thinking: 'max' }), /claude · opus · effort max/);
   assert.match(roleSummary({ ...base, cli: 'claude', model: 'opus', mode: 'plan' }), /claude · opus · native effort · mode plan/);
   assert.match(roleSummary({ ...base, cli: 'claude' }), /native model · native effort/);
+  assert.match(roleSummary({ ...base, cli: 'codex' }), /codex · native model · effort default/);
   assert.match(roleSummary({ ...base, cli: 'codex', model: 'gpt-6-luna', effort: 'max' }), /codex · gpt-6-luna · effort max/);
   assert.match(roleSummary({ ...base, cli: 'codex', model: 'gpt-6-luna', mode: 'full-access' }), /effort default · mode full-access/);
   assert.doesNotMatch(roleSummary({ ...base, cli: 'pi', provider: 'opencode-go' }), /· mode /, 'a Pi role never advertises a posture it cannot set');

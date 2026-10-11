@@ -189,7 +189,7 @@ export function suppressesApprovals(mode: string): boolean {
 export function roleSummary(role: Role): string {
   const cli = role.cli ?? "pi";
   const mode = role.mode ? ` · mode ${role.mode}` : "";
-  if (cli === "codex") return `codex · ${role.model ?? "model required"} · effort ${role.effort ?? "default"}${mode}`;
+  if (cli === "codex") return `codex · ${role.model ?? "native model"} · effort ${role.effort ?? "default"}${mode}`;
   if (cli === "claude") return `claude · ${role.model ?? "native model"} · ${role.thinking ? `effort ${role.thinking}` : "native effort"}${mode}`;
   return `pi · ${role.provider ?? "default provider"}/${role.model ?? "default model"} · thinking ${role.thinking ?? "off"}`;
 }
