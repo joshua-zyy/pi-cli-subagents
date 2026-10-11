@@ -39,7 +39,7 @@ pi --extension /absolute/path/to/pi-cli-subagents/dist/index.js \
 
 四个内置角色默认都使用 Pi：`explore` 调查、`worker` 实现并验证、`reviewer` 独立审查、`oracle` 提供第二意见。角色的只读指令**不等于权限沙箱**。
 
-用 **`/cli-agents-setting`** 为角色选择 CLI 和模型：**Tab** 切换用户/项目配置，**Enter** 编辑，**s** 保存，**Esc** 返回上一层；在角色列表中关闭，有未保存更改时先确认。小面板也会保留当前选中的角色、字段或选项。保存后对下一次派发生效。
+用 **`/cli-agents-setting`** 为角色选择 CLI 和模型：**Tab** 切换用户/项目配置，**Enter** 编辑，**s** 保存，**Esc** 返回上一层；在角色列表中关闭，有未保存更改时先确认。小面板也会保留当前选中的角色、字段或选项。切换角色的 CLI 会清空该角色的 provider 专属字段（model、thinking、effort、mode、defaultModeQuestions），使其继承新 CLI 的本机默认配置；重新选择同一个 CLI 则保留。保存后对下一次派发生效。
 
 也可以直接编辑角色文件：
 

@@ -39,7 +39,7 @@ Use a persistent parent session, **not `--no-session`**. Reports arrive automati
 
 All four built-in roles use Pi: `explore` investigates, `worker` implements and verifies, `reviewer` independently reviews, and `oracle` gives a second opinion. Read-only role instructions are **not a permission sandbox**.
 
-Open **`/cli-agents-setting`** to choose each role's CLI and model. **Tab** switches user/project scope, **Enter** edits, **s** saves, and **Esc** goes back one level or closes the role list (asking before discarding an unsaved draft). Selected roles, fields, and choices stay visible in short panels. Changes apply to the next spawn.
+Open **`/cli-agents-setting`** to choose each role's CLI and model. **Tab** switches user/project scope, **Enter** edits, **s** saves, and **Esc** goes back one level or closes the role list (asking before discarding an unsaved draft). Selected roles, fields, and choices stay visible in short panels. Switching a role's CLI resets its provider-specific fields (model, thinking, effort, mode, defaultModeQuestions) so the role inherits that CLI's local defaults; re-selecting the same CLI keeps them. Changes apply to the next spawn.
 
 You can also edit role files directly:
 

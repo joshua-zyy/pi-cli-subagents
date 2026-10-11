@@ -1,6 +1,6 @@
 import path from "node:path";
 import { EMPTY_CATALOG, modelEfforts, type ModelCatalog, type ModelEntry } from "./cli-discovery.js";
-import { CLAUDE_MODES, CLAUDE_MODELS, CLAUDE_THINKING_LEVELS, CODEX_MODES, EFFORT_LEVELS, PI_THINKING_LEVELS, modeError, validateRoleFile } from "./roles.js";
+import { CLAUDE_MODES, CLAUDE_MODELS, CLAUDE_THINKING_LEVELS, CODEX_MODES, EFFORT_LEVELS, PI_THINKING_LEVELS, validateRoleFile } from "./roles.js";
 import { readJson, writeJson } from "./storage.js";
 import type { Cli, Effort, Mode, Role, Thinking } from "./types.js";
 
@@ -62,24 +62,14 @@ export function roleRows(effective: Record<string, Role>, userDoc: Record<string
   }));
 }
 
-/** Switching CLI drops the fields the target CLI rejects, mirroring `validateRoleFile`. */
+/**
+ * Switching to a different CLI resets every provider-specific field, so the role inherits that
+ * CLI's local defaults instead of carrying a model or posture named for another agent.
+ * Re-selecting the current CLI keeps the role as it is.
+ */
 export function withCli(role: Role, cli: Cli): Role {
-  const next: Role = { cli, description: role.description, instructions: role.instructions };
-  if (cli === "claude") {
-    if (role.model) next.model = role.model;
-    if (role.thinking && CLAUDE_THINKING_LEVELS.includes(role.thinking)) next.thinking = role.thinking;
-  } else if (cli === "codex") {
-    if (role.model) next.model = role.model;
-    if (role.effort) next.effort = role.effort;
-    if (role.defaultModeQuestions !== undefined) next.defaultModeQuestions = role.defaultModeQuestions;
-  } else {
-    if (role.provider) next.provider = role.provider;
-    if (role.model) next.model = role.model;
-    if (role.thinking) next.thinking = role.thinking;
-  }
-  // The two CLIs name different postures, so a mode only survives its own CLI.
-  if (role.mode && modeError(cli, role.mode) === undefined) next.mode = role.mode;
-  return next;
+  if ((role.cli ?? "pi") === cli) return { ...role, cli };
+  return { cli, description: role.description, instructions: role.instructions };
 }
 
 const asCli = (value: string): Cli => (value === "codex" ? "codex" : value === "claude" ? "claude" : "pi");

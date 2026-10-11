@@ -37,21 +37,17 @@ test('visible fields follow the chosen CLI instead of exposing every field at on
   assert.deepEqual(visibleFields({ ...base, cli: 'claude' }), ['cli', 'model', 'thinking', 'mode', 'description', 'instructions']);
 });
 
-test('switching CLI drops fields the new CLI rejects and keeps compatible ones', () => {
+test('switching to a different CLI resets provider-specific fields so the role inherits that CLI defaults; re-selecting keeps them', () => {
   const pi = { ...base, cli: 'pi', provider: 'opencode-go', model: 'deepseek-v4.1-flash', thinking: 'max' };
-  const claude = setField({}, 'worker', pi, 'cli', 'claude').worker;
-  assert.equal(claude.cli, 'claude'); assert.equal(claude.model, 'deepseek-v4.1-flash'); assert.equal(claude.thinking, 'max');
-  assert.equal(claude.provider, undefined, 'Claude has no Pi provider field');
-  const dropped = setField({}, 'worker', { ...base, cli: 'pi', thinking: 'minimal' }, 'cli', 'claude').worker;
-  assert.equal(dropped.thinking, undefined, 'off/minimal have no native --effort equivalent');
+  assert.deepEqual(setField({}, 'worker', pi, 'cli', 'claude').worker, { ...base, cli: 'claude' }, 'a Pi provider/model/thinking never carries into Claude');
+  const claude = { ...base, cli: 'claude', model: 'fable', thinking: 'high', mode: 'plan' };
   const codex = setField({}, 'worker', claude, 'cli', 'codex').worker;
-  assert.equal(codex.model, 'deepseek-v4.1-flash'); assert.equal(codex.thinking, undefined); assert.equal(codex.provider, undefined);
-  const noModel = setField({}, 'worker', { ...base, cli: 'claude' }, 'cli', 'codex').worker;
-  assert.equal(noModel.model, undefined);
-  assert.doesNotThrow(() => writeScope('user', temp(), temp(), { worker: noModel }), 'a Codex role without a model is valid: it inherits the native config.toml model');
-  const carried = setField({}, 'worker', { ...base, cli: 'claude', mode: 'plan' }, 'cli', 'claude').worker;
-  assert.equal(carried.mode, 'plan', 're-selecting the same CLI keeps its mode');
-  assert.equal(setField({}, 'worker', { ...base, cli: 'claude', mode: 'plan' }, 'cli', 'codex').worker.mode, undefined, 'the two CLIs name different postures');
+  assert.deepEqual(codex, { ...base, cli: 'codex' }, 'Claude model/thinking/mode never carry into Codex');
+  assert.doesNotThrow(() => writeScope('user', temp(), temp(), { worker: codex }), 'a Codex role without a model is valid: it inherits the native config.toml model');
+  assert.deepEqual(setField({}, 'worker', claude, 'cli', 'claude').worker, claude, 're-selecting the same CLI keeps every field');
+  const implicitPi = { ...base, provider: 'opencode-go', model: 'deepseek-v4.1-flash' };
+  assert.deepEqual(setField({}, 'worker', implicitPi, 'cli', 'pi').worker, { ...implicitPi, cli: 'pi' }, 'a role without an explicit cli is already Pi, so selecting Pi keeps its fields');
+  assert.deepEqual(setField({}, 'worker', { ...base, cli: 'codex', model: 'gpt-6-luna', effort: 'high' }, 'cli', 'pi').worker, { ...base, cli: 'pi' }, 'Codex model/effort never carry into Pi');
 });
 
 test('mode is picked from the chosen CLI’s own list and can be cleared', () => {
