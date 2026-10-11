@@ -44,12 +44,14 @@ test('role settings inherit defaults; untrusted project files are not loaded', (
   assert.equal(loadRoles(user, cwd, true).explore.description, 'project explore', 'a configured role replaces the built-in one');
 });
 
-test('Codex role is explicit and rejects Pi-only provider/thinking fields', () => {
+test('Codex role may omit its model but rejects Pi-only provider/thinking fields', () => {
   const user = temp(), cwd = temp(), file = path.join(user, 'cli-subagents.roles.json');
   const role = { cli: 'codex', description: 'Codex review', instructions: 'Review the task', model: 'chosen-model', effort: 'medium' };
   writeJson(file, { 'codex-reviewer': role });
   assert.deepEqual(loadRoles(user, cwd, false)['codex-reviewer'], role);
-  for (const invalid of [{ ...role, model: undefined }, { ...role, provider: 'openai' }, { ...role, thinking: 'max' }, { ...role, cli: 'other' }]) {
+  writeJson(file, { 'codex-reviewer': { ...role, model: undefined } });
+  assert.equal(loadRoles(user, cwd, false)['codex-reviewer'].model, undefined, 'an omitted model inherits the native config');
+  for (const invalid of [{ ...role, provider: 'openai' }, { ...role, thinking: 'max' }, { ...role, cli: 'other' }]) {
     writeJson(file, { 'codex-reviewer': invalid });
     assert.throws(() => loadRoles(user, cwd, false));
   }

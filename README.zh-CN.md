@@ -64,10 +64,10 @@ pi --extension /absolute/path/to/pi-cli-subagents/dist/index.js \
 | CLI | 模型设置 | 权限设置（`mode`） |
 | --- | --- | --- |
 | Pi | `provider`、`model`、`thinking`；未设置项在启动时跟随父会话 | 不支持 |
-| Codex | 必填 `model`；可选该模型支持的 `effort` | `read-only`、`workspace-write`、`full-access` |
+| Codex | 可选 `model`（省略时用原生 config.toml 的模型，回退策略交给 Codex；显式指定时固定、不允许回退）；可选该模型支持的 `effort` | `read-only`、`workspace-write`、`full-access` |
 | Claude Code | 可选 `model`、`thinking`（转为 `--effort`） | `manual`、`acceptEdits`、`plan`、`auto`、`dontAsk`、`bypassPermissions` |
 
-这些设置只用于实例启动，不改写各 CLI 的全局配置。Codex/Claude 未设置的可选项使用原生默认值。**不要假定一定会出现审批提示**：`dontAsk`、`bypassPermissions` 和 `full-access` 都会抑制提示，但拒绝/放行行为不同。除非明确要覆盖原生权限策略，否则不要设置 `mode`。
+这些设置只用于实例启动，不改写各 CLI 的全局配置。未设置的项继承你本机该 CLI 的配置；Claude 子进程原样继承你的 `CLAUDE_CONFIG_DIR` 解析，只有在续聊一个固定到其他 home 的会话时才显式设置该变量。**不要假定一定会出现审批提示**：`dontAsk`、`bypassPermissions` 和 `full-access` 都会抑制提示，但拒绝/放行行为不同。除非明确要覆盖原生权限策略，否则不要设置 `mode`。
 
 **Codex Default 模式提问（实验特性）：** 仅 Codex 角色支持 `defaultModeQuestions`，也可通过 `/cli-agents-setting` 选择三种状态：
 

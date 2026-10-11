@@ -48,7 +48,7 @@ test('switching CLI drops fields the new CLI rejects and keeps compatible ones',
   assert.equal(codex.model, 'deepseek-v4.1-flash'); assert.equal(codex.thinking, undefined); assert.equal(codex.provider, undefined);
   const noModel = setField({}, 'worker', { ...base, cli: 'claude' }, 'cli', 'codex').worker;
   assert.equal(noModel.model, undefined);
-  assert.throws(() => writeScope('user', temp(), temp(), { worker: noModel }), /Codex role requires model/, 'Codex cannot be saved without a model');
+  assert.doesNotThrow(() => writeScope('user', temp(), temp(), { worker: noModel }), 'a Codex role without a model is valid: it inherits the native config.toml model');
   const carried = setField({}, 'worker', { ...base, cli: 'claude', mode: 'plan' }, 'cli', 'claude').worker;
   assert.equal(carried.mode, 'plan', 're-selecting the same CLI keeps its mode');
   assert.equal(setField({}, 'worker', { ...base, cli: 'claude', mode: 'plan' }, 'cli', 'codex').worker.mode, undefined, 'the two CLIs name different postures');

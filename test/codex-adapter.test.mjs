@@ -27,6 +27,18 @@ function setup(t, overrides = {}) {
 const settled = events => waitUntil('adapter terminal event', () => events.find(e => e.type === 'settled'), 5000);
 const runSettled = (events, runId) => waitUntil('run terminal', () => events.find(e => e.type === 'settled' && e.runId === runId), 5000);
 
+test('Codex role without a model inherits the native default and is not pinned against provider fallback', async t => {
+  const { client, requests, spec } = setup(t, { role: { cli: 'codex', description: 'test', instructions: 'Do only the assigned work.' } });
+  const { c, events } = client(); const session = await c.ready();
+  await c.start('REMEMBER inherit'); assert.equal((await settled(events)).text, 'OK');
+  const start = requests().find(r => r.method === 'thread/start');
+  assert.equal('model' in start.params, false, 'no model is sent when the role omits one');
+  assert.equal('allowProviderModelFallback' in start.params, false, 'fallback policy is left to the native configuration');
+  assert.equal(JSON.parse(fs.readFileSync(path.join(session.codexHome, session.threadId + '.json'))).model, 'fixture-default-model');
+  assert.equal(requests().find(r => r.method === 'turn/start').params.effort, undefined);
+  assert.equal(spec.role.model, undefined); await c.end();
+});
+
 test('Codex resident resets each round, keeps PID/session and rejects stale terminal events', async t => {
   const { client, requests } = setup(t); const { c, events } = client(); const session = await c.ready(), pid = c.pid;
   assert.equal(c.resident, true);

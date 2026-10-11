@@ -312,10 +312,9 @@ test('Codex cancelled/auto-resolved interactions do not remain answerable', { ti
   assert.ok(manager.reports().every(r => r.status !== 'waiting'));
 });
 
-test('Codex rejects invalid workspace and missing model before creating instances', async t => {
+test('Codex rejects an invalid workspace and invalid defaultModeQuestions before creating instances', async t => {
   const { cwd, manager } = setup(t);
   await assert.rejects(manager.spawn('codex-worker', role, cwd, 'DO', 'any-workspace'), /Invalid workspace/);
-  await assert.rejects(manager.spawn('codex-worker', { ...role, model: undefined }, cwd, 'DO'), /explicit model/);
   for (const invalid of [{ ...role, defaultModeQuestions: 'true' }, { ...role, defaultModeQuestions: null },
     { ...role, cli: 'pi', defaultModeQuestions: false }, { ...role, cli: 'claude', defaultModeQuestions: true }])
     await assert.rejects(manager.spawn('worker', invalid, cwd, 'DO'), /defaultModeQuestions/);

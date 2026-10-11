@@ -53,7 +53,7 @@ export class CodexAdapter implements CliAdapter {
   get pid(): number | undefined { return this.child.pid; }
 
   constructor(private readonly options: AdapterOptions) {
-    if (options.spec.role.cli !== "codex" || !options.spec.role.model?.trim() || !options.spec.codexHome) throw new Error("Codex requires an explicit model and a pinned native home");
+    if (options.spec.role.cli !== "codex" || !options.spec.codexHome) throw new Error("Codex requires a pinned native home");
     if (options.session && (options.session.cli !== "codex" || options.session.codexHome !== options.spec.codexHome)) throw new Error("Codex native home or CLI differs from the original session");
     const { defaultModeQuestions } = options.spec.role;
     if (defaultModeQuestions !== undefined && typeof defaultModeQuestions !== "boolean") throw new Error("Codex defaultModeQuestions must be a boolean");
@@ -345,11 +345,13 @@ export class CodexAdapter implements CliAdapter {
     await this.write({ method: "initialized", params: {} });
     const previous = this.options.session;
     const preset = this.options.spec.role.mode ? CODEX_MODE_PRESETS[this.options.spec.role.mode as CodexMode] : undefined;
-    const params = { model: this.options.spec.role.model, cwd: this.options.spec.cwd,
+    // An omitted role model inherits the native config.toml model; only an explicit choice is pinned without fallback.
+    const model = this.options.spec.role.model?.trim();
+    const params = { ...(model ? { model } : {}), cwd: this.options.spec.cwd,
       developerInstructions: `# Delegated role: ${this.options.spec.roleName}\n${this.options.spec.role.instructions}`,
       ...(preset ?? {}) };
     const result = previous ? await this.request("thread/resume", { ...params, threadId: (previous as Extract<NativeSession, { cli: "codex" }>).threadId }) :
-      await this.request("thread/start", { ...params, allowProviderModelFallback: false });
+      await this.request("thread/start", { ...params, ...(model ? { allowProviderModelFallback: false } : {}) });
     const session = this.checkedSession(result.thread);
     this.thread = session;
     return session;

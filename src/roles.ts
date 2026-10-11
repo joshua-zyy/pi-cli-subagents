@@ -80,7 +80,7 @@ export function validateRoleFile(value: unknown, source: string): Record<string,
     if (role.defaultModeQuestions !== undefined && (role.cli !== "codex" || typeof role.defaultModeQuestions !== "boolean")) throw new Error(`${source}: ${name}.defaultModeQuestions requires cli: codex and a boolean`);
     if (role.cli === "claude" && role.provider) throw new Error(`${source}: ${name} Claude role does not accept a Pi provider`);
     if (role.cli === "claude" && role.thinking !== undefined && !claudeLevels.has(role.thinking as Thinking)) throw new Error(`${source}: ${name} Claude thinking must be low, medium, high, xhigh or max`);
-    if (role.cli === "codex" && (!role.model || role.provider || role.thinking)) throw new Error(`${source}: ${name} Codex role requires model and does not accept Pi provider/thinking fields`);
+    if (role.cli === "codex" && (role.provider || role.thinking)) throw new Error(`${source}: ${name} Codex role does not accept Pi provider/thinking fields`);
     if (role.cli !== "codex" && role.effort !== undefined) throw new Error(`${source}: ${name}.effort requires cli: codex`);
     if (role.mode !== undefined) {
       const invalid = modeError(role.cli as Cli | undefined, role.mode);

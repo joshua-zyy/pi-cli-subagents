@@ -5,6 +5,7 @@ import { randomUUID } from "node:crypto";
 import path from "node:path";
 import type { AdapterEvent, AdapterOptions, CliAdapter, InteractionReply } from "./cli-adapter.js";
 import { childEnvironment, type Exit } from "./pi-process.js";
+import { claudeEnvironment } from "./claude-launch.js";
 import type { AgentSpec, NativeSession, Delivery, QuestionField } from "./types.js";
 import { claudeQuestionAnswers, readClaudeQuestionFields } from "./claude-question.js";
 
@@ -91,7 +92,8 @@ export class ClaudeAdapter implements CliAdapter {
     this.timeout = options.requestTimeout ?? 30_000;
     const output = createWriteStream(options.logFile, { flags: "a", mode: 0o600 });
     const stderr = createWriteStream(`${options.logFile}.stderr`, { flags: "a", mode: 0o600 });
-    const env = { ...childEnvironment(), CLAUDE_CONFIG_DIR: spec.claudeHome };
+    // Inherit the user's own config-dir resolution; pin it only when this session's recorded home differs.
+    const env = claudeEnvironment(spec.claudeHome, childEnvironment());
     // A delegated run submits its own task; never auto-rerun an interrupted task during resume.
     delete (env as NodeJS.ProcessEnv).CLAUDE_CODE_RESUME_INTERRUPTED_TURN;
     this.child = spawn(spec.launch.command, [...spec.launch.args, "-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose",

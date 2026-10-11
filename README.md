@@ -64,10 +64,10 @@ Precedence is **project > user > built-in**. Each entry replaces the whole role;
 | CLI | Model settings | Permission setting (`mode`) |
 | --- | --- | --- |
 | Pi | `provider`, `model`, `thinking`; omitted values follow the parent at launch | Not supported |
-| Codex | Required `model`; optional `effort` supported by that model | `read-only`, `workspace-write`, `full-access` |
+| Codex | Optional `model` (omitted: the native config.toml model, with provider fallback left to Codex; an explicit model is pinned without fallback); optional `effort` supported by that model | `read-only`, `workspace-write`, `full-access` |
 | Claude Code | Optional `model` and `thinking` (passed as `--effort`) | `manual`, `acceptEdits`, `plan`, `auto`, `dontAsk`, `bypassPermissions` |
 
-These are per-launch settings, not changes to the CLIs' global configuration. Codex/Claude use native defaults for omitted optional settings. **Do not assume approval prompts will appear:** `dontAsk`, `bypassPermissions`, and `full-access` suppress them, with different denial/permission behavior. Leave `mode` unset unless you deliberately want to override the native posture.
+These are per-launch settings, not changes to the CLIs' global configuration. Omitted settings inherit your local configuration for that CLI; Claude children inherit your `CLAUDE_CONFIG_DIR` resolution unchanged, and the variable is set explicitly only when resuming a session pinned to a different home. **Do not assume approval prompts will appear:** `dontAsk`, `bypassPermissions`, and `full-access` suppress them, with different denial/permission behavior. Leave `mode` unset unless you deliberately want to override the native posture.
 
 **Codex Default-mode questions (experimental):** the Codex-only role field `defaultModeQuestions` has three states, also selectable in `/cli-agents-setting`:
 

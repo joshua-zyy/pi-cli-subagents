@@ -269,16 +269,16 @@ function handle(cmd) {
   if (cmd.method === 'initialized') { if (!initialized) throw Error('missing initialize'); acknowledged = true; return; }
   if (!acknowledged) return error(cmd, 'Not initialized');
   if (cmd.method === 'thread/start') {
-    if (!cmd.params.model) return error(cmd, 'Explicit model required');
-    thread = { id: randomUUID(), sessionId: randomUUID(), path: null, cwd: cmd.params.cwd, ephemeral: false, status: { type: 'idle' }, turns: [], model: cmd.params.model };
+    // An omitted model inherits the native default, as config.toml would supply it.
+    thread = { id: randomUUID(), sessionId: randomUUID(), path: null, cwd: cmd.params.cwd, ephemeral: false, status: { type: 'idle' }, turns: [], model: cmd.params.model ?? 'fixture-default-model' };
     save();
     if (process.argv.includes('--hold-ready')) {
       const timer = setInterval(() => { if (fs.existsSync(path.join(home, 'release-ready'))) {
-        clearInterval(timer); response(cmd, { thread, model: cmd.params.model, cwd: thread.cwd });
+        clearInterval(timer); response(cmd, { thread, model: thread.model, cwd: thread.cwd });
       } }, 10);
       return;
     }
-    return response(cmd, { thread, model: cmd.params.model, cwd: thread.cwd });
+    return response(cmd, { thread, model: thread.model, cwd: thread.cwd });
   }
   if (cmd.method === 'thread/resume' || cmd.method === 'thread/read') {
     if (cmd.method === 'thread/resume' && process.argv.includes('--reject-resume')) return error(cmd, 'Fixture resume rejected after preflight');
