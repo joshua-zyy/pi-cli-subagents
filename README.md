@@ -1,168 +1,25 @@
 # pi-cli-subagents
 
-[Chinese README](README.zh-CN.md)
+[简体中文](README.zh-CN.md)
 
-Delegate work from Pi to **reusable Pi, Codex, and Claude Code sessions**. Run independent tasks concurrently, receive completion reports automatically, and continue with the same agent for follow-up work. Optional Git worktrees keep parallel edits separate.
+A Pi extension for delegating work to Pi, Codex, and Claude Code agents.
 
-## Quick start
+Run independent tasks in parallel, receive results and questions in the parent session, and continue with the same child session for follow-up work. Optional managed Git worktrees keep parallel edits separate.
 
-Requires Node.js **>=22.19** and a configured Pi CLI. Install and authenticate Codex or Claude Code separately if you want to use them.
+The four built-in roles, `explore`, `worker`, `reviewer`, and `oracle`, default to Pi and inherit the parent's model unless configured otherwise. You choose the roles, backends, and workflow.
 
-```bash
-# In this extension's directory
-npm ci
-npm run build
+Use `/agents` to view and manage sessions, and `/cli-agents-setting` to configure roles.
 
-# In the project where you want to use it
-pi install --local /absolute/path/to/pi-cli-subagents
-pi
-```
+## Documentation
 
-The local install adds the extension and bundled skill to `.pi/settings.json`; review the project trust prompt yourself. For a one-off run without changing settings:
-
-```bash
-pi --extension /absolute/path/to/pi-cli-subagents/dist/index.js \
-   --skill /absolute/path/to/pi-cli-subagents/skills/delegate-cli-agents
-```
-
-For a prebuilt local `.tgz`, extract it into an empty directory and use `pi install --local /absolute/path/to/extracted/package`; do **not** run `npm ci` or rebuild the unpacked package. It already includes the worker, child question tool and skill; Pi supplies its peers. No Paseo/Lody installation is needed. Local package discovery was verified with Pi **0.87.1 and 1.1.0**, without model calls; this does not prove real-backend or full TUI acceptance. The package remains `private:true`; an overall license for this project’s own code and public release authorization still need a decision.
-
-Ask Pi, for example:
-
-> Have the configured worker investigate and fix this test in an isolated worktree, and report the result.
-
-Roles, task decomposition and review policy are yours to configure; the extension does not impose an agent workflow.
-
-Use a persistent parent session, **not `--no-session`**. Reports arrive automatically; do not poll for completion. A running child can continue after the parent exits; reopen the **original parent session** to receive its pending reports.
-
-## Roles and models
-
-All four built-in roles use Pi: `explore` investigates, `worker` implements and verifies, `reviewer` independently reviews, and `oracle` gives a second opinion. Read-only role instructions are **not a permission sandbox**.
-
-Open **`/cli-agents-setting`** to choose each role's CLI and model. **Tab** switches user/project scope, **Enter** edits, **s** saves, and **Esc** goes back one level or closes the role list (asking before discarding an unsaved draft). Selected roles, fields, and choices stay visible in short panels. Switching a role's CLI resets its provider-specific fields (model, thinking, effort, mode, defaultModeQuestions) so the role inherits that CLI's local defaults; re-selecting the same CLI keeps them. Changes apply to the next spawn.
-
-You can also edit role files directly:
-
-- User: `~/.pi/agent/cli-subagents.roles.json`
-- Trusted project: `.pi/cli-subagents.roles.json`
-
-Precedence is **project > user > built-in**. Each entry replaces the whole role; `description` and `instructions` are required. For example, move only the reviewer to Codex (replace the model placeholder):
-
-```json
-{
-  "reviewer": {
-    "cli": "codex",
-    "description": "Review changes independently",
-    "instructions": "Inspect the assigned changes without editing files. Report issues with evidence and state what you verified.",
-    "model": "YOUR_AVAILABLE_CODEX_MODEL",
-    "effort": "high",
-    "mode": "read-only"
-  }
-}
-```
-
-| CLI | Model settings | Permission setting (`mode`) |
-| --- | --- | --- |
-| Pi | `provider`, `model`, `thinking`; omitted values follow the parent at launch | Not supported |
-| Codex | Optional `model` (omitted: the native config.toml model, with provider fallback left to Codex; an explicit model is pinned without fallback); optional `effort` supported by that model | `read-only`, `workspace-write`, `full-access` |
-| Claude Code | Optional `model` and `thinking` (passed as `--effort`) | `manual`, `acceptEdits`, `plan`, `auto`, `dontAsk`, `bypassPermissions` |
-
-These are per-launch settings, not changes to the CLIs' global configuration. Omitted settings inherit your local configuration for that CLI; Claude children inherit your `CLAUDE_CONFIG_DIR` resolution unchanged, and the variable is set explicitly only when resuming a session pinned to a different home. **Do not assume approval prompts will appear:** `dontAsk`, `bypassPermissions`, and `full-access` suppress them, with different denial/permission behavior. Leave `mode` unset unless you deliberately want to override the native posture.
-
-**Codex Default-mode questions (experimental):** the Codex-only role field `defaultModeQuestions` has three states, also selectable in `/cli-agents-setting`:
-
-- `true`: enable with the process argument `-c features.default_mode_request_user_input=true`.
-- `false`: explicitly disable Default-mode questions with the same argument set to `false`. Plan-mode questions are unaffected.
-- Omitted (UI: `inherit`): send no override; inherit native Codex configuration. In CLI 0.159.2 this feature is under development and defaults to off.
-
-For example, add `"defaultModeQuestions": true` to an existing Codex role to opt in. This does not switch collaboration mode, alter `model`/`effort`/approval/sandbox settings, or write global configuration. It does not override the separate `tools.experimental_request_user_input.enabled` tool-registration setting (enabled by default in 0.159.2). Role edits apply to **new instances**; existing instances retain their saved role on resume and cannot gain this override through a later role edit. If the native tool is still unavailable, inspect the actual CLI version and configuration rather than changing permission mode or silently retrying. Remove this field before downgrading or sharing role files with older extension versions: an unknown field causes rejection of the whole role file.
-
-## Monitor and continue
-
-Open **`/agents`** or press **Ctrl+Alt+A**. Select an instance with **↑/↓**; use **Enter/v** for its live conversation, **s** to message or resume, **r** to answer a request, **t** to interrupt a Pi/Codex v2 turn, and **x** to release processes. In the roster, **c** confirms release of the displayed idle runtimes; it retains sessions/results, refuses targets that have changed turn/runtime or become busy, and reports partial failures without retrying. Idle background work may stop. Closing the viewer does not stop the agent. On first open the viewer reads one bounded tail window and afterwards only follows bytes appended to it; scrolling upward (**PgUp**, **↑**) within about two screens of the loaded top prefetches an older page while preserving your reading position; **Home** triggers it directly. Upward movement requested during loading is applied when the page arrives, with same-direction requests coalesced and no accidental reverse paging. **End** supersedes pending upward movement. Each disk page keeps at most 300 entries. A separate display list retains up to 1200 entries with an 8 MiB text-and-key budget, rather than being replaced wholesale by the next disk window. Eviction prefers non-visible content opposite the navigation direction, never the entries being read. Visible content is held while paused; returning to the end publishes the latest already-read values. History still reaches the oldest records step by step and can be walked back down; **End** re-anchors at the live end. Reopening the same agent in this process reuses the paged window, so a window left on an old page stays there until you press **End**, while a replaced or truncated log drops it. Whole-log token totals appear only when the loaded window really covered every run; otherwise the header says **Stats incomplete** instead of showing a partial number. Status, scrolling, and message/stop controls remain available throughout, and event logs are never modified.
-
-The viewer draws on [tintinweb/pi-subagents](https://github.com/tintinweb/pi-subagents)’ conversation-list, scroll-offset and auto-follow model, measuring current content on every navigation key. This project additionally adapts on-demand logs from independent CLIs rather than directly holding an SDK `session.messages` array.
-
-Tools in the live viewer default to one-line summaries, including failures (marked with `✗`). **Ctrl+O** toggles all loaded tool inputs and outputs in this viewer only; it follows the host’s `app.tools.expand` binding, including remapping or disabling it. Expansion survives live updates, while **Enter** still opens the message composer. Long content remains subject to the existing reader limits and clipping notices; original logs are unchanged.
-
-| Tool available to the parent | Purpose |
-| --- | --- |
-| `subagent` | `start` a configured role, `send` to an existing instance, `interrupt` a turn, `stop`/release processes; `workspace_create` / `workspace_integrate` manage worktrees |
-| `subagent_query` | `list` metadata/workspaces, `get` details, read an exact `result`, or page projected `activity` |
-| `subagent_reply` | Answer one current request with an explicit reason |
-
-Workspace actions now share `subagent`; `subagent_workspace` is no longer registered or aliased. Existing workspace IDs, records and safeguards are unchanged. Review external tool-name allowlists for this new action boundary; no user settings are migrated and uncertain old calls must not be replayed automatically.
-
-`subagent_query({action: "list"})` returns metadata without result bodies; `{action: "get", id}` adds a bounded preview. Only clipped final notifications include an exact-run result locator, with `offset` at the omitted section and a bounded `limit`. Read that section, following `nextOffset` if it exceeds a page; do not skip the middle or re-read the displayed tail. For a get preview or standalone result read, keep both IDs fixed and follow `nextOffset` until null (default/max `limit: 6000` UTF-16 code units). Reading results never resumes an agent or verifies its claims.
-
-For recent activity use `subagent_query({action: "activity", id})`, then pass its `cursor` for older pages. Each page is chronological; `limit` is 1–100 entries (default 20), and `maxBytes` is 4096–65536 UTF-8 bytes for the whole JSON response (default 16384). Invalid/stale cursors fail explicitly. `partial`, `truncated`/`omittedBytes` and `notice` distinguish bounded or unavailable evidence; use `result` for the complete final answer. Activity does not start a CLI, rewrite logs or replace automatic completion notifications.
-
-In the TUI, reports follow Pi’s expand/collapse state (**Ctrl+O** by default, respecting custom keybindings). Collapsed cards show a one-line instance/status summary, with failures and pending requests highlighted; expand to see the notification body and exact-run result link. Old notifications without display metadata show `status unavailable` rather than an inferred success. Pending requests stay visible in a status line until answered. Routine requests show “waiting for parent review” without asking you to take over; requests that require human approval instead show an action link and one warning notice. Only presentation changes: parent-facing content and delivery receipts remain intact. Expanded text strips ANSI/terminal controls; original records are unchanged.
-
-All automatic collaboration notifications (`waiting`, `completed`, `failed`, `stopped`, `stalled`) use `steer`, reaching a busy parent before its next model request without aborting an in-flight tool. Successful reports retain the two-second batching window; ordinary activity stays in the viewer rather than triggering model turns. The parent handles both task questions and permission requests itself; it escalates when context, effects or authorization are unclear, the user explicitly requires confirmation, or a request's native policy signals cannot be justified within the user's authorization.
-
-Pi children explicitly load the bundled `subagent_ask_parent` tool on each start or resume; no global plugin installation is needed. Its recognized call becomes one logical task question with 2–4 choices and custom text. Submit an offered label or your custom answer once as `subagent_reply.value`. Following Paseo’s flow, the adapter caches the answer and automatically replies to the matching native selection and input; the parent does not handle a second UI step or send another prompt. These requests carry `kind: "question"` and `parentPolicy.text: true`; answers are context, not permission grants. Native dialogs are consumed only when their call, versioned title and expected UI stage/shape match. Other Pi `select`/`confirm`/`input`/`editor` dialogs are forwarded separately to the parent with their native choices or text shape; they never consume a cached task answer. No button-label whitelist decides whether the parent may reply.
-
-Codex task forms (`requestUserInput`, checked against CLI 0.159.2) can contain multiple questions. For `method: "form"` with `parentPolicy.answers: true`, read `fields` via `subagent_query get` and submit one `subagent_reply.answers` object: `{ "<field-id>": ["exact answer"] }` for every field. Respect choices and `allowOther`; `[]` explicitly skips a field, while `cancelled: true` dismisses the whole form. Missing fields are rejected, never filled with a guessed first option. Non-blocking forms keep the child running, but answers remain bound to the original request and turn; resolved, ended or uncertain deliveries must not be replayed.
-
-Codex also emits asynchronous message questions (`agentMessage` with `delivery: "async"` and `questions`). These reach the parent immediately as non-blocking forms. Each indexed field (`"0"`, `"1"`, …) has `required: true` and needs one non-blank answer; the adapter sends the answer text once through `turn/steer` to the original active turn. Cancellation dismisses it locally. Turn end expires unanswered requests; no idle follow-up or automatic retry is started. This follows Paseo’s async-question mapping; see [the contract and verification boundary](docs/codex-async-questions.md).
-
-Codex treats these answers as trusted user input, so provide only already-authorized task context, never new authorization. A recognized `mcp_tool_call_approval_<callId>` request bound to a live MCP action is a separate single-call permission: use `subagent_reply.value: "Allow"` or `"Cancel"` (or `cancelled: true`), never `answers`. Only these two choices are exposed, even if native persistent options exist. The separate `mcpServer/elicitation/request` entry is supported only for explicit MCP-approval metadata, a message-only form, and one unambiguously associated live call: reply with `confirmed: true` (accept), `confirmed: false` (decline), or `cancelled: true` (cancel), never form answers or persistent grants. Unknown kinds, data/URL forms and uncorrelated requests are refused per request with a native cancel while the turn and runtime continue. The host-reserved `mcp_tool_call_approval*` IDs must not be used for task questions. Human form entry is available through `/agent-reply`; sensitive fields warn that input is visible and may be retained in logs, not masked.
-
-Claude's built-in `AskUserQuestion` (checked against 2.1.283) uses the same `answers` interface for 1–4 choice, text or number questions. Text/number cards require the native extended-question feature; this extension does not enable it. Its field IDs are the **full question text**, not display headers. `multiSelect: false` accepts at most one string; `true` accepts multiple selections plus one custom answer. `[]` skips a field without guessing a default. The native `requires_user_interaction: true` flag is satisfied only by this decoded question card, never by a blanket approval; native policy signals (classifier not approvable, rule-forced asks) are shown to the parent as context rather than blocking its answer. Cancellation denies the question without interrupting the whole turn. Answers provide task context, not new authorization or persistent permissions.
-
-Human entry collects the whole form before sending one reply. Multi-select menus toggle choices and require **Finish selection**; cancelling any entry discards the partial form. Previews are shown as plain text, not rendered HTML, and display controls are escaped without changing native answer data. Number/text hints are displayed without coercion or applying defaults. Claude question mapping is verified offline; a real Claude model round trip is a separate, explicitly authorized acceptance gate.
-
-Pi and Codex accept running `steer` messages; running `followUp` is Pi-only. Wait for Claude to finish before sending more instructions. Panels are TUI-only; the tools also work in RPC/non-interactive modes.
-
-## Isolate parallel edits
-
-Ask Pi to use **one managed workspace per independently integrable change**:
-
-1. `subagent({action: "workspace_create"})` creates a detached worktree from committed HEAD. Dirty parent files are reported, **not inherited**; inheriting them requires inspection and explicit authorization via `includeUncommitted`.
-2. Use `subagent({action: "start", role, task, workspace})`. Different workspaces may run concurrently; one workspace permits one active instance at a time and can be reused after release.
-3. Use `subagent({action: "workspace_integrate", workspace})` when appropriate for your workflow. The extension checks technical safety, not whether a particular review procedure was followed.
-4. To continue after integration or another instance's sync, explicitly choose `baseline: "keep"` (current workspace files) or `"sync"` (update from the parent). Sync refuses unintegrated or staged work; later integration applies only the new increment.
-
-Integration leaves the parent's HEAD, index, and branches unchanged. Worktrees live under `<repo>.worktrees/`; dependencies and trust are not set up automatically. Shared `cwd` sessions do **not** isolate files, and worktrees do **not** isolate OS permissions.
-
-Managed workspaces require Git with `check-attr --source` (tested on 2.50.1). Sparse checkouts, unmerged indexes, submodules, symlinks, and content filters such as Git LFS are refused. Cleanup is manual and requires authorization; inspect the worktree before removing it, and do not force removal to bypass a refusal.
-
-## Safety and limitations
-
-- **Parent review is not automatic approval.** The parent must stay within the user's authorization and must not grant session-wide or persistent permissions. Pi dialogs expose native responses without proving their effects: `parentPolicy` is a transport constraint, not an authorization verdict, and `confirmed: true` is not necessarily a one-action grant. No hard button-label filter enforces the parent's judgment for arbitrary Pi extensions. Claude/Codex single-action mappings remain enforced; Claude's native policy signals are shown to the parent as context, not as a block, matching Paseo and Lody, which have no human-only carve-out. Legacy records without a policy remain refusal-only for the parent. The panel and `/agent-reply <agentId> <questionId>` remain available for human intervention; delivery is not proof of execution.
-- **Conflicts are checked before integration writes**, but crashes or I/O failures can leave partial changes. Inspect retained patches, backups, and unfinished journals before retrying. Stale locks and crashed execution owners are not recovered automatically; pause external writers during snapshot/integration/sync.
-- **Local records can contain sensitive source data.** Sessions, logs, snapshots, and backups live beside the parent session in `<parent-session-file>.subagents/` and are not deleted when an instance closes.
-- **Compatibility has limits.** Pi is the primary end-to-end tested workflow. Codex protocol checks used CLI 0.159.2; Claude requires native Claude Code >=2.1.283 on PATH (`claude.exe` on Windows). Real-parent Pi → Codex/Claude orchestration, live TUI approval/baseline dialogs, and arbitrary crash recovery are not fully verified.
-
-### Operation receipts and direct human actions
-
-`start/send/interrupt/stop` return a transient `receipt` tied to the affected run/runtime. `accepted` means the native input request was acknowledged, not that the model read it or the task succeeded; `unconfirmed` means inspect before retrying. `settled` confirms the captured turn ended, not that interruption caused its outcome; `not_running` is a no-op, and `released` confirms resource release. Current adapters do not claim per-message queueing or injection without native evidence. Query snapshots do not fabricate past delivery receipts.
-
-Direct human actions are saved beside their original instance and delivered only to the original parent session, including when an RPC finishes after switching sessions. Messages use their own `actionId` receipts, not completion IDs, and `triggerTurn:false`; they do not start parent model work. Already-saved records can be replayed after reopening, without re-sending the child operation. Failure before the action record is written is outside this recovery guarantee. In the conversation overlay, **Ctrl+C** targets a busy parent, never the selected child; when the parent is idle it closes the overlay.
-
-### Resident runtimes and release
-
-New Pi/Codex workers stay **idle** after a run completes; `lastStatus` and the original run report retain the outcome. Sending to idle starts a new run in the same worker/CLI. `subagent stop` (or **x** in the viewer) releases the process tree and exposes **closed** without replacing an already completed result. Sending to closed resumes the same native session in a new runtime. Claude currently uses the explicit non-resident native-resume path. Residency is not a permanent-process guarantee or permission for additional model work.
-
-Idle still owns its workspace: explicitly stop before integration or handing it to another instance. A baseline sync closes only the target idle writer before preflight/sync/resume; failed confirmation metadata is rejected before closing, while later preflight/content failures may leave it closed. Old workers are not hot-replaced; new versioned control rejects stale runtime/run identities. Continuous logs remain readable across runs without duplicate sources.
-
-## Development
-
-```bash
-npm run check   # TypeScript check
-npm test        # Build + all local tiers; no model calls
-npm run test:fast
-npm run test:domain
-npm run test:acceptance:local
-npm run test:list # List the local selection without building/running it
-```
-
-Test entries isolate user role configuration and clear the inherited child marker before imports, then run serially. For a focused domain check: `npm run test:domain -- workspace.test.mjs`. See [test tiers and verification costs](docs/testing.md) for selection rules, local-only boundaries and measured timings.
-
-After code changes, rebuild and run `/reload` in Pi. Automated tests are not full terminal acceptance. Routine calls are documented by the tools; see the [operational reference](skills/delegate-cli-agents/SKILL.md) for approvals, results, workspaces and recovery. Historical notifications and saved sessions are not rewritten; use their original instance/run IDs with the new query tool.
+- [Operational reference](skills/delegate-cli-agents/SKILL.md)
+- [Tool interface](docs/subagent-tool-contract.md)
+- [Development and testing](docs/testing.md)
 
 ## Credits
+
+<details>
+<summary>Referenced projects and third-party license notices</summary>
 
 - [Paseo](https://github.com/getpaseo/paseo): [resident lifecycle and captured-run cancellation semantics](https://github.com/getpaseo/paseo/blob/29db2b79809fc032860ff4e8ee360fbe0073c3e9/docs/agent-lifecycle.md), adapted to the extension-owned worker/control protocol; plus Pi logical-question normalization, tool-call/dialog correlation and cached answer replay adapted from its [pinned mapper](https://github.com/getpaseo/paseo/blob/99fc204c55c8c1666477282eeba562ba87a3135f/packages/server/src/server/agent/providers/pi/extensions/rpiv-ask-user-question/index.ts) (Apache-2.0). Codex question normalization and answer mapping are also adapted from its [pinned Codex adapter](https://github.com/getpaseo/paseo/blob/06fe97c9019c1db4a5264dfb9b369b93e5e2fba4/packages/server/src/server/agent/providers/codex-app-server-agent.ts), with ID-keyed answers, stricter validation and no default-choice fallback.
 - [Lody Codex ACP](https://github.com/LodyAI/acp-extension-codex/blob/60f1dc4bda7d503eb107a9875893a62d399fd97e/src/permissions/mcp.ts): single-action versus persistent permission separation and [message-only elicitation identification](https://github.com/LodyAI/acp-extension-codex/blob/60f1dc4bda7d503eb107a9875893a62d399fd97e/src/CodexElicitationHandler.ts#L361) (Apache-2.0), adapted to the [OpenAI Codex rust-v0.159.2 MCP question/elicitation contracts](https://github.com/openai/codex/blob/rust-v0.159.2/codex-rs/core/src/mcp_tool_call.rs#L1460). This port binds the request to a live native action and exposes no persistent grants; it does not bundle Lody or its ACP runtime.
@@ -422,5 +279,7 @@ Portions of this software are licensed as follows:
    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
    See the License for the specific language governing permissions and
    limitations under the License.
+
+</details>
 
 </details>
