@@ -5,8 +5,9 @@ import type { AgentView, Report } from "./types.js";
 export const customType = "cli-subagents-report";
 
 /**
- * Notifications are bounded previews, not complete evidence. Keep more of the original tail than
- * the head, count omitted characters, and link to the exact run so every omitted part is retrievable.
+ * Waiting requests are decision inputs and stay complete. Other notifications are bounded previews,
+ * not complete evidence. Keep more of the original tail than the head, count omitted characters,
+ * and link to the exact run so every omitted part is retrievable.
  */
 const REPORT_HEAD = 2000;
 const REPORT_TAIL = 3600;
@@ -127,7 +128,7 @@ export function deliverReports(
       if (!raw) raw = report.status === "waiting"
         ? "Waiting for a response; inspect it with subagent_query or /agent-reply."
         : "No text response; inspect with subagent_query or /agents.";
-      const clipped = raw.length > REPORT_LIMIT;
+      const clipped = report.status !== "waiting" && raw.length > REPORT_LIMIT;
       const summary = clipped ? `${raw.slice(0, REPORT_HEAD)}\n… ${raw.length - REPORT_LIMIT} characters omitted …\n${raw.slice(-REPORT_TAIL)}\n(truncated preview)` : raw;
       const resultHint = final ? `\nRead result: subagent_query(${JSON.stringify({ action: "result", id: report.agentId, runId: report.runId })})` : "";
       const replyHint = report.status === "waiting" ? waitingAnswerLine(report) : "";

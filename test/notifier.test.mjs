@@ -54,10 +54,11 @@ test('error and waiting messages keep actionable details without embedding file 
 test('waiting notifications describe native response shapes without guessing authorization from labels', () => {
   const options = ['Allow for this session', 'Skip this check', 'Continue once'];
   const request = { method: 'select', options, parentPolicy: { values: options } };
+  const longRequest = `Command: ${'A'.repeat(3000)}\nREVIEW: the command's middle is part of the decision\n${'Z'.repeat(6000)}`;
   const h = harness([
     { ...report('select'), status: 'waiting', text: 'Review this action', questionId: 'q1', request },
     { ...report('legacy'), status: 'waiting', text: 'Old unknown request', questionId: 'q2', request: { method: 'confirm' } },
-    { ...report('huge'), status: 'waiting', text: 'Y'.repeat(9000), questionId: 'q3', request },
+    { ...report('huge'), status: 'waiting', text: longRequest, questionId: 'q3', request },
     ...['input','editor'].map(method=>({...report(method),status:'waiting',text:'Provide context',questionId:method,request:{method,parentPolicy:{text:true}}})),
   ]);
   deliverReports(h.manager, h.pi, h.ctx, new Set());
@@ -68,7 +69,8 @@ test('waiting notifications describe native response shapes without guessing aut
   assert.match(content, /user.*requires.*confirmation/i);
   assert.match(content, /Question ID: q2 \(confirm\)\. You may only refuse it \(confirmed: false or cancelled\); the human answers it with \/agent-reply agent q2\./);
   for(const method of ['input','editor'])assert.match(content,new RegExp(`Question ID: ${method}.*value as response text`));
-  assert.match(content, /characters omitted/);assert.match(content, /Question ID: q3/);
+  assert.ok(content.includes(longRequest), 'the complete decision input must reach the parent, including its middle');
+  assert.doesNotMatch(content, /characters omitted|truncated preview/);assert.match(content, /Question ID: q3/);
   assert.equal(h.notifications.length,1,'only the policy-less legacy request needs the human');
 });
 
@@ -107,7 +109,8 @@ test('human-required requests remain visible even when the parent stays silent',
 });
 
 test('waiting reaches the next model request while the parent keeps using tools', async () => {
-  const h = harness([report('finished'), { ...report('approval'), status: 'waiting', text: 'Inspect this command', questionId: 'q1',
+  const approvalText = `Command: ${'A'.repeat(3000)}\nSCOPE: only the authorized local change\n${'Z'.repeat(6000)}`;
+  const h = harness([report('finished'), { ...report('approval'), status: 'waiting', text: approvalText, questionId: 'q1',
     request: { method: 'confirm', parentPolicy: { confirm: true } } }]);
   const pending = new Set(), requests = [];
   let toolRuns = 0, finishedInFlightTool = false, abortedInFlightTool = false;
@@ -144,6 +147,8 @@ test('waiting reaches the next model request while the parent keeps using tools'
   assert.equal(abortedInFlightTool, false, 'steering must not kill the tool already running');
   assert.ok(requests[1].some(message => typeof message.content === 'string' && message.content.includes('Question ID: q1')),
     'a blocked child must be visible before the parent makes another model request, not after it stops');
+  assert.ok(requests[1].some(message => typeof message.content === 'string' && message.content.includes(approvalText)),
+    'the SDK must forward the complete approval body to the next model request');
   assert.ok(requests[1].some(message => typeof message.content === 'string' && message.content.includes('· completed')),
     'a completion sharing the waiting batch must not be lost');
   assert.ok(requests[1].some(message => message.role === 'toolResult' && message.toolCallId === 'work-1'),
