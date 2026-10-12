@@ -28,7 +28,7 @@ test('multiple reports are batched, queued once while pending, and deduplicated 
   assert.deepEqual(h.sent[0].message.details.ids, ['first', 'second']);
   assert.match(h.sent[0].message.content, /\[Subagent agent · completed\]\nDONE/);
   assert.doesNotMatch(h.sent[0].message.content, /Full event log:|Result file:|trace|run first/);
-  assert.deepEqual(h.sent[0].options, { triggerTurn: true, deliverAs: 'followUp' });
+  assert.deepEqual(h.sent[0].options, { triggerTurn: true, deliverAs: 'steer' });
   deliverReports(h.manager, h.pi, h.ctx, pending);
   assert.equal(h.sent.length, 1, 'polling cannot queue a duplicate before message is persisted');
   // Pi persists ExtensionAPI.sendMessage as a SessionManager custom_message entry,
@@ -108,10 +108,12 @@ test('human-required requests remain visible even when the parent stays silent',
   assert.equal(h.statuses.at(-1)[1], undefined);
 });
 
-test('waiting reaches the next model request while the parent keeps using tools', async () => {
+for (const status of ['completed', 'waiting']) test(`${status} reaches the next model request while the parent keeps using tools`, async () => {
   const approvalText = `Command: ${'A'.repeat(3000)}\nSCOPE: only the authorized local change\n${'Z'.repeat(6000)}`;
-  const h = harness([report('finished'), { ...report('approval'), status: 'waiting', text: approvalText, questionId: 'q1',
-    request: { method: 'confirm', parentPolicy: { confirm: true } } }]);
+  const reports = [{ ...report('finished'), notificationId: 'finished-result' }];
+  if (status === 'waiting') reports.push({ ...report('approval'), status, text: approvalText, questionId: 'q1',
+    request: { method: 'confirm', parentPolicy: { confirm: true } } });
+  const h = harness(reports);
   const pending = new Set(), requests = [];
   let toolRuns = 0, finishedInFlightTool = false, abortedInFlightTool = false;
   const model = { id: 'offline', name: 'Offline', provider: 'offline', api: 'offline', reasoning: false,
@@ -145,12 +147,14 @@ test('waiting reaches the next model request while the parent keeps using tools'
   await agent.prompt('Keep working until the task is done.');
   assert.equal(finishedInFlightTool, true);
   assert.equal(abortedInFlightTool, false, 'steering must not kill the tool already running');
-  assert.ok(requests[1].some(message => typeof message.content === 'string' && message.content.includes('Question ID: q1')),
-    'a blocked child must be visible before the parent makes another model request, not after it stops');
-  assert.ok(requests[1].some(message => typeof message.content === 'string' && message.content.includes(approvalText)),
-    'the SDK must forward the complete approval body to the next model request');
+  if (status === 'waiting') {
+    assert.ok(requests[1].some(message => typeof message.content === 'string' && message.content.includes('Question ID: q1')),
+      'a blocked child must be visible before the parent makes another model request, not after it stops');
+    assert.ok(requests[1].some(message => typeof message.content === 'string' && message.content.includes(approvalText)),
+      'the SDK must forward the complete approval body to the next model request');
+  }
   assert.ok(requests[1].some(message => typeof message.content === 'string' && message.content.includes('· completed')),
-    'a completion sharing the waiting batch must not be lost');
+    'a completion must reach the next model request even without a waiting request in the batch');
   assert.ok(requests[1].some(message => message.role === 'toolResult' && message.toolCallId === 'work-1'),
     'the in-flight tool result must precede the next model request');
   assert.equal(toolRuns, 2);
@@ -184,8 +188,8 @@ test('nearby successes share a two-second window; later successes start a new ba
   assert.deepEqual(h.sent[1].message.details.ids, ['third']);
 });
 
-test('failure, waiting and inactivity alerts flush held successes without waiting', () => {
-  for (const status of ['failed', 'waiting', 'stalled']) {
+test('failure, waiting, stopped and inactivity alerts steer held successes without waiting', () => {
+  for (const status of ['failed', 'waiting', 'stopped', 'stalled']) {
     const reports = [{ ...report('success'), time: 1000 }];
     const h = harness(reports), pending = new Set();
     deliverReports(h.manager, h.pi, h.ctx, pending, 1200);
@@ -193,6 +197,7 @@ test('failure, waiting and inactivity alerts flush held successes without waitin
     reports.push({ ...report(status), time: 1300, status, text: status === 'waiting' ? 'Approve one operation?' : 'Needs attention' });
     deliverReports(h.manager, h.pi, h.ctx, pending, 1300);
     assert.deepEqual(h.sent[0].message.details.ids, ['success', status]);
+    assert.deepEqual(h.sent[0].options, { triggerTurn: true, deliverAs: 'steer' });
     assert.equal(h.sent.length, 1);
   }
 });
@@ -208,13 +213,11 @@ test('long output previews the original tail and points to the exact result', ()
   assert.match(content, /truncated.*subagent_query.*agent/is);
 });
 
-for (const status of ['completed', 'waiting']) test(`${status} delivery uses the right queue and replays only lost receipts`, async () => {
-  const r = { ...report('original-run'), notificationId: `original-run-${status === 'waiting' ? 'q1' : 'result'}`, status,
+for (const status of ['completed', 'failed', 'stopped', 'waiting', 'stalled']) test(`${status} delivery steers and replays only lost receipts`, async () => {
+  const r = { ...report('original-run'), notificationId: `original-run-${status === 'waiting' ? 'q1' : status === 'stalled' ? 'inactive' : 'result'}`, status,
     ...(status === 'waiting' ? { questionId: 'q1', request: { method: 'confirm', parentPolicy: { confirm: true } } } : {}) };
   const h = harness([r]), queued = [], calls = [], pending = new Set();
-  const mode = status === 'waiting' ? 'steer' : 'followUp';
-  const wrong = () => { throw Error(`expected ${mode}`); };
-  const host = { isStreaming: true, agent: { followUp: wrong, steer: wrong, [mode]: message => queued.push(message) },
+  const host = { isStreaming: true, agent: { followUp: () => { throw Error('notifications must not wait for the parent to stop'); }, steer: message => queued.push(message) },
     _runAgentPrompt: async message => queued.push(message) };
   h.pi.sendMessage = (message, options) => { calls.push(AgentSession.prototype.sendCustomMessage.call(host, message, options)); };
   deliverReports(h.manager, h.pi, h.ctx, pending);

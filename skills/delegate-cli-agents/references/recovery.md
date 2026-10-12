@@ -10,7 +10,7 @@ conflicts, uncertain integrations, stale locks, unreadable instances and failed 
 
 Use `subagent_query({ action: "activity", id })` for bounded recent activity and its opaque cursor for older pages. Read notice and truncation/partial markers. An invalid or stale cursor fails explicitly; it does not silently reset. This projection is not the full final result and reads retained logs without starting a native process. Do not poll it for completion.
 
-Reports return automatically to their original parent. Batches containing waiting requests use steer before a busy parent's next model request; other batches use followUp after its current execution. Neither cancels an in-flight tool. An idle parent may start a new turn. Continue independent work or end the turn instead of polling or sleeping; do not assume a completion report reaches a busy parent at its next model request.
+自动协作通知（waiting/completed/failed/stopped/stalled）返回原父会话，统一用 steer 在忙碌父代理的下一次模型请求前送达，不取消在途工具。成功报告仍有两秒合批窗口；普通活动只在查看器展示，不触发模型轮次。空闲父代理可能启动新轮；继续独立工作或结束当前轮，不靠轮询或 sleep 等待。
 
 Queued notifications are not delivery receipts until recorded in parent history. Reopening the original parent replays unrecorded reports with their original run IDs; recorded reports are not delivered again.
 

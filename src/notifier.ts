@@ -149,10 +149,9 @@ export function deliverReports(
   try {
     // Display metadata is separate from model-facing content and the receipt IDs.
     const displayReports = prepared.map(({ report: { agentId, status } }) => ({ agentId, status }));
-    // A blocked child needs a decision before the parent's next model request, not after it
-    // finishes all work. Other batches remain follow-ups; neither mode aborts a running tool.
-    const deliverAs = prepared.some(({ report }) => report.status === "waiting") ? "steer" : "followUp";
-    pi.sendMessage({ customType, content, display: true, details: { ids, reports: displayReports } }, { triggerTurn: true, deliverAs });
+    // Collaboration events update the parent's next decision, not a later follow-up run.
+    // Steering does not abort an in-flight tool; coalescing and receipts stay unchanged.
+    pi.sendMessage({ customType, content, display: true, details: { ids, reports: displayReports } }, { triggerTurn: true, deliverAs: "steer" });
   } catch (error) {
     for (const id of ids) pending.delete(id);
     throw error;
