@@ -87,12 +87,13 @@ pi --extension /absolute/path/to/pi-cli-subagents/dist/index.js \
 
 | 父代理可用工具 | 用途 |
 | --- | --- |
-| `subagent` | `start` 启动角色、`send` 向原实例发消息、`interrupt` 中断当前轮、`stop` 释放进程 |
+| `subagent` | `start` 启动角色、`send` 向原实例发消息、`interrupt` 中断当前轮、`stop` 释放进程；`workspace_create` / `workspace_integrate` 管理工作树 |
 | `subagent_query` | `list` 查看元数据与工作区、`get` 查看详情、`result` 读取精确结果、`activity` 翻阅活动 |
 | `subagent_reply` | 附具体理由，回答一个当前请求 |
-| `subagent_workspace` | 显式 `create` 托管工作树或 `integrate` 待集成改动 |
 
-`subagent_query({action: "list"})` 只返回元信息，不携带结果正文；传 `{action: "get", id}` 可查看当前详情与有界预览。终态报告通知提供 `subagent_query({action: "result", id, runId})` 入口，读取该轮的原始结果。长结果保持两个 ID 不变，将返回的 `nextOffset` 作为 `offset` 继续读取，直到其为 `null`（`limit` 默认及上限为 6000 个 UTF-16 代码单元）。读取结果不会唤醒或恢复代理。
+工作区操作已合并进 `subagent`，不再注册或保留 `subagent_workspace` 别名；原工作区 ID、记录和安全校验不变。按旧工具名配置的外部允许列表需要复核新的动作边界；本次不自动迁移用户设置，也不自动重放旧调用或不确定操作。
+
+`subagent_query({action: "list"})` 只返回元信息，`{action: "get", id}` 提供有界预览。仅截断终态通知附精确轮次的结果定位器，`offset` 从省略区起点开始，`limit` 限定本页长度；按定位器补齐，超过一页时沿 `nextOffset` 继续，不跳过中段，也不重读已显示的尾部。若只有 get 的预览或单独读取 result，则保持两个 ID 不变，沿 `nextOffset` 读至 null（`limit` 默认及上限为 6000 个 UTF-16 代码单元）。读取不会唤醒或恢复代理，读全也不等于核验主张。
 
 查看近期活动用 `subagent_query({action: "activity", id})`，再传回返回的 `cursor` 翻旧页。页内按时间正序；`limit` 为 1–100 条（默认 20），`maxBytes` 为整个 JSON 响应的 4096–65536 个 UTF-8 字节（默认 16384）。非法或已检测失效的 cursor 明确报错；`partial`、`truncated`/`omittedBytes` 和 `notice` 分别提示组边界、不完整文字及不可读证据。完整终答仍用 `result`；活动查询不启动 CLI、不改写日志，也不替代自动完成通知。
 
@@ -118,9 +119,9 @@ Pi 和 Codex 支持运行中的 `steer` 消息；运行中的 `followUp` 仅 Pi 
 
 让 Pi 为**每项可独立集成的改动创建一个托管工作区**：
 
-1. `subagent_workspace({action: "create"})` 从已提交的 HEAD 创建 detached 工作树。父仓库未提交的文件只报告、**不继承**；要继承，须先检查并取得明确授权，再使用 `includeUncommitted`。
+1. `subagent({action: "workspace_create"})` 从已提交的 HEAD 创建 detached 工作树。父仓库未提交的文件只报告、**不继承**；要继承，须先检查并取得明确授权，再使用 `includeUncommitted`。
 2. 用 `subagent({action: "start", role, task, workspace})` 启动任务。不同工作区可以并行；同一工作区只能有一个活跃实例，释放后可交给另一个实例。
-3. 按用户工作流决定何时调用 `subagent_workspace({action: "integrate", workspace})`。插件检查技术安全条件，不判断是否遵循了某种审查流程。
+3. 按用户工作流决定何时调用 `subagent({action: "workspace_integrate", workspace})`。插件检查技术安全条件，不判断是否遵循了某种审查流程。
 4. 集成后或其他实例同步后，续聊需显式选择 `baseline: "keep"`（沿用工作区当前文件）或 `"sync"`（从父仓库更新）。有未集成或已暂存改动时，sync 会拒绝；后续集成只应用新增量。
 
 集成不改变父仓库的 HEAD、索引和分支。工作树位于 `<仓库>.worktrees/`，不会自动安装依赖或授予信任。共享 `cwd` **不隔离文件**，工作树**不隔离操作系统权限**。

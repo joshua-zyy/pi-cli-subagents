@@ -12,9 +12,9 @@ function harness() {
   return { tools, ctx, invoke: (name, args) => tools.get(name).execute('contract', args, undefined, undefined, ctx) };
 }
 
-test('only four root-object tools are exposed; old command names are not aliases', () => {
+test('only three root-object tools are exposed; old command names are not aliases', () => {
   const { tools } = harness();
-  assert.deepEqual([...tools.keys()].sort(), ['subagent', 'subagent_query', 'subagent_reply', 'subagent_workspace']);
+  assert.deepEqual([...tools.keys()].sort(), ['subagent', 'subagent_query', 'subagent_reply']);
   for (const tool of tools.values()) {
     assert.equal(tool.parameters.type, 'object');
     assert.equal(tool.parameters.additionalProperties, false);
@@ -41,9 +41,14 @@ test('action validation refuses missing, irrelevant and unknown fields before ru
     ['subagent_query', { action: 'get', id: 'old', cursor: 'cursor' }, /cursor/],
     ['subagent_query', { action: 'result', id: 'old', runId: 'run', maxBytes: 4096 }, /maxBytes/],
     ['subagent_query', { action: 'other' }, /action/],
-    ['subagent_workspace', { action: 'create', workspace: 'old' }, /workspace/],
-    ['subagent_workspace', { action: 'integrate' }, /workspace/],
-    ['subagent_workspace', { action: 'integrate', workspace: 'old', includeUncommitted: { reason: 'not applicable' } }, /includeUncommitted/],
+    ['subagent', { action: 'workspace_create', workspace: 'old' }, /workspace/],
+    ['subagent', { action: 'workspace_create', cwd: 'other' }, /cwd/],
+    ['subagent', { action: 'workspace_create', id: 'old' }, /id/],
+    ['subagent', { action: 'workspace_create', options: {} }, /options/],
+    ['subagent', { action: 'workspace_integrate' }, /workspace/],
+    ['subagent', { action: 'workspace_integrate', workspace: 'old', includeUncommitted: { reason: 'not applicable' } }, /includeUncommitted/],
+    ['subagent', { action: 'create' }, /action/],
+    ['subagent', { action: 'integrate', workspace: 'old' }, /action/],
     ['subagent_reply', { id: 'old', questionId: 'q', reason: 'reason', confirmed: true, actor: 'human' }, /actor/],
   ]) await assert.rejects(invoke(tool, args), pattern, JSON.stringify({tool, args}));
 });
@@ -60,13 +65,17 @@ test('the reply tool exposes one structured answer map without changing the pare
 });
 
 test('the stop and workspace actions retain the existing runtime operation and target', async t => {
-  const { invoke } = harness(), calls = [];
+  const { tools, invoke } = harness(), calls = [];
   t.mock.method(AgentManager.prototype, 'close', async id => { calls.push(['stop', id]); return { id, phase: 'stopped' }; });
   t.mock.method(WorkspaceStore.prototype, 'create', async (cwd, args) => { calls.push(['create', cwd, args]); return { id: 'workspace' }; });
   t.mock.method(WorkspaceStore.prototype, 'integrate', async id => { calls.push(['integrate', id]); return { workspace: id, status: 'applied' }; });
   await invoke('subagent', { action: 'stop', id: 'original' });
-  await invoke('subagent_workspace', { action: 'create', includeUncommitted: { reason: 'explicit authorization' } });
-  await invoke('subagent_workspace', { action: 'integrate', workspace: 'workspace' });
+  for (const args of [{ action: 'workspace_create', includeUncommitted: { reason: 'explicit authorization' } },
+    { action: 'workspace_integrate', workspace: 'workspace' }]) {
+    const parsed = validateToolArguments(tools.get('subagent'), { id: 'workspace', name: 'subagent', arguments: args });
+    assert.deepEqual(parsed, args);
+    await invoke('subagent', parsed);
+  }
   assert.deepEqual(calls, [
     ['stop', 'original'],
     ['create', process.cwd(), { includeUncommitted: { reason: 'explicit authorization' } }],

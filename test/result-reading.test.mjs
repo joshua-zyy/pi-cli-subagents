@@ -139,7 +139,7 @@ test('inventory omits report bodies while instance details retain a bounded prev
   assert.ok(JSON.stringify(listed).length < 6000);
   const detail = (await h.invoke({ action: 'get', id: agents[0].id })).agents[0];
   assert.equal(detail.text, longText.slice(0, 12000)); assert.equal(detail.truncated, true);
-  assert.equal(h.tools.size, 4, 'reading results does not add a tool');
+  assert.equal(h.tools.size, 3, 'reading results does not add a tool');
 });
 
 test('result pages reconstruct every character, including middle evidence and split Unicode', async () => {

@@ -39,7 +39,7 @@ test('dispatch exposes delegation guidance and effective roles without model set
   assert.match(h.description(), /analyst.*Project analysis/);
   assert.match(h.description(), /projectonly.*Project only/);
   assert.doesNotMatch(h.description(), /Personal analysis|PRIVATE_/);
-  assert.equal(h.tools.size, 4);
+  assert.equal(h.tools.size, 3);
 });
 
 test('the parent sees the delegation guidance exactly once, whichever carrier holds it', async t => {
@@ -95,11 +95,16 @@ test('dispatch refuses inherited role properties but accepts an explicitly confi
   assert.deepEqual(calls, [{ name: 'constructor', resolved: configured }], 'check ownership, not a name blacklist');
 });
 
-test('instance queries no longer load role configuration or return a redundant catalog', async t => {
+test('instance queries and workspace operations stay independent of invalid role configuration', async t => {
   const h = harness(t); h.write('user', { invalid: {} });
   t.mock.method(AgentManager.prototype, 'list', () => []);
   t.mock.method(WorkspaceStore.prototype, 'list', async () => []);
   h.ctx.sessionManager.getSessionFile = () => '/fixture/parent.jsonl';
   const response = await h.tools.get('subagent_query').execute('query', { action: 'list' }, undefined, undefined, h.ctx);
   assert.deepEqual(JSON.parse(response.content[0].text), { agents: [], workspaces: [] });
+  t.mock.method(WorkspaceStore.prototype, 'create', async () => ({ id: 'workspace' }));
+  t.mock.method(WorkspaceStore.prototype, 'integrate', async id => ({ workspace: id, status: 'no_changes' }));
+  const workspace = async args => JSON.parse((await h.tools.get('subagent').execute('workspace', args, undefined, undefined, h.ctx)).content[0].text);
+  assert.deepEqual(await workspace({ action: 'workspace_create' }), { id: 'workspace' });
+  assert.deepEqual(await workspace({ action: 'workspace_integrate', workspace: 'workspace' }), { workspace: 'workspace', status: 'no_changes' });
 });

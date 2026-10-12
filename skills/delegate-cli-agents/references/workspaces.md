@@ -8,7 +8,7 @@ requirements; passing `cwd` instead uses that directory directly without creatin
 
 ## Create
 
-`subagent_workspace({ action: "create" })` reports the workspace but does **not** inherit uncommitted parent files. Inspect
+`subagent({ action: "workspace_create" })` reports the workspace but does **not** inherit uncommitted parent files. Inspect
 its committed baseline and the `parentChanges` it reports before you spawn.
 
 To inherit dirty files, inspect **all** current changes and get the user's authorization first.
@@ -39,7 +39,7 @@ When you choose keep or sync, the extension appends a baseline notice to the chi
 
 ## Integrate
 
-`subagent_workspace({ action: "integrate", workspace })` applies pending changes to the main directory. On conflicts, stop and
+`subagent({ action: "workspace_integrate", workspace })` applies pending changes to the main directory. On conflicts, stop and
 inspect rather than forcing application — see [recovery.md](recovery.md) for the stuck and uncertain
 cases. Do not make branch commits, push, delete worktrees, or widen the task by default.
 

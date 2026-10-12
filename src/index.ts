@@ -199,40 +199,30 @@ export default function extension(pi: ExtensionAPI): void {
     }
   }
 
-  pi.registerTool({
-    name: "subagent_workspace", label: "Subagent workspace",
-    description: "Create or integrate this parent's detached Git worktrees. create starts from committed HEAD; inherit all uncommitted changes only with explicit authorization. Each workspace has one runtime owner. Stop its owner, including idle processes, before handoff or integration.\n\nintegrate applies only pending changes, rejects conflicts before writing, and preserves parent HEAD, index and branches. No dependency installs, pushes or cleanup.",
-    parameters: Type.Object({
-      action: Type.Union([Type.Literal("create"), Type.Literal("integrate")]),
-      workspace: Type.Optional(Type.String({ description: "Required for integrate; workspace ID returned by create" })),
-      includeUncommitted: Type.Optional(Type.Object({ reason: Type.String({ minLength: 1, description: "create only: why the user authorized inheriting ALL current uncommitted parent changes" }) }, { additionalProperties: false })),
-    }, { additionalProperties: false }),
-    async execute(_id, args, _signal, _update, ctx) {
-      if (args.action === "create") {
-        checkFields(args, ["action"], ["includeUncommitted"]);
-        return content(JSON.stringify(await parentManager(ctx, launch).workspaces.create(ctx.cwd, { includeUncommitted: args.includeUncommitted })));
-      }
-      if (args.action !== "integrate") throw new Error("Unknown workspace action; use create or integrate");
-      checkFields(args, ["action", "workspace"]);
-      return content(JSON.stringify(await parentManager(ctx, launch).workspaces.integrate(args.workspace!)));
-    },
-  });
   const registerSubagent = (catalog: string): void => pi.registerTool({
     name: "subagent", label: "CLI subagent",
-    description: `Start or continue a persistent CLI subagent. send keeps the same native session: idle starts a new run; closed resumes the original session. interrupt ends only the current turn; stop releases active or idle processes while retaining sessions, history and results. Answer pending interactions with subagent_reply.\n\nGive the goal, necessary context, authorized scope and acceptance criteria; a new instance has not seen this conversation. Let the child choose its approach unless required behavior constrains it.\n\nReports return automatically. Do not sleep or poll for completion; continue independent work or end this turn. Receipts do not prove execution or success. Inspect uncertain outcomes before retrying; do not bypass refusals with replacement instances or edited records.\n\n${catalog}`,
+    description: `Start or continue a persistent CLI subagent. send keeps the same native session: idle starts a new run; closed resumes the original session. interrupt ends only the current turn; stop releases active or idle processes while retaining sessions, history and results. Answer pending interactions with subagent_reply.\n\nworkspace_create creates this parent's detached Git worktree from committed HEAD; inherit ALL uncommitted parent changes only with explicit authorization. Each workspace has one runtime owner; stop it, including idle processes, before handoff or workspace_integrate. Integration applies only pending changes, rejects conflicts before writing, and preserves parent HEAD, index and branches. No dependency installs, pushes or cleanup.\n\nGive the goal, necessary context, authorized scope and acceptance criteria; a new instance has not seen this conversation. Let the child choose its approach unless required behavior constrains it.\n\nReports return automatically. Do not sleep or poll for completion; continue independent work or end this turn. Receipts do not prove execution or success. Inspect uncertain outcomes before retrying; do not bypass refusals with replacement instances or edited records.\n\n${catalog}`,
     parameters: Type.Object({
-      action: Type.Union([Type.Literal("start"), Type.Literal("send"), Type.Literal("interrupt"), Type.Literal("stop")], { description: "interrupt is Pi/Codex only. send to a stopping instance waits for release before attempting original-session resume; uncertain release rejects." }),
+      action: Type.Union([Type.Literal("start"), Type.Literal("send"), Type.Literal("interrupt"), Type.Literal("stop"), Type.Literal("workspace_create"), Type.Literal("workspace_integrate")], { description: "interrupt is Pi/Codex only. send to a stopping instance waits for release before attempting original-session resume; uncertain release rejects." }),
       role: Type.Optional(Type.String({ description: "start only, required: configured role name" })),
       task: Type.Optional(Type.String({ description: "start only, required: task and authorized scope" })),
       cwd: Type.Optional(Type.String({ description: "start only: defaults to parent cwd; mutually exclusive with workspace" })),
-      workspace: Type.Optional(Type.String({ description: "start only: managed workspace ID; mutually exclusive with cwd" })),
+      workspace: Type.Optional(Type.String({ description: "start/workspace_integrate: managed workspace ID; required for workspace_integrate; start excludes cwd" })),
       id: Type.Optional(Type.String({ description: "send/interrupt/stop only, required: existing instance ID" })),
       message: Type.Optional(Type.String({ description: "send only, required: follow-up goal, new context and changed constraints; repeat the full task only when needed" })),
       mode: Type.Optional(Type.Union([Type.Literal("steer"), Type.Literal("followUp")], { description: "send only, defaults to steer. Running Pi: steer supplies input before a subsequent model request without cancelling the in-flight tool; followUp waits until the current execution has no more tool calls. Running Codex supports steer only; Claude requires the current run to finish. This selects child input delivery, not parent report delivery." })),
       baseline: Type.Optional(Type.Union([Type.Literal("keep"), Type.Literal("sync")], { description: "managed-workspace send only, required when a changed baseline needs acknowledgement. keep uses current workspace files; it does not restore remembered files. sync updates from the parent, refuses active, staged or unintegrated work and other runtime owners, and closes the target idle runtime before preflight; a later refusal may leave it closed. Child session memory may be stale after either choice." })),
-      includeUncommitted: Type.Optional(Type.Object({ reason: Type.String({ minLength: 1, description: "send with sync only: why all current parent changes are authorized for inheritance" }) }, { additionalProperties: false })),
+      includeUncommitted: Type.Optional(Type.Object({ reason: Type.String({ minLength: 1, description: "workspace_create or send with sync only: why ALL current uncommitted parent changes are authorized for inheritance" }) }, { additionalProperties: false })),
     }, { additionalProperties: false }),
     async execute(_id, args, _signal, _update, ctx) {
+      if (args.action === "workspace_create") {
+        checkFields(args, ["action"], ["includeUncommitted"]);
+        return content(JSON.stringify(await parentManager(ctx, launch).workspaces.create(ctx.cwd, { includeUncommitted: args.includeUncommitted })));
+      }
+      if (args.action === "workspace_integrate") {
+        checkFields(args, ["action", "workspace"]);
+        return content(JSON.stringify(await parentManager(ctx, launch).workspaces.integrate(args.workspace!)));
+      }
       if (args.action === "start") {
         checkFields(args, ["action", "role", "task"], ["cwd", "workspace"]);
         if (args.workspace !== undefined && args.cwd !== undefined) throw new Error("Pass workspace or cwd, not both");
@@ -254,7 +244,7 @@ ${receiptText(state)}`;
         if (hasFailure(state)) throw new Error(`${result}\nInspect the instance before retrying; work may already have run.`);
         return content(state.receipt?.status === "accepted" || state.receipt?.status === "queued" ? `${result}\n${REPORT_GUIDANCE}` : result);
       }
-      if (args.action !== "stop" && args.action !== "interrupt") throw new Error("Unknown subagent action; use start, send, interrupt or stop");
+      if (args.action !== "stop" && args.action !== "interrupt") throw new Error("Unknown subagent action; use start, send, interrupt, stop, workspace_create or workspace_integrate");
       checkFields(args, ["action", "id"]);
       const manager = parentManager(ctx, launch);
       const state = args.action === "interrupt" ? await manager.interrupt(args.id!) : await manager.close(args.id!);

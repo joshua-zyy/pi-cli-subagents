@@ -1,25 +1,24 @@
-# CLI Subagent Four-Tool Interface Design
+# CLI Subagent 三工具接口
 
-Status: the four tools, role catalog and follow-up notifications were implemented in separate increments, with `b406426` as the code baseline. Local verification passed; the real-model and real-CLI collaboration experience has not yet been accepted.
+当前入口为 `subagent`、`subagent_query`、`subagent_reply`：工作区 create/integrate 已并入 `subagent` 的显式动作，能力、记录格式和安全校验不变，不保留旧工作区工具别名。下文四工具阶段的提交、测试数字与测量保留为历史证据，不代表本次合并的真实模型验收。
 
 The current scope covers only CLI subagent dispatch and management by the parent Pi agent. `@role` and a new direct user dispatch entry point are deferred; the existing user management UI remains. This document refines the product goals and does not authorize further code changes, real dispatch or model calls.
 
 ## 1. Design conclusion
 
-Use four tools with separate responsibilities, exposing the role catalog directly in the dispatch tool's description. Preserve native sessions, historical results and workspace identity; do not reduce the tool count by removing capabilities.
+使用三个根对象工具：`subagent` 管理实例及工作区，`subagent_query` 只读查询，`subagent_reply` 答复原请求。动态角色目录仍直接放在调度工具说明里；合并入口不删除原生会话、历史结果或工作区能力，也不新增不透明 options。
 
-| New tool | Operations | Existing capability source |
+| Tool | Operations | Existing capability source |
 |---|---|---|
-| `subagent` | `start` / `send` / `interrupt` / `stop` | `spawn_agent` / `send_input` / `close_agent` |
+| `subagent` | `start` / `send` / `interrupt` / `stop` / `workspace_create` / `workspace_integrate` | Instance lifecycle and existing `WorkspaceStore.create` / `integrate` |
 | `subagent_query` | `list` / `get` / `result` / `activity` | Existing inventory/result reads plus bounded projected history |
 | `subagent_reply` | Answer one specific request; no action required | `respond_to_permission` |
-| `subagent_workspace` | `create` / `integrate` | `create_workspace` / `integrate_workspace` |
 
-Do not add automatic task assignment, automatic instance reuse, model overrides, mandatory reviews, automatic retries or an automatic worktree policy. Workspace tools remain available normally; the user and parent agent decide whether to use them, without an additional opt-in switch.
+Do not add automatic task assignment, automatic instance reuse, model overrides, mandatory reviews, automatic retries or an automatic worktree policy. Workspace actions remain available normally; the user and parent agent decide whether to use them, without an additional opt-in switch.
 
 The following is a logical parameter contract, not the final TypeBox/JSON Schema code. Each action has its own required and allowed fields; inapplicable fields must be rejected rather than silently ignored. The implementation uses a root-object schema with additional action-level field checks before execution. Local interface tests have passed; neither documentation examples nor local success establish compatibility with every model endpoint.
 
-## 2. `subagent`: instance lifecycle
+## 2. `subagent`：实例生命周期与工作区
 
 ### 2.1 Parameters
 
@@ -29,6 +28,8 @@ The following is a logical parameter contract, not the final TypeBox/JSON Schema
 | `send` | `id`, `message` | `mode`, `baseline`, `includeUncommitted` | Deliver instructions while running, or begin a new run in the same native session after completion |
 | `interrupt` | `id` | None | End only the captured current turn, retaining a usable runtime; unsupported backends reject |
 | `stop` | `id` | None | Release active/idle native resources while retaining the native session and history; do not delete files or roll back changes |
+| `workspace_create` | None | `includeUncommitted: { reason }` | 从当前 Pi cwd 所属仓库的已提交 HEAD 创建托管工作树；见 §5 |
+| `workspace_integrate` | `workspace` | None | 向原父目录集成该工作区的待集成改动；见 §5 |
 
 `start` defaults to the current Pi working directory; when workspace is specified, resolve its actual path from the record. The role must exist in the current effective configuration. Resolve CLI, provider and model from role configuration; do not expose per-run model-routing parameters. task/message must be non-empty.
 
@@ -96,7 +97,7 @@ The example role name does not require the extension to provide that built-in ro
 | `result` | `id`, `runId` | `offset`, `limit` | Pages of the specified run's original final report |
 | `activity` | `id` | `cursor`, `limit`, `maxBytes` | Recent projected entries, then older pages via the returned cursor |
 
-Keep the workspace inventory in `list` so reusable workspaces and their occupation can be discovered without a fifth listing tool. `get` may include necessary information about the instance's associated workspace; do not add cross-parent-session scanning.
+Keep the workspace inventory in `list` so reusable workspaces and their occupation can be discovered without a separate workspace-list tool. `get` may include necessary information about the instance's associated workspace; do not add cross-parent-session scanning.
 
 The result action retains the current pagination contract: offset defaults to 0; limit defaults to and cannot exceed 6000 UTF-16 code units. Return `agentId`, `runId`, `status`, `time`, `error`, `offset`, `totalLength`, `nextOffset` and `text`. Keep id/runId fixed and follow nextOffset until null.
 
@@ -174,12 +175,12 @@ The response is one `control_response` bound to the original request/tool-use/me
 
 Local parser, protocol, public-tool, audit and human-entry tests cover this mapping. Native startup and extracted admission-helper probes are separate from a real Claude turn: no model-driven `AskUserQuestion` round trip is claimed or authorized by this document. The extracted admission helper belongs to a native strict-policy branch; its activation on this stdio launch path, including its rejection and quoting behavior, has not been established. The extension applies its own checks without relying on native enforcement. The public SDK reference is [Handle approvals and user input](https://platform.claude.com/docs/en/agent-sdk/user-input); the stricter bounds and card-field rules were checked against the installed 2.1.283 executable.
 
-## 5. `subagent_workspace`: managed worktrees
+## 5. `subagent` 的工作区动作
 
 | action | Required | Optional | Returns |
 |---|---|---|---|
-| `create` | None | `includeUncommitted: { reason }` | Workspace id, path/cwd, baseline, revision, state, parent-directory uncommitted changes and occupation information |
-| `integrate` | `workspace` | None | workspace, status, changedFiles and patchFile where applicable |
+| `workspace_create` | None | `includeUncommitted: { reason }` | Workspace id, path/cwd, baseline, revision, state, parent-directory uncommitted changes and occupation information |
+| `workspace_integrate` | `workspace` | None | workspace, status, changedFiles and patchFile where applicable |
 
 Create uses the repository containing the current Pi working directory. It defaults to committed HEAD and must not silently inherit uncommitted changes. Inheriting all current uncommitted changes requires explicit authorization. Do not add creation from arbitrary refs, branches or PRs in this phase.
 
@@ -206,7 +207,7 @@ subagent.start(workspace=W1)  subagent.start(workspace=W2)
 Check results according to the user's workflow, then workspace.integrate each
 ```
 
-Here workspace.* is documentation shorthand; actual calls use `subagent_workspace(action=...)`. This is not an automatic default pipeline. Tasks that do not need isolation can still specify cwd or use the current directory.
+此处 workspace.* 只是文档简写，实际调用使用 `subagent({action: "workspace_create"})` 或 `subagent({action: "workspace_integrate", workspace})`。这不是自动默认流水线；无需隔离的任务仍可指定 cwd 或使用当前目录。
 
 ## 6. Role discovery and automatic return
 
@@ -218,7 +219,7 @@ Codex roles additionally accept the optional boolean `defaultModeQuestions`; it 
 
 Zero-model checks with 0.159.2 covered both native on/off baselines and all three role values via `features list` and the production adapter’s `initialize` → `thread/start` → `config/read`, with unchanged config files and clean exits. Initial launch and saved-role resume are covered by local protocol tests. Native cross-process resume was not covered: an empty zero-turn thread returned a future rollout path but created no rollout, so a later `thread/resume` returned `no rollout found`. The failed probe is not counted as a pass; real question delivery and resume of a thread with actual history remain separate acceptance work.
 
-Results and actionable blockers use the existing automatic notification channel; the child does not need a separate reporting tool. Notifications bind the original parent session, instance and run and provide the new result query entry point. Long originals use a preview plus full-text pagination, without deleting evidence.
+结果与阻塞仍自动返回原父会话并绑定原实例/run，不新增报告工具。审批／待答正文完整呈现；普通长结果保留头尾预览，只有截断最终报告附省略区起点和有界长度的 result 定位器。分页补齐全部省略内容后无需重读已显示尾部；单独读取 result 或 get 预览仍可沿 nextOffset 读至 null。完整呈现与收到报告均不等于核验。
 
 Notification semantics: an idle parent may be triggered to handle the event. A batch containing a waiting request uses `steer`, reaching a busy parent before its next model request without aborting an in-flight tool; other batches use `followUp`. This differs from the original all-follow-up implementation and is independent of `subagent.send.mode`. The queue is not a persisted receipt. Resuming the original parent can redeliver unrecorded notifications, while recorded notifications are deduplicated by ID. This is not an exactly-once guarantee under every failure mode.
 
@@ -230,13 +231,13 @@ The extension does not decide that the parent must implement, review or integrat
 
 ## 7. Migration strategy and verification gates
 
-Do not expose the new four tools and old seven tools to the model simultaneously. Update tool descriptions, the skill, notification result-reading hints and relevant tests together; do not keep permanent parallel entry points solely to preserve old tool names.
+只暴露三个当前工具，不并列保留旧七工具或 `subagent_workspace` 别名。旧工作区调用必须改为 `subagent` 的 `workspace_create` / `workspace_integrate`；不自动重映射或重放。外部按工具名配置的允许列表需复核新的动作边界，本次不改用户设置。同步说明、技能和测试，但不迁移既有工作区数据。
 
 Preserve original sessions, instance IDs, run IDs, role snapshots and workspace records. Renaming tools must not create new instances or rewrite old reports. Old tool-call hints in historical notifications remain original history. Current usage guidance names only supported tools. Read historical notifications using their original instance/run IDs with `subagent_query`, without editing old evidence.
 
 | Verification area | Required evidence |
 |---|---|
-| Tool definitions | Only four tools exposed; role catalog reflects effective configuration; action-level validation rejects unknown or inapplicable fields |
+| Tool definitions | Only three tools exposed; role catalog reflects effective configuration; action-level validation rejects unknown or inapplicable fields |
 | Lifecycle mapping | Start creates a new instance; send continues the original identity; unsupported modes fail explicitly; timeouts/rejections do not trigger automatic replacement |
 | Queries and replies | Queries have no execution side effects; full results can be reconstructed; reply ownership, expiration, type and humanOnly behavior do not regress |
 | Workspaces | Two instances use separate worktrees; one workspace supports sequential handoff; conflict rejection, incremental integration and baseline continuation remain correct |

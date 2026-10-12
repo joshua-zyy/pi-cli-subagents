@@ -87,12 +87,13 @@ Tools in the live viewer default to one-line summaries, including failures (mark
 
 | Tool available to the parent | Purpose |
 | --- | --- |
-| `subagent` | `start` a configured role, `send` to an existing instance, `interrupt` a current turn, or `stop`/release processes |
+| `subagent` | `start` a configured role, `send` to an existing instance, `interrupt` a turn, `stop`/release processes; `workspace_create` / `workspace_integrate` manage worktrees |
 | `subagent_query` | `list` metadata/workspaces, `get` details, read an exact `result`, or page projected `activity` |
 | `subagent_reply` | Answer one current request with an explicit reason |
-| `subagent_workspace` | Explicitly `create` a managed worktree or `integrate` its pending changes |
 
-`subagent_query({action: "list"})` returns metadata without result bodies; `{action: "get", id}` adds the current bounded preview. Final notifications include a `subagent_query({action: "result", id, runId})` link to the original result for that exact run. For longer results, keep both IDs fixed and pass the returned `nextOffset` as `offset` until it is `null` (default/max `limit: 6000` UTF-16 code units). Reading results never resumes an agent.
+Workspace actions now share `subagent`; `subagent_workspace` is no longer registered or aliased. Existing workspace IDs, records and safeguards are unchanged. Review external tool-name allowlists for this new action boundary; no user settings are migrated and uncertain old calls must not be replayed automatically.
+
+`subagent_query({action: "list"})` returns metadata without result bodies; `{action: "get", id}` adds a bounded preview. Only clipped final notifications include an exact-run result locator, with `offset` at the omitted section and a bounded `limit`. Read that section, following `nextOffset` if it exceeds a page; do not skip the middle or re-read the displayed tail. For a get preview or standalone result read, keep both IDs fixed and follow `nextOffset` until null (default/max `limit: 6000` UTF-16 code units). Reading results never resumes an agent or verifies its claims.
 
 For recent activity use `subagent_query({action: "activity", id})`, then pass its `cursor` for older pages. Each page is chronological; `limit` is 1–100 entries (default 20), and `maxBytes` is 4096–65536 UTF-8 bytes for the whole JSON response (default 16384). Invalid/stale cursors fail explicitly. `partial`, `truncated`/`omittedBytes` and `notice` distinguish bounded or unavailable evidence; use `result` for the complete final answer. Activity does not start a CLI, rewrite logs or replace automatic completion notifications.
 
@@ -118,9 +119,9 @@ Pi and Codex accept running `steer` messages; running `followUp` is Pi-only. Wai
 
 Ask Pi to use **one managed workspace per independently integrable change**:
 
-1. `subagent_workspace({action: "create"})` creates a detached worktree from committed HEAD. Dirty parent files are reported, **not inherited**; inheriting them requires inspection and explicit authorization via `includeUncommitted`.
+1. `subagent({action: "workspace_create"})` creates a detached worktree from committed HEAD. Dirty parent files are reported, **not inherited**; inheriting them requires inspection and explicit authorization via `includeUncommitted`.
 2. Use `subagent({action: "start", role, task, workspace})`. Different workspaces may run concurrently; one workspace permits one active instance at a time and can be reused after release.
-3. Use `subagent_workspace({action: "integrate", workspace})` when appropriate for your workflow. The extension checks technical safety, not whether a particular review procedure was followed.
+3. Use `subagent({action: "workspace_integrate", workspace})` when appropriate for your workflow. The extension checks technical safety, not whether a particular review procedure was followed.
 4. To continue after integration or another instance's sync, explicitly choose `baseline: "keep"` (current workspace files) or `"sync"` (update from the parent). Sync refuses unintegrated or staged work; later integration applies only the new increment.
 
 Integration leaves the parent's HEAD, index, and branches unchanged. Worktrees live under `<repo>.worktrees/`; dependencies and trust are not set up automatically. Shared `cwd` sessions do **not** isolate files, and worktrees do **not** isolate OS permissions.
