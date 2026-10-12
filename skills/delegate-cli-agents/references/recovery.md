@@ -1,8 +1,18 @@
 # Recovery
 
-Read this when something is stuck or inconsistent — a conflict, an uncertain integration, a stale lock,
-an unreachable or unreadable instance, or a resume that failed after a sync. The workflow itself is in
-[../SKILL.md](../SKILL.md).
+Read this for missing results or reports, interrupted sessions, human controls, or stuck operations —
+conflicts, uncertain integrations, stale locks, unreadable instances and failed resumes.
+[../SKILL.md](../SKILL.md) routes to the relevant operational reference.
+
+## Results and delivery
+
+A notification or `subagent_query({ action: "get", id })` may contain only a preview. If truncated, read `result` with the original id/runId and follow nextOffset until null before claiming a complete review. Receiving a report does not verify its claims.
+
+Use `subagent_query({ action: "activity", id })` for bounded recent activity and its opaque cursor for older pages. Read notice and truncation/partial markers. An invalid or stale cursor fails explicitly; it does not silently reset. This projection is not the full final result and reads retained logs without starting a native process. Do not poll it for completion.
+
+Reports return automatically to their original parent. Batches containing waiting requests use steer before a busy parent's next model request; other batches use followUp after its current execution. Neither cancels an in-flight tool. An idle parent may start a new turn. Continue independent work or end the turn instead of polling or sleeping; do not assume a completion report reaches a busy parent at its next model request.
+
+Queued notifications are not delivery receipts until recorded in parent history. Reopening the original parent replays unrecorded reports with their original run IDs; recorded reports are not delivered again.
 
 ## General rule
 
@@ -34,8 +44,16 @@ replacement thread automatically — see [workspaces.md](workspaces.md) for what
 
 ## Interrupting, releasing and reading receipts
 
+Resuming preserves the native session identity and saved history, not necessarily the old process, background jobs or in-memory state. Stopping does not roll back file edits.
+
 Use `subagent({ action: "interrupt", id })` to end only the captured Pi/Codex turn while retaining its runtime. A `not_running` receipt does not cancel a pending initial task; use `stop` when startup must be cancelled or native resources must be released. Unsupported interruption fails explicitly.
 
 `subagent({ action: "stop", id })` releases active or idle native processes but keeps the session/history; do not stop merely because a task finished. Release an idle writer when integration, synchronization or handoff actually needs it. A completed report alone is not release proof.
 
 Read the operation receipt, not an old `accepted` bit: `accepted` is native acknowledgement, not model consumption; `settled` does not claim that interrupt caused the outcome; only `released` confirms release. On `unconfirmed`, inspect before any retry. A request already resolved or expired cannot be answered again. Human intervention records belong to the original parent session and can be delivered there after it is reopened; they never authorize repeating the child operation.
+
+## Human controls
+
+`/agents` lets the user inspect, message, resume, answer requests, interrupt a turn or release processes. Its `c` action confirms release of captured idle runtimes only, keeps sessions/results, and reports refusals without retrying. `/cli-agents-setting` edits roles.
+
+`[Human → subagent …]` entries record actions on that instance, not additional authorization. Saved records stay with their original parent across session switches and may be delivered there after reopening; they never replay the operation.

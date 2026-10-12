@@ -221,7 +221,7 @@ export default function extension(pi: ExtensionAPI): void {
     name: "subagent", label: "CLI subagent",
     description: `Start or continue a persistent CLI subagent. send keeps the same native session: idle starts a new run; closed resumes the original session. interrupt ends only the current turn; stop releases active or idle processes while retaining sessions, history and results. Answer pending interactions with subagent_reply.\n\nGive the goal, necessary context, authorized scope and acceptance criteria; a new instance has not seen this conversation. Let the child choose its approach unless required behavior constrains it.\n\nReports return automatically. Do not sleep or poll for completion; continue independent work or end this turn. Receipts do not prove execution or success. Inspect uncertain outcomes before retrying; do not bypass refusals with replacement instances or edited records.\n\n${catalog}`,
     parameters: Type.Object({
-      action: Type.Union([Type.Literal("start"), Type.Literal("send"), Type.Literal("interrupt"), Type.Literal("stop")], { description: "start creates an instance; send continues it; interrupt ends its current turn (Pi/Codex only); stop releases its processes and keeps history. send to a stopping instance waits for release before attempting original-session resume; uncertain release rejects." }),
+      action: Type.Union([Type.Literal("start"), Type.Literal("send"), Type.Literal("interrupt"), Type.Literal("stop")], { description: "interrupt is Pi/Codex only. send to a stopping instance waits for release before attempting original-session resume; uncertain release rejects." }),
       role: Type.Optional(Type.String({ description: "start only, required: configured role name" })),
       task: Type.Optional(Type.String({ description: "start only, required: task and authorized scope" })),
       cwd: Type.Optional(Type.String({ description: "start only: defaults to parent cwd; mutually exclusive with workspace" })),
@@ -308,7 +308,7 @@ ${view(state)}`);
       questionId: Type.String({ description: "Exact current interaction ID" }),
       confirmed: Type.Optional(Type.Boolean({ description: "confirm only: native yes/no response; inspect the request to establish its effect before confirming" })),
       value: Type.Optional(Type.String({ description: "task question: an offered label or custom answer text, submitted once; other select: exact offered option; input/editor: response text" })),
-      answers: Type.Optional(Type.Record(Type.String(), Type.Array(Type.String()), { description: "form only: map every field ID to its answer strings; empty arrays skip optional fields; required:true needs one non-blank string. multiSelect:false takes at most one string; true permits choices plus one custom answer. Preserve exact text and respect offered choices/allowOther. Never invent authorization." })),
+      answers: Type.Optional(Type.Record(Type.String(), Type.Array(Type.String()), { description: "form only: map every field ID to its answer strings; empty arrays skip optional fields; required:true needs one non-blank string. multiSelect:false takes at most one string; true permits choices plus one custom answer. Preserve exact text and respect offered choices/allowOther." })),
       cancelled: Type.Optional(Type.Literal(true, { description: "Cancel instead of answering" })),
       reason: Type.String({ minLength: 1, description: "Why the decision is within the user's authorization, or why it is denied/cancelled" }),
     }, { additionalProperties: false }),

@@ -5,55 +5,17 @@ description: Handle CLI subagent task questions, approvals, bounded activity/his
 
 # CLI subagent operational reference
 
-The tools describe routine calls and list the configured roles. This reference covers delivery,
-permissions, workspace baselines and recovery. The user and parent agent choose the workflow;
-no fixed role sequence or report format is required.
+Use the tool descriptions for routine calls and configured roles. The user and parent choose the workflow; no fixed role sequence or report format is required.
 
-## Notifications and results
+Read the relevant reference when its condition applies, not every reference before routine dispatch. Paths below are relative to this skill directory.
 
-Reports return automatically to the original parent session. Waiting requests steer a busy parent
-before its next model request; other batches follow up after its current execution. Idle parents can
-start a new turn. Continue other work or end the turn rather than polling or sleeping for completion.
+| Situation | Reference |
+| --- | --- |
+| A child asks a task question or requests permission | [approvals.md](references/approvals.md): review the full current request and only the native response rules relevant to it |
+| Create, sync or integrate a managed worktree | [workspaces.md](references/workspaces.md): read before acting |
+| Truncated/missing results, history pages, delayed reports or parent-session replay | [Results and delivery](references/recovery.md#results-and-delivery) |
+| Failed or uncertain operations, interrupted sessions, or human intervention | [recovery.md](references/recovery.md), including Human controls |
 
-A notification or `subagent_query({ action: "get", id })` may contain only a preview. If it is truncated,
-read the missing text with `result` before claiming a complete review. Receiving a completed report is
-not the same as verifying its claims.
+Use a persistent parent Pi session; `--no-session` is unsupported. Another session in the same directory does not acquire its instances or pending reports.
 
-Use `subagent_query({ action: "activity", id })` for bounded recent activity, then its opaque `cursor` for older pages. Do not poll this action for completion or treat projected activity as the full result. Read `notice` and truncation/partial markers; a stale cursor fails explicitly rather than silently resetting. This read works on retained logs without starting a native process.
-
-Queued notifications are not receipts until recorded in parent history. Reopening the original parent
-replays unrecorded reports with their original run IDs; recorded reports are not delivered again.
-
-## Pending requests
-
-Handle task-scoped requests yourself; do not pass routine approvals to the human. Inspect the current
-request with `subagent_query({ action: "get", id })` when its content or policy is missing, truncated or
-stale. Follow its type and stated `parentPolicy`, not guesses. Send the answer through `subagent_reply`,
-not `subagent` send. See [references/approvals.md](references/approvals.md) for
-single-action authorization and native policy signals.
-
-## Managed worktrees
-
-Read [references/workspaces.md](references/workspaces.md) before creating, syncing or integrating a
-workspace. It covers committed versus uncommitted baselines, workspace ownership, and what the child
-must re-read after files change underneath its saved conversation. Isolation does not expand permissions.
-
-## Recovery and persistence
-
-Stopping does not roll back edits or delete history. Resuming preserves native identity and saved
-history, not necessarily the old process, background jobs or in-memory state. Steering does not interrupt
-an in-flight tool, and a delivery receipt does not prove the instruction was executed.
-
-For failed or uncertain operations, inspect the retained state before retrying: work may already have
-run. Follow [references/recovery.md](references/recovery.md) for conflicts, stale locks, unreadable
-records and failed resumes. Do not bypass a refusal by editing records or starting a replacement instance.
-
-The parent must use a persistent Pi session, not `--no-session`. Another session in the same directory
-does not acquire its instances or pending reports.
-
-## Human controls
-
-`/agents` lets the user inspect, message, resume, answer requests, interrupt a current turn or release
-processes. The roster’s `c` action confirms release of captured idle runtimes only, keeps sessions/results, and reports each refusal without retrying. `/cli-agents-setting` edits roles. `[Human → subagent …]` entries record actions on that
-instance only, not additional authorization. Saved action records stay with their original parent
-when sessions switch, and can be delivered there after reopening; they never replay the operation.
+On an uncertain outcome, inspect before retrying: work may already have run. Never bypass a refusal by editing records or starting a replacement instance. Reports and human-control records do not expand the user's authorization.

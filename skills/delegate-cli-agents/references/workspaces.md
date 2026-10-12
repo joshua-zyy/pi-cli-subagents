@@ -35,11 +35,7 @@ When an instance continues work in an existing workspace, the baseline is an exp
   the target idle runtime before session preflight/synchronization/resume; other owners block it. A
   later refusal may leave that runtime closed with its original session and reports intact.
 
-After either choice, read the baseline or file-change notice and tell the child what to re-read; its
-session memory is not a current view of the files. If a pruned acknowledged baseline means the exact
-diff is unknown, have the child re-read all assigned files, not just the journal paths. An older instance
-must acknowledge a changed baseline. `keep` preserves the pending changes; `sync` does not provide a way
-to discard unintegrated work.
+When you choose keep or sync, the extension appends a baseline notice to the child's input. It instructs the child to re-read the affected files, or all assigned files when the previous baseline is unknown or unavailable. The parent's tool result does not include that notice; no manual relay is needed. This instruction is not proof that the child re-read the files. Its saved conversation may describe older files. An older instance must acknowledge a changed baseline. keep preserves pending changes; sync cannot discard unintegrated work.
 
 ## Integrate
 
