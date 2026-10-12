@@ -1,11 +1,10 @@
 import { isKeyRelease, matchesKey, truncateToWidth, type TUI } from "@earendil-works/pi-tui";
 import type { ExtensionUIContext } from "@earendil-works/pi-coding-agent";
 import type { AgentView } from "../types.js";
-import { canStop, formatElapsed, isActive, oneLine, rightAlign, shortId, viewElapsed, viewStartedAt, viewStatus, type UiTheme } from "./format.js";
+import { canStop, formatElapsed, oneLine, rightAlign, shortId, viewElapsed, viewStartedAt, viewStatus, type UiTheme } from "./format.js";
 
 const KEY = "cli-subagents-fleet";
 const LINGER_MS = 4000;
-const MAX_ROWS = 5;
 
 /**
  * Pi's prompt editor is the only component that owns typing; dialogs and selectors are not editors.
@@ -93,21 +92,22 @@ export class FleetView {
     if (width <= 0) return [];
     const now = Date.now();
     const selected = this.selectedId ? this.agents.findIndex((agent) => agent.id === this.selectedId) + 1 : 0;
-    const windowStart = Math.max(0, selected - MAX_ROWS);
-    const visible = this.agents.slice(windowStart, windowStart + MAX_ROWS);
-    const lines = [theme.fg("dim", this.active ? "  ↑↓ select · Enter view · Esc back" : "  ↓ / ← at empty prompt: select an agent")];
+    // Leave half the terminal for the editor/history; hints and main cost two fixed rows.
+    const maxRows = Math.max(1, Math.floor((this.tui?.terminal.rows ?? 24) / 2) - 2);
+    const windowStart = Math.max(0, selected - maxRows);
+    const visible = this.agents.slice(windowStart, windowStart + maxRows);
+    const below = this.agents.length - windowStart - visible.length;
+    const hint = theme.fg("dim", this.active ? "  ↑↓ select · Enter view · Esc back" : "  ↓ / ← at empty prompt: select an agent");
+    const more = [windowStart ? `↑ ${windowStart} more` : "", below ? `↓ ${below} more` : ""].filter(Boolean).join(" · ");
+    const lines = [more ? rightAlign(hint, theme.fg("dim", more), width) : hint];
     lines.push(`  ${selected === 0 && this.active ? theme.fg("accent", "●") : theme.fg("dim", "○")} main`);
-    if (windowStart > 0) lines.push(rightAlign("", theme.fg("dim", `↑ ${windowStart} more`), width));
     for (const agent of visible) {
       const focused = this.active && agent.id === this.selectedId;
       const status = viewStatus(agent);
-      const icon = isActive(agent.phase) ? "●" : status.icon;
-      const left = `  ${focused ? theme.fg("accent", "●") : theme.fg("dim", "○")} ${theme.fg(status.color, icon)} ${theme.fg("text", agent.role)} ${theme.fg("dim", shortId(agent.id))}  ${theme.fg(focused ? "text" : "muted", oneLine(agent.task, 80) || "(No task summary)")}`;
-      const right = `${status.label} · ${formatElapsed(viewElapsed(agent, now))}`;
-      lines.push(rightAlign(left, theme.fg("dim", right), width));
+      const left = `  ${focused ? theme.fg("accent", "●") : theme.fg("dim", "○")} ${theme.fg("text", agent.role)} ${theme.fg("dim", shortId(agent.id))}  ${theme.fg(focused ? "text" : "muted", oneLine(agent.task, 80) || "(No task summary)")}`;
+      const right = `${theme.fg(status.color, status.label)}${theme.fg("dim", ` · ${formatElapsed(viewElapsed(agent, now))}`)}`;
+      lines.push(rightAlign(left, right, width));
     }
-    const below = this.agents.length - windowStart - visible.length;
-    if (below > 0) lines.push(rightAlign("", theme.fg("dim", `↓ ${below} more`), width));
     return lines.map((line) => truncateToWidth(line, width));
   }
 

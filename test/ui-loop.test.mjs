@@ -357,7 +357,7 @@ test('below-editor FleetView opens the selected active child without an intermed
   const first=await h.spawn('HOLD fleet-one'),second=await h.spawn('HOLD fleet-two');
   const entry=await waitUntil('fleet registered',()=>h.widgetCalls.find(call=>call.key==='cli-subagents-fleet'&&typeof call.content==='function'));
   const editor=Object.create(Editor.prototype);let focus=editor;
-  const tui={terminal:{columns:120},getFocusedComponent:()=>focus,requestRender(){}};
+  const tui={terminal:{columns:120,rows:24},getFocusedComponent:()=>focus,requestRender(){}};
   const widget=entry.content(tui,theme);
   // The roster refreshes on the extension's monitor interval; wait for both children before keying.
   await waitUntil('fleet lists both children',()=>widget.render(120).join('\n').includes('HOLD fleet-two'));
@@ -365,7 +365,7 @@ test('below-editor FleetView opens the selected active child without an intermed
   focus={};assert.equal(key(keys.down),undefined,'a modal must retain input');
   focus=editor;assert.deepEqual(key(keys.down),{consume:true});
   key(keys.down);key(keys.down);
-  assert.match(widget.render(120).join('\n'),/● ● worker.*HOLD fleet-two/);
+  assert.match(widget.render(120).join('\n'),/^\s*● worker.*HOLD fleet-two/m);
   let loaded=false;
   h.state.scripts.push(async viewer=>{
     await waitUntil('selected child in viewer',()=>viewer.render(120).join('\n').includes(second.id.slice(0,8)));
