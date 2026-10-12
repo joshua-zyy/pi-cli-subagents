@@ -3,7 +3,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { addRole, deleteRole, fieldChoices, fieldIsChoice, fieldValue, readScope, roleRows, roleSummary, setField, visibleFields, writeScope } from '../dist/role-settings.js';
+import { addRole, cliDetail, deleteRole, fieldChoices, fieldIsChoice, fieldValue, readScope, roleRows, roleSummary, setField, visibleFields, writeScope } from '../dist/role-settings.js';
 import { mergeRoles, validateRoleFile } from '../dist/roles.js';
 import { tempDir } from './helpers/tmp.mjs';
 
@@ -44,6 +44,8 @@ test('switching to a different CLI resets provider-specific fields so the role i
   const codex = setField({}, 'worker', claude, 'cli', 'codex').worker;
   assert.deepEqual(codex, { ...base, cli: 'codex' }, 'Claude model/thinking/mode never carry into Codex');
   assert.doesNotThrow(() => writeScope('user', temp(), temp(), { worker: codex }), 'a Codex role without a model is valid: it inherits the native config.toml model');
+  assert.doesNotMatch(cliDetail('codex'), /required/i, 'the picker must not contradict valid model omission');
+  assert.match(cliDetail('codex'), /model.*optional.*native default/i, 'the picker explains that omission follows the native default');
   assert.deepEqual(setField({}, 'worker', claude, 'cli', 'claude').worker, claude, 're-selecting the same CLI keeps every field');
   const implicitPi = { ...base, provider: 'opencode-go', model: 'deepseek-v4.1-flash' };
   assert.deepEqual(setField({}, 'worker', implicitPi, 'cli', 'pi').worker, { ...implicitPi, cli: 'pi' }, 'a role without an explicit cli is already Pi, so selecting Pi keeps its fields');

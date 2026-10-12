@@ -116,7 +116,8 @@ test('choosing a CLI returns the selected value and explains what each CLI confi
   const text = render(100);
   assert.match(text, /worker · cli/);
   assert.match(text, /pi\s+provider · model · thinking/);
-  assert.match(text, /codex\s+model \(required\) · effort \(reasoning\)/);
+  assert.match(text, /codex\s+model \(optional, native default\) · effort \(reasoning\)/);
+  assert.match(text, /claude\s+model \(optional\)/);
   instance.handleInput(keys.down);             // pi -> codex
   instance.handleInput(keys.enter);
   assert.deepEqual(actions, [{ kind: 'set', role: 'worker', field: 'cli', value: 'codex' }]);

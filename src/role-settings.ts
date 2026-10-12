@@ -162,7 +162,7 @@ export function visibleFields(role: Role): EditableField[] {
 
 /** One-line reminder of what each CLI makes configurable, shown while picking a CLI. */
 export function cliDetail(cli: string): string {
-  if (cli === "codex") return "model (required) · effort (reasoning) · mode (approvals + sandbox)";
+  if (cli === "codex") return "model (optional, native default) · effort (reasoning) · mode (approvals + sandbox)";
   if (cli === "claude") return "model (optional) · thinking (native --effort) · mode (native permission mode)";
   return "provider · model · thinking";
 }
