@@ -57,6 +57,7 @@ function checkFields(args: Record<string, unknown>, required: string[], optional
 
 const view = (state: AgentView): string => JSON.stringify(visible(state));
 const content = (text: string) => ({ content: [{ type: "text" as const, text }], details: undefined });
+const REPORT_GUIDANCE = "Completion and interaction reports return to this parent session automatically. Do not sleep or poll for completion; continue independent work or end this turn to await a report. Do not duplicate the child's assignment. Receiving a report is not verification; read any truncated result with subagent_query result before assessing its claims.";
 /**
  * A Pi role that leaves provider/model/thinking unset follows the parent session's current choice
  * instead of Pi's configured default, so switching model mid-session also moves its subagents.
@@ -200,7 +201,7 @@ export default function extension(pi: ExtensionAPI): void {
 
   pi.registerTool({
     name: "subagent_workspace", label: "Subagent workspace",
-    description: "Manage this parent's detached Git worktrees. create uses committed HEAD unless all uncommitted changes were explicitly authorized. integrate applies unintegrated changes only after all workspace runtimes, including idle ones, have been explicitly stopped; it rejects conflicts before writing and preserves parent HEAD/index/branches. No installs, pushes or cleanup. Workspaces may be reused sequentially by different instances.",
+    description: "Create or integrate this parent's detached Git worktrees. create starts from committed HEAD; inherit all uncommitted changes only with explicit authorization. Each workspace has one runtime owner. Stop its owner, including idle processes, before handoff or integration.\n\nintegrate applies only pending changes, rejects conflicts before writing, and preserves parent HEAD, index and branches. No dependency installs, pushes or cleanup.",
     parameters: Type.Object({
       action: Type.Union([Type.Literal("create"), Type.Literal("integrate")]),
       workspace: Type.Optional(Type.String({ description: "Required for integrate; workspace ID returned by create" })),
@@ -218,17 +219,17 @@ export default function extension(pi: ExtensionAPI): void {
   });
   const registerSubagent = (catalog: string): void => pi.registerTool({
     name: "subagent", label: "CLI subagent",
-    description: `Start, message, interrupt or stop a persistent CLI subagent. interrupt requires id: end only the captured current turn without releasing a usable runtime; unsupported backends reject. Receipts distinguish acknowledged input, native queueing, unconfirmed input, ended turns and released resources; none proves model consumption or task success. start requires role and task; choose cwd or workspace, never both. send requires id and message and continues that exact instance: idle starts a new run in the resident runtime; closed resumes the original native session. Pi supports running steer/followUp, Codex running steer only, Claude must finish first; waiting/stopping do not accept ordinary messages. stop requires id and releases processes, including idle runtimes, while retaining history and the last run outcome. Never silently replaces a session. Workspace continuation may require explicit keep/sync; sync closes only the target's confirmed idle runtime before syncing and refuses other resident writers, active, staged or unintegrated work. Results return automatically. Query existing instances with subagent_query.\n\nDelegate outcomes, not implementation recipes. Give the goal, essential context (relevant paths and confirmed facts), authorized scope, and acceptance or return needs. A new instance has not seen this conversation. Let the child investigate, choose an approach and verify its work; prescribe implementation details only when the user, compatibility or shared-work constraints require them.\n\n${catalog}`,
+    description: `Start or continue a persistent CLI subagent. send keeps the same native session: idle starts a new run; closed resumes the original session. interrupt ends only the current turn; stop releases active or idle processes while retaining sessions, history and results. Answer pending interactions with subagent_reply.\n\nGive the goal, necessary context, authorized scope and acceptance criteria; a new instance has not seen this conversation. Let the child choose its approach unless required behavior constrains it.\n\nReports return automatically. Do not sleep or poll for completion; continue independent work or end this turn. Receipts do not prove execution or success. Inspect uncertain outcomes before retrying; do not bypass refusals with replacement instances or edited records.\n\n${catalog}`,
     parameters: Type.Object({
-      action: Type.Union([Type.Literal("start"), Type.Literal("send"), Type.Literal("interrupt"), Type.Literal("stop")]),
+      action: Type.Union([Type.Literal("start"), Type.Literal("send"), Type.Literal("interrupt"), Type.Literal("stop")], { description: "start creates an instance; send continues it; interrupt ends its current turn (Pi/Codex only); stop releases its processes and keeps history. send to a stopping instance waits for release before attempting original-session resume; uncertain release rejects." }),
       role: Type.Optional(Type.String({ description: "start only, required: configured role name" })),
       task: Type.Optional(Type.String({ description: "start only, required: task and authorized scope" })),
       cwd: Type.Optional(Type.String({ description: "start only: defaults to parent cwd; mutually exclusive with workspace" })),
       workspace: Type.Optional(Type.String({ description: "start only: managed workspace ID; mutually exclusive with cwd" })),
       id: Type.Optional(Type.String({ description: "send/interrupt/stop only, required: existing instance ID" })),
       message: Type.Optional(Type.String({ description: "send only, required: follow-up goal, new context and changed constraints; repeat the full task only when needed" })),
-      mode: Type.Optional(Type.Union([Type.Literal("steer"), Type.Literal("followUp")], { description: "send only: running delivery; defaults to steer" })),
-      baseline: Type.Optional(Type.Union([Type.Literal("keep"), Type.Literal("sync")], { description: "send only: explicit workspace baseline decision after integration or another instance's sync; keep preserves current files, not remembered files" })),
+      mode: Type.Optional(Type.Union([Type.Literal("steer"), Type.Literal("followUp")], { description: "send only, defaults to steer. Running Pi: steer supplies input before a subsequent model request without cancelling the in-flight tool; followUp waits until the current execution has no more tool calls. Running Codex supports steer only; Claude requires the current run to finish. This selects child input delivery, not parent report delivery." })),
+      baseline: Type.Optional(Type.Union([Type.Literal("keep"), Type.Literal("sync")], { description: "managed-workspace send only, required when a changed baseline needs acknowledgement. keep uses current workspace files; it does not restore remembered files. sync updates from the parent, refuses active, staged or unintegrated work and other runtime owners, and closes the target idle runtime before preflight; a later refusal may leave it closed. Child session memory may be stale after either choice." })),
       includeUncommitted: Type.Optional(Type.Object({ reason: Type.String({ minLength: 1, description: "send with sync only: why all current parent changes are authorized for inheritance" }) }, { additionalProperties: false })),
     }, { additionalProperties: false }),
     async execute(_id, args, _signal, _update, ctx) {
@@ -242,7 +243,7 @@ export default function extension(pi: ExtensionAPI): void {
         const result = `Subagent ${state.phase}: ${view(state)}
 ${receiptText(state)}`;
         if (hasFailure(state)) throw new Error(`${result}\nInspect the instance before retrying; work may already have run.`);
-        return content(`${result}\nCompletion and waiting reports return to this parent session.`);
+        return content(state.receipt?.status === "accepted" || state.receipt?.status === "queued" ? `${result}\n${REPORT_GUIDANCE}` : result);
       }
       if (args.action === "send") {
         checkFields(args, ["action", "id", "message"], ["mode", "baseline", "includeUncommitted"]);
@@ -251,7 +252,7 @@ ${receiptText(state)}`;
         const result = `Subagent ${state.phase} after input request: ${view(state)}
 ${receiptText(state)}`;
         if (hasFailure(state)) throw new Error(`${result}\nInspect the instance before retrying; work may already have run.`);
-        return content(result);
+        return content(state.receipt?.status === "accepted" || state.receipt?.status === "queued" ? `${result}\n${REPORT_GUIDANCE}` : result);
       }
       if (args.action !== "stop" && args.action !== "interrupt") throw new Error("Unknown subagent action; use start, send, interrupt or stop");
       checkFields(args, ["action", "id"]);
@@ -264,7 +265,7 @@ ${view(state)}`);
   registerSubagent("Role catalog loads at session start.");
   pi.registerTool({
     name: "subagent_query", label: "Query CLI subagents",
-    description: "Read-only inspection of this parent's instances. phase describes the runtime; idle still owns processes and closed retains the native session for resume. lastStatus is the last run's completed/failed/stopped outcome, not proof of release. list returns metadata and managed workspaces without report bodies; get requires id and includes current details and a bounded preview. result requires id and runId and pages that exact original final report; keep both IDs fixed and follow nextOffset until null. Missing results never fall back to another run. activity requires id: read a bounded recent-tail projection, then follow its cursor for older pages; invalid/stale cursors fail rather than restarting. Activity is not the full final report. Does not resume agents or cross parent sessions. Completion notifications arrive automatically.",
+    description: "Inspect this parent's instances without starting or resuming them. idle still owns processes; closed retains the native session. lastStatus describes the last run, not resource release.\n\nlist returns metadata and workspaces; get includes pending requests and a bounded result preview. If truncated, use result with the original id/runId and follow nextOffset until null; never substitute another run. activity is a paged history projection, not the full final report.\n\nReports arrive automatically; do not poll for completion. Read complete evidence and verify claims before reporting success.",
     parameters: Type.Object({
       action: Type.Union([Type.Literal("list"), Type.Literal("get"), Type.Literal("result"), Type.Literal("activity")]),
       id: Type.Optional(Type.String({ description: "get/result/activity only, required: instance ID" })),
@@ -301,7 +302,7 @@ ${view(state)}`);
   });
   pi.registerTool({
     name: "subagent_reply", label: "Answer child interaction",
-    description: "Answer this parent's task question or review its child permission request within the user's authorization; do not defer routine decisions to the human. Requires id, questionId, reason and exactly one of confirmed/value/answers/cancelled matching the request. Read the complete request first; parentPolicy describes supported replies, not proof of authorization or one-action effects. Pi dialogs are forwarded without guessing permission meaning from labels. Task answers must not introduce new authorization; Codex treats them as trusted user input. Escalate when context, effects or authorization are unclear, the user explicitly requires confirmation, or a native request requires the human UI (/agent-reply); explain the specific decision needed. Never grant session-wide or persistent permissions. Every decision is recorded locally; delivery is not proof of successful execution.",
+    description: "Answer a child's current task question or review its permission request within the user's authorization. Read the complete request first; parentPolicy defines supported replies, not authorization or one-action effects. Submit exactly one response matching the request. Task answers provide context, not new authorization.\n\nHandle routine authorized decisions yourself. Never grant session-wide or persistent permissions. Escalate unclear context, effects or authorization, explicit user-confirmation requirements, or requests requiring the human UI; explain the decision needed and use /agent-reply.",
     parameters: Type.Object({
       id: Type.String({ description: "Existing instance ID" }),
       questionId: Type.String({ description: "Exact current interaction ID" }),

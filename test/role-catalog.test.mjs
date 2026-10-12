@@ -24,7 +24,7 @@ const role = description => ({ description, instructions: 'PRIVATE_INSTRUCTIONS'
 
 test('dispatch exposes delegation guidance and effective roles without model settings or prompts', async t => {
   const h = harness(t);
-  const guidance = 'Delegate outcomes, not implementation recipes.';
+  const guidance = 'Give the goal, necessary context, authorized scope and acceptance criteria; a new instance has not seen this conversation.';
   assert.ok(h.description().includes(guidance), 'guidance is available without loading a skill');
   h.write('user', { analyst: role('Personal analysis'), worker: role('Personal worker') });
   h.write('project', { analyst: role('Project analysis'), projectonly: role('Project only') });
@@ -43,7 +43,7 @@ test('dispatch exposes delegation guidance and effective roles without model set
 });
 
 test('the parent sees the delegation guidance exactly once, whichever carrier holds it', async t => {
-  const guidance = 'Delegate outcomes, not implementation recipes. Give the goal, essential context (relevant paths and confirmed facts), authorized scope, and acceptance or return needs. A new instance has not seen this conversation. Let the child investigate, choose an approach and verify its work; prescribe implementation details only when the user, compatibility or shared-work constraints require them.';
+  const guidance = 'Give the goal, necessary context, authorized scope and acceptance criteria; a new instance has not seen this conversation. Let the child choose its approach unless required behavior constrains it.';
   const copies = h => [...h.tools.values()].reduce((total, tool) => {
     const texts = [tool.description ?? '', ...(tool.promptGuidelines ?? [])];
     return total + texts.reduce((sum, text) => sum + text.split(guidance).length - 1, 0);
