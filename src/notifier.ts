@@ -123,14 +123,18 @@ export function deliverReports(
       const final = report.notificationId === `${report.runId}-result`;
       // Load full text only after receipt filtering and coalescing; never grow the history cache.
       const source = final ? manager.getResult(report.agentId, report.runId) : report;
+      const errorPrefix = source.error ? `Error: ${source.error}\n` : "";
       let raw = source.text;
-      if (source.error) raw = `Error: ${source.error}\n${raw}`.trim();
+      if (errorPrefix) raw = `${errorPrefix}${raw}`.trim();
       if (!raw) raw = report.status === "waiting"
         ? "Waiting for a response; inspect it with subagent_query or /agent-reply."
         : "No text response; inspect with subagent_query or /agents.";
       const clipped = report.status !== "waiting" && raw.length > REPORT_LIMIT;
       const summary = clipped ? `${raw.slice(0, REPORT_HEAD)}\n… ${raw.length - REPORT_LIMIT} characters omitted …\n${raw.slice(-REPORT_TAIL)}\n(truncated preview)` : raw;
-      const resultHint = final ? `\nRead result: subagent_query(${JSON.stringify({ action: "result", id: report.agentId, runId: report.runId })})` : "";
+      // Result offsets address source.text, not the notification's optional error prefix.
+      const offset = Math.max(0, REPORT_HEAD - errorPrefix.length);
+      const length = raw.length - REPORT_TAIL - errorPrefix.length - offset;
+      const resultHint = final && clipped ? `\nRead result: subagent_query(${JSON.stringify({ action: "result", id: report.agentId, runId: report.runId, offset, limit: Math.max(1, Math.min(REPORT_LIMIT, length)) })})` : "";
       const replyHint = report.status === "waiting" ? waitingAnswerLine(report) : "";
       return [{ report, content: `[Subagent ${report.agentId} · ${report.status}]\n${summary}${resultHint}${replyHint}` }];
     } catch (error) {

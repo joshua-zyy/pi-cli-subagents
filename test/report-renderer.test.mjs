@@ -11,7 +11,6 @@ import { customType, deliverReports, deliveredIds } from '../dist/notifier.js';
 initTheme('dark', false);
 const id = '11111111-1111-4111-8111-111111111111';
 const runId = '22222222-2222-4222-8222-222222222222';
-const resultLink = `Read result: subagent_query(${JSON.stringify({ action: 'result', id, runId })})`;
 const report = (status = 'completed') => ({ notificationId: `${runId}-result`, agentId: id, runId,
   parentFile: 'parent', status, time: 1, text: 'BODY_MARKER\n' + 'Detailed evidence\n'.repeat(80), logFile: 'trace' });
 function registration() {
@@ -47,19 +46,25 @@ test('report rendering is registered without a session or third-party extension,
   }
 });
 
-test('a completed report is a compact summary; Pi expansion shows the original body and exact result link', () => {
-  const h = publish(), before = JSON.stringify(h.message), c = card(h.message);
-  const collapsed = text(c);
-  assert.match(collapsed, /Subagent.*11111111.*completed/);
-  assert.doesNotMatch(collapsed, /BODY_MARKER|Detailed evidence|\[cli-subagents-report\]/);
-  assert.equal(collapsed.split('\n').filter(line => line.trim()).length, 1);
-  c.setExpanded(true);
-  assert.match(text(c), /BODY_MARKER/);
-  assert.match(text(c, 200), /Read result: subagent_query/);
-  assert.ok(text(c, 200).includes(runId));
-  c.setExpanded(false);
-  assert.equal(text(c), collapsed);
-  assert.equal(JSON.stringify(h.message), before, 'rendering cannot mutate evidence or receipts');
+test('completed cards expand complete bodies without redundant links and preserve clipped result locators', () => {
+  for (const clipped of [false, true]) {
+    const r = report();
+    if (clipped) r.text += 'Long middle\n'.repeat(800);
+    const h = publish([r]), before = JSON.stringify(h.message), c = card(h.message);
+    const collapsed = text(c);
+    assert.match(collapsed, /Subagent.*11111111.*completed/);
+    assert.doesNotMatch(collapsed, /BODY_MARKER|Detailed evidence|\[cli-subagents-report\]/);
+    assert.equal(collapsed.split('\n').filter(line => line.trim()).length, 1);
+    c.setExpanded(true);
+    assert.match(text(c), /BODY_MARKER/);
+    if (clipped) {
+      assert.match(text(c, 200), /Read result: subagent_query/);
+      assert.ok(text(c, 200).includes(runId));
+    } else assert.doesNotMatch(text(c, 200), /Read result: subagent_query/);
+    c.setExpanded(false);
+    assert.equal(text(c), collapsed);
+    assert.equal(JSON.stringify(h.message), before, 'rendering cannot mutate evidence or receipts');
+  }
 });
 
 test('mixed reports keep failed and waiting states visible rather than looking like a successful batch', () => {
@@ -84,7 +89,7 @@ test('stalled and stopped reports are not labelled completed', () => {
 
 test('UI metadata is separate from content and receipts still deduplicate after reload', () => {
   const r = report(), h = publish([r]);
-  assert.equal(h.message.content, `[Subagent ${id} · completed]\n${r.text}\n${resultLink}`);
+  assert.equal(h.message.content, `[Subagent ${id} · completed]\n${r.text}`);
   assert.deepEqual(h.message.details.reports, [{ agentId: id, status: 'completed' }]);
   assert.deepEqual(h.message.details.ids, [`${runId}-result`]);
   assert.deepEqual(h.messages[0].options, { triggerTurn: true, deliverAs: 'followUp' });

@@ -6,7 +6,7 @@ conflicts, uncertain integrations, stale locks, unreadable instances and failed 
 
 ## Results and delivery
 
-A notification or `subagent_query({ action: "get", id })` may contain only a preview. If truncated, read `result` with the original id/runId and follow nextOffset until null before claiming a complete review. Receiving a report does not verify its claims.
+完整通知不附 `Read result` 补读提示。截断通知的定位器保留原 id/runId，并给出省略区起点 `offset` 和本页 `limit`；按该定位器补读，省略区超过一页时沿 `nextOffset` 继续，直到全部省略内容可见，不猜偏移或跳过中段，也不必重读通知已显示的尾部。若只有 `subagent_query({ action: "get", id })` 的预览，或单独分页读取 `result`，则沿 `nextOffset` 读至 null。收到报告或读完整正文都不等于核验了报告中的主张。
 
 Use `subagent_query({ action: "activity", id })` for bounded recent activity and its opaque cursor for older pages. Read notice and truncation/partial markers. An invalid or stale cursor fails explicitly; it does not silently reset. This projection is not the full final result and reads retained logs without starting a native process. Do not poll it for completion.
 

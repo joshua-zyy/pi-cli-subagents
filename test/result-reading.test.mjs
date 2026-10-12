@@ -92,13 +92,38 @@ test('manager → notification preserves the true tail and advertises an exact r
   assert.ok(content.includes(`… ${longText.length - 5600} characters omitted …`));
   assert.ok(content.length < 6500, 'one report remains a bounded preview');
   const link = content.match(/Read result: subagent_query\((\{[^\n]+\})\)/);
-  assert.ok(link, 'every persisted completion provides a machine-readable result locator');
+  assert.ok(link, 'a clipped completion provides a machine-readable result locator');
   const params = JSON.parse(link[1]);
-  assert.deepEqual(params, { action: 'result', id: a.id, runId: a.runId });
+  assert.deepEqual(params, { action: 'result', id: a.id, runId: a.runId, offset: 2000, limit: 5600 });
   const page = await h.invoke(params);
   assert.equal(page.runId, a.runId);
   assert.equal(page.totalLength, longText.length);
-  assert.equal(page.text, longText.slice(0, 6000));
+  assert.equal(page.text, longText.slice(2000, 7600));
+});
+
+test('only clipped results request a read, starting at the omitted text rather than the displayed tail', async () => {
+  for (const [length, error] of [[0], [5600], [5601], [5855], [6444], [6000, 'native failure'],
+    [6000, 'E'.repeat(2200)], [0, 'E'.repeat(6000)]]) {
+    const h = harness(), text = 'X'.repeat(length), a = h.add(text, error ? 'failed' : 'completed');
+    if (error) writeJson(a.resultFile, { ...readJson(a.resultFile), error });
+    deliverReports(h.manager, h.pi, h.ctx, new Set(), 10000);
+    const content = h.sent[0].message.content, prefix = error ? `Error: ${error}\n` : '';
+    const raw = error ? `${prefix}${text}`.trim() : text;
+    const link = content.match(/Read result: subagent_query\((\{[^\n]+\})\)/);
+    if (raw.length <= 5600) {
+      assert.equal(link, null, 'a fully displayed result must not prompt a redundant read');
+      continue;
+    }
+    assert.ok(link);
+    const params = JSON.parse(link[1]), start = Math.max(0, 2000 - prefix.length);
+    const end = Math.max(start, raw.length - 3600 - prefix.length);
+    assert.equal(params.offset, start);
+    assert.equal(params.limit, Math.max(1, Math.min(5600, end - start)));
+    const page = await h.invoke(params);
+    assert.equal(page.text, text.slice(start, start + params.limit));
+    if (error) assert.equal(page.error, error, 'an omitted error is available even when the text is empty');
+    if (end - start <= 5600) assert.equal(page.text.slice(0, end - start), text.slice(start, end));
+  }
 });
 
 test('inventory omits report bodies while instance details retain a bounded preview and history', async () => {
@@ -137,16 +162,16 @@ test('result pages reconstruct every character, including middle evidence and sp
 });
 
 test('a notification still reads its original run after continuation, without requiring live state', async () => {
-  const h = harness(), a = h.add('Original result');
+  const h = harness(), text = 'Original result\n' + 'X'.repeat(6000), a = h.add(text);
   deliverReports(h.manager, h.pi, h.ctx, new Set(), 10000);
   const link = h.sent[0].message.content.match(/Read result: subagent_query\((\{[^\n]+\})\)/);
   assert.ok(link);
-  const original = JSON.parse(link[1]);
+  const original = JSON.parse(link[1]), offset = original.offset ?? 0, expected = text.slice(offset, offset + (original.limit ?? 6000));
   const next = a.publish(undefined, 'running', 2);
-  assert.equal((await h.invoke(original)).text, 'Original result');
+  assert.equal((await h.invoke(original)).text, expected);
   await assert.rejects(h.invoke({ action: 'result', id: a.id, runId: next.runId }), /No final result/);
   fs.unlinkSync(path.join(a.dir, 'state.json'));
-  assert.equal((await h.invoke(original)).text, 'Original result', 'historical reads do not need a healthy live controller');
+  assert.equal((await h.invoke(original)).text, expected, 'historical reads do not need a healthy live controller');
 });
 
 test('explicit result reads reject missing, foreign and malformed records instead of falling back', async () => {
