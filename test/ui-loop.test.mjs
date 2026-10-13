@@ -10,6 +10,8 @@ import extension from '../dist/index.js';
 import { waitUntil, processAlive } from '../dist/storage.js';
 import { AgentManager } from '../dist/manager.js';
 import { tempDir } from './helpers/tmp.mjs';
+import { SPINNER } from '../dist/ui/format.js';
+import { FRAME_INTERVAL_MS } from '../dist/ui/status.js';
 
 const fixture = fileURLToPath(new URL('./fixtures/pi.mjs', import.meta.url));
 const theme = { fg: (_color, text) => text, bold: (text) => text };
@@ -159,6 +161,42 @@ test('one monitor tick shares one live snapshot across reports and status withou
     assert.ok(components.every(component => /completed/i.test(component.render(120).join('\n'))));
   } finally {
     h.handlers.session_shutdown?.(); t.mock.timers.reset(); AgentManager.prototype.list = original;
+  }
+});
+
+test('open roster shares the status widget animation clock without extra reads or timers', async t => {
+  const h = harness(t), original = AgentManager.prototype.list;
+  let calls = 0, redraws = 0;
+  const agent = { id: '00000000-0000-4000-8000-000000000001', runId: 'run', role: 'worker', phase: 'running',
+    workerPid: process.pid, updatedAt: Date.now(), startedAt: Date.now(), questions: [], history: [], runCount: 1 };
+  AgentManager.prototype.list = function () { calls++; return [agent]; };
+  t.mock.timers.enable({ apis: ['setTimeout', 'setInterval'] });
+  let running;
+  try {
+    h.start(); t.mock.timers.tick(100);
+    running = h.commands.get('agents').handler('', h.ctx);
+    const components = h.widgetCalls.filter(call => typeof call.content === 'function').map(call => ({
+      key: call.key, component: call.content({ terminal: { columns: 120, rows: 35 }, requestRender() { redraws++; } }, theme),
+    }));
+    const outer = components.find(c => c.key === 'cli-subagents').component;
+    const pane = components.find(c => c.key === 'cli-subagents-agents').component;
+    const reads = calls, renders = redraws;
+    for (let frame = 0; frame < 4; frame++) {
+      assert(outer.render(160).join('\n').includes(`${SPINNER[frame]} worker`));
+      assert(pane.render(160).join('\n').includes(`${SPINNER[frame]} worker`), `roster frame ${frame}`);
+      if (frame < 3) t.mock.timers.tick(FRAME_INTERVAL_MS);
+    }
+    assert.equal(calls, reads, 'animation must not poll the manager');
+    assert.equal(redraws - renders, 3, 'one shared 80ms timer requests rendering, not a second pane timer');
+    h.state.listeners.at(-1)('q'); await running;
+    const closedRenders = redraws;
+    t.mock.timers.tick(FRAME_INTERVAL_MS);
+    assert.equal(redraws, closedRenders + 1, 'closing the pane leaves only the existing outer animation');
+    h.handlers.session_shutdown(); const stopped = redraws;
+    t.mock.timers.tick(1000); assert.equal(redraws, stopped, 'shutdown stops the shared animation');
+  } finally {
+    h.handlers.session_shutdown?.(); await running;
+    t.mock.timers.reset(); AgentManager.prototype.list = original;
   }
 });
 

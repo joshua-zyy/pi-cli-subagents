@@ -137,6 +137,9 @@ export class StatusWidget {
     this.intervalMs = options.intervalMs ?? FRAME_INTERVAL_MS;
   }
 
+  /** Editor panes share this clock; they must not start a second animation timer. */
+  get animationFrame(): number { return this.frame; }
+
   update(): void {
     if (this.disposed) return;
     this.refresh();

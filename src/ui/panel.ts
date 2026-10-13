@@ -51,6 +51,7 @@ export class AgentsPanel {
   private readonly maxRows: number;
   private readonly rowLimit: () => number;
   private readonly frameColor?: (text: string) => string;
+  private readonly frame: () => number;
   private view: "list" | "detail" = "list";
   private index = 0;
   private scroll = 0;
@@ -63,7 +64,7 @@ export class AgentsPanel {
     agents: AgentView[],
     private readonly theme: UiTheme,
     private readonly done: (action: PanelAction | undefined) => void,
-    options: { now?: number; maxRows?: number; rows?: number | (() => number); frameColor?: (text: string) => string } = {},
+    options: { now?: number; maxRows?: number; rows?: number | (() => number); frameColor?: (text: string) => string; frame?: () => number } = {},
   ) {
     this.allAgents = [...(Array.isArray(agents) ? agents : [])]
       .sort((a, b) => (a.startedAt ?? a.updatedAt) - (b.startedAt ?? b.updatedAt));
@@ -72,6 +73,7 @@ export class AgentsPanel {
     this.now = options.now ?? Date.now();
     this.maxRows = options.maxRows ?? PANEL_MAX_ROWS;
     this.frameColor = options.frameColor;
+    this.frame = options.frame ?? (() => 0);
     const rows = options.rows;
     this.rowLimit = typeof rows === "function" ? rows : () => rows ?? 0;
   }
@@ -197,7 +199,7 @@ export class AgentsPanel {
     // The cursor matches the role editor's, so the two panes read the same way.
     const cursor = current ? this.theme.fg("accent", "›") : " ";
     const status = viewStatus(agent);
-    const icon = isActive(agent.phase) ? SPINNER[0] : status.icon;
+    const icon = isActive(agent.phase) && agent.phase !== "waiting" ? SPINNER[this.frame()] : status.icon;
     const role = current ? this.theme.bold(this.theme.fg("text", agent.role)) : this.theme.fg("muted", agent.role);
     const task = oneLine(agent.task, 80) || "(No task summary)";
     const stats = `${status.label} · ${formatElapsed(viewElapsed(agent, this.now))}`;

@@ -3,6 +3,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { visibleWidth } from '@earendil-works/pi-tui';
 import { AgentsPanel, PANEL_MAX_ROWS, paneRows } from '../dist/ui/panel.js';
+import { SPINNER, viewStatus } from '../dist/ui/format.js';
 const theme = { fg: (_, text) => text, bold: text => text };
 const keys = { up: '\u001b[A', down: '\u001b[B', left: '\u001b[D', enter: '\r', escape: '\u001b' };
 const view = (over = {}) => ({
@@ -17,6 +18,17 @@ function panel(agents, options = {}) {
   return { instance, actions, framed: (width = 100) => instance.render(width), render: (width = 100) => body(instance.render(width)) };
 }
 const text = rows => rows.join('\n');
+
+test('roster icons follow the supplied frame only for executing phases', () => {
+  for (const phase of ['starting', 'running', 'stopping', 'waiting', 'idle', 'completed', 'failed', 'stopped', 'unreachable']) {
+    let frame = 0;
+    const agent = view({ phase }), p = panel([agent], { frame: () => frame });
+    for (frame = 0; frame < SPINNER.length; frame++) {
+      const expected = ['starting', 'running', 'stopping'].includes(phase) ? SPINNER[frame] : viewStatus(agent).icon;
+      assert(text(p.render(160)).includes(`› ${expected} worker`), `${phase}, frame ${frame}`);
+    }
+  }
+});
 
 test('released instances are hidden by default but remain available in explicit history', () => {
   const released=view({id:'released',phase:'closed',protocolVersion:2,runtimeClosed:true,text:'RESULT_EVIDENCE',sessionId:'original'});

@@ -487,7 +487,8 @@ ${view(state)}`);
             const done = (result: PanelAction | undefined) => { if (!settled) { settled = true; deliver = undefined; resolve(result); } };
             // Esc during shutdown must still release this loop.
             dismissPanel = () => done(undefined);
-            panel = new AgentsPanel(agents, theme, done, { rows: () => paneRows(widget?.terminal.rows ?? 24, panel?.mode ?? "list"), frameColor });
+            panel = new AgentsPanel(agents, theme, done, { rows: () => paneRows(widget?.terminal.rows ?? 24, panel?.mode ?? "list"), frameColor,
+              frame: () => active?.widget?.animationFrame ?? 0 });
             deliver = (data) => panel?.handleInput(data);
             refresh();
           });
