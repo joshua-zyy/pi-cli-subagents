@@ -259,6 +259,15 @@ test('a discovered catalog becomes a picker whose last entry types a value of yo
   assert.deepEqual(model.actions, [{ kind: 'edit', role: 'worker', field: 'model' }], 'a value the CLI did not publish is typed, not invented');
 });
 
+test('Pi model choices distinguish identical model IDs and carry the selected provider', () => {
+  const catalog = { pi: [{ provider: 'a', model: 'shared' }, { provider: 'b', model: 'shared' }], codex: [] };
+  const p = panel([row({ effective: role({ cli: 'pi' }) })], { choices: { catalog }, cursor: { role: 'worker', field: 'model' } });
+  p.instance.handleInput(keys.enter);
+  assert.match(p.render(100), /a\/shared/); assert.match(p.render(100), /b\/shared/);
+  p.instance.handleInput(keys.down); p.instance.handleInput(keys.enter);
+  assert.deepEqual(p.actions, [{ kind: 'set', role: 'worker', field: 'model', value: 'shared', provider: 'b' }]);
+});
+
 test('without a catalog the model stays a plain text field', () => {
   const { instance, actions } = panel([row({ effective: role({ cli: 'pi' }) })]);
   instance.handleInput(keys.enter);

@@ -1,11 +1,12 @@
 import { matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
-import { CUSTOM_CHOICE, FIELD_LABELS, cliDetail, fieldChoices, fieldIsChoice, fieldValue, modeDetail, roleSummary, suppressesApprovals, visibleFields, type ChoiceOptions, type EditableField, type RoleRow, type Scope } from "../role-settings.js";
+import { EMPTY_CATALOG } from "../cli-discovery.js";
+import { catalogEntries, CUSTOM_CHOICE, FIELD_LABELS, cliDetail, fieldChoices, fieldIsChoice, fieldValue, modeDetail, roleSummary, suppressesApprovals, visibleFields, type ChoiceOptions, type EditableField, type RoleRow, type Scope } from "../role-settings.js";
 import { framePane, PANE_FRAME_MIN_WIDTH, PANE_FRAME_ROWS, oneLine, type UiColor, type UiTheme } from "./format.js";
 
 export type RoleSettingsAction =
   | { kind: "close" }
   | { kind: "scope"; scope: Scope }
-  | { kind: "set"; role: string; field: EditableField; value: string }
+  | { kind: "set"; role: string; field: EditableField; value: string; provider?: string }
   | { kind: "edit"; role: string; field: EditableField }
   | { kind: "add" }
   | { kind: "remove"; role: string }
@@ -99,7 +100,10 @@ export class RoleSettingsPanel {
       if (value === undefined && !this.choiceOptions().pending) this.finish({ kind: "edit", role: selected.name, field });
       // The escape hatch reopens the host text dialog instead of setting a literal sentinel.
       else if (value === CUSTOM_CHOICE) this.finish({ kind: "edit", role: selected.name, field });
-      else if (value !== undefined) this.finish({ kind: "set", role: selected.name, field, value });
+      else if (value !== undefined) {
+        const provider = field === "model" ? catalogEntries(selected.effective, field, this.choiceOptions().catalog ?? EMPTY_CATALOG)[this.choiceIndex]?.provider : undefined;
+        this.finish({ kind: "set", role: selected.name, field, value, ...(provider ? { provider } : {}) });
+      }
     } else if (matchesKey(data, "escape") || matchesKey(data, "left")) this.view = "fields";
   }
 
@@ -165,7 +169,7 @@ export class RoleSettingsPanel {
     return `${marker}${this.theme.fg(color, label)}${suffix}`;
   }
 
-  private window<T>(header: string[], items: T[], selected: number, render: (item: T, isSelected: boolean) => string, room: number, after: string[] = []): string[] {
+  private window<T>(header: string[], items: T[], selected: number, render: (item: T, isSelected: boolean, index: number) => string, room: number, after: string[] = []): string[] {
     if (!items.length) return room > 0 ? [...header, ...after].slice(0, room) : [...header, ...after];
     const limit = room || header.length + items.length + after.length;
     // Reserve one selectable row before retaining hints/notes. The title and key hints outrank a footer.
@@ -181,7 +185,7 @@ export class RoleSettingsPanel {
     }
     let spare = budget - visible;
     if (start > 0 && spare > 0) { lines.push(this.theme.fg("dim", `↑ ${start} more`)); spare--; }
-    for (let index = start; index < Math.min(items.length, start + visible); index++) lines.push(render(items[index], index === selected));
+    for (let index = start; index < Math.min(items.length, start + visible); index++) lines.push(render(items[index], index === selected, index));
     if (items.length > start + visible && spare > 0) lines.push(this.theme.fg("dim", `↓ ${items.length - start - visible} more`));
     return [...lines, ...footer];
   }
@@ -263,6 +267,10 @@ export class RoleSettingsPanel {
     // While discovery runs the list only holds the escape hatch, so say why it is still empty.
     if (!this.values.length && this.choiceOptions().pending) lines.push(this.theme.fg("muted", "Reading this CLI's own model list…"));
     const footer = current && !choices.includes(current) ? [this.theme.fg("dim", `Current value: ${current}`)] : [];
-    return this.window(lines, choices, this.choiceIndex, (choice, isSelected) => this.row(isSelected, choice, this.choiceDetail(field, choice, current)), room, footer);
+    const entries = catalogEntries(selected.effective, field, this.choiceOptions().catalog ?? EMPTY_CATALOG);
+    return this.window(lines, choices, this.choiceIndex, (choice, isSelected, index) => {
+      const provider = field === "model" && !selected.effective.provider ? entries[index]?.provider : undefined;
+      return this.row(isSelected, provider ? `${provider}/${choice}` : choice, this.choiceDetail(field, choice, current));
+    }, room, footer);
   }
 }

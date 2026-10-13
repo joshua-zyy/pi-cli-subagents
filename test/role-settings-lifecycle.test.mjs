@@ -5,12 +5,12 @@ import fs from 'node:fs';
 import path from 'node:path';
 import childProcess from 'node:child_process';
 import { syncBuiltinESMExports } from 'node:module';
-import extension from '../dist/index.js';
+import extension, { inheritParentModel } from '../dist/index.js';
 import { tempDir } from './helpers/tmp.mjs';
 
 const turn = () => new Promise(resolve => setImmediate(resolve));
 const escape = '\x1b';
-function harness(t) {
+function harness(t, piModels = 'provider  model\nfixture  test-model\n') {
   const dir = tempDir('settings-lifecycle'), home = path.join(dir,'home'), cwd = path.join(dir,'project');
   fs.mkdirSync(home); fs.mkdirSync(path.join(cwd,'.pi'),{recursive:true});
   const files = [path.join(home,'cli-subagents.roles.json'),path.join(cwd,'.pi','cli-subagents.roles.json')];
@@ -18,7 +18,7 @@ function harness(t) {
   const oldHome = process.env.PI_CODING_AGENT_DIR; process.env.PI_CODING_AGENT_DIR = home;
   const probes = [], events = new Map(), commands = new Map(), listeners = [], widgets = [], notices = [], confirms = [], openings = [];
   const exec = t.mock.method(childProcess,'execFile',(_command,args,_options,callback)=>{
-    probes.push(()=>callback(null,args.includes('--list-models') ? 'provider  model\nfixture  test-model\n' : '{"models":[]}'));
+    probes.push(()=>callback(null,args.includes('--list-models') ? piModels : '{"models":[]}'));
     return {stdin:{end(){}}};
   });
   syncBuiltinESMExports();
@@ -113,6 +113,32 @@ for(const scope of ['project','user']) test(`the ${scope} role pane preserves ex
   assert.equal(h.notices.filter(([,level])=>level==='error').length,1);
   h.press(escape); h.press(escape); await reopened.running;
   assert.equal(h.confirms.length,1,'success cleared dirty state; normal close does not ask again');
+});
+
+test('catalog selection persists provider/model together; later provider edits warn without clearing custom models', {timeout:5000}, async t => {
+  const h = harness(t, 'provider  model\na  parent-model\nb  b-only\n');
+  h.ctx.model = {provider:'a',id:'parent-model'}; h.ctx.thinkingLevel = 'high';
+  h.ctx.ui.input = async () => 'custom-model';
+  const opening = h.open(); await h.finishProbes();
+  for(const key of ['\r','\x1b[B','\x1b[B','\r','\x1b[B','\r']) h.press(key);
+  await turn(); h.press('s'); await turn();
+  let saved = JSON.parse(fs.readFileSync(h.files[1],'utf8')).explore;
+  assert.equal(saved.provider,'b'); assert.equal(saved.model,'b-only');
+  assert.equal(inheritParentModel(saved,h.ctx).provider,'b','parent a must not replace selected provider b');
+  assert.equal(inheritParentModel(saved,h.ctx).thinking,'high','unset thinking still inherits independently');
+  // Changing just provider must retain model and warn rather than silently clear it.
+  for(const key of ['\x1b[A','\r','\x1b[A','\r']) h.press(key);
+  await turn(); h.press('s'); await turn();
+  saved = JSON.parse(fs.readFileSync(h.files[1],'utf8')).explore;
+  assert.equal(saved.provider,'a'); assert.equal(saved.model,'b-only');
+  assert(h.notices.some(([message,level])=>level==='warning' && /not listed.*kept/i.test(message)));
+  // A typed custom model remains allowed even when absent from discovery.
+  for(const key of ['\x1b[B','\r','\x1b[B','\r']) h.press(key);
+  await turn(); h.press('s'); await turn();
+  saved = JSON.parse(fs.readFileSync(h.files[1],'utf8')).explore;
+  assert.equal(saved.provider,'a'); assert.equal(saved.model,'custom-model');
+  assert(!h.notices.some(([,level])=>level==='error'));
+  h.press(escape); h.press(escape); await opening.running;
 });
 
 test('session replacement closes the old settings pane and subsequent normal close and shutdown remain independent', {timeout:5000}, async t => {

@@ -693,24 +693,25 @@ ${view(state)}`);
             ctx.ui.notify(`Saved ${file}`, "info");
             continue;
           }
-          if (action.kind === "set") {
-            cursor = { role: action.role, field: action.field };
-            const base = preview[action.role];
-            if (!base) throw new Error(`Unknown role: ${action.role}`);
-            draft[scope] = setField(draft[scope], action.role, base, action.field, action.value); dirty[scope] = true;
-            continue;
-          }
-          if (action.kind === "edit") {
-            // Kept even when the dialog is cancelled, so the same field stays under the cursor.
+          if (action.kind === "set" || action.kind === "edit") {
+            // Kept even when a dialog is cancelled, so the same field stays under the cursor.
             cursor = { role: action.role, field: action.field };
             const base = preview[action.role];
             if (!base) throw new Error(`Unknown role: ${action.role}`);
             const field = action.field, role = draft[scope][action.role] ?? base;
-            const value = field === "instructions" || field === "description"
+            const value = action.kind === "set" ? action.value : field === "instructions" || field === "description"
               ? await ctx.ui.editor(`${field === "instructions" ? "Instructions" : "Description"} for ${action.role}`, fieldValue(role, field))
               : await ctx.ui.input(`${FIELD_LABELS[field]} for ${action.role}`, field === "model" ? "Exact model name or alias" : "", undefined);
             if (value === undefined || epoch !== sessionEpoch) continue;
             draft[scope] = setField(draft[scope], action.role, base, field, value); dirty[scope] = true;
+            // A catalog selection names a pair; free text and later edits remain independent.
+            if (action.kind === "set" && field === "model" && action.provider)
+              draft[scope][action.role].provider = action.provider;
+            if (field === "provider" && catalog?.pi.length) {
+              const next = inheritParentModel(draft[scope][action.role], ctx);
+              if (next.provider && next.model && !catalog.pi.some(entry => entry.provider === next.provider && entry.model === next.model))
+                ctx.ui.notify(`Model ${next.model} is not listed for provider ${next.provider}; it was kept. Choose a model or verify your custom configuration.`, "warning");
+            }
             continue;
           }
           if (action.kind === "add") {
