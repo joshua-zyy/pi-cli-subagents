@@ -200,6 +200,57 @@ test('open roster shares the status widget animation clock without extra reads o
   }
 });
 
+test('open roster consumes monitor snapshots, updates elapsed time and detaches on close or session change', async t => {
+  const h = harness(t), original = AgentManager.prototype.list;
+  let calls = 0, redraws = 0;
+  const agent = { id: '00000000-0000-4000-8000-000000000001', runId: 'run', runtimeId: 'runtime', protocolVersion: 2,
+    role: 'worker', phase: 'running', workerPid: process.pid, updatedAt: 1000, startedAt: 1000, questions: [], history: [], runCount: 1 };
+  let snapshot = [agent];
+  AgentManager.prototype.list = function () { calls++; return snapshot; };
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout', 'setInterval'], now: 1000 });
+  let running;
+  const open = () => {
+    running = h.commands.get('agents').handler('', h.ctx);
+    const registered = h.widgetCalls.findLast(call => call.key === 'cli-subagents-agents' && typeof call.content === 'function');
+    const pane = registered.content({ terminal: { columns: 160, rows: 35 }, requestRender() { redraws++; } }, theme);
+    return () => pane.render(160).join('\n');
+  };
+  try {
+    h.start(); t.mock.timers.tick(100);
+    const rendered = open(), reads = calls;
+    assert.match(rendered(), /Running · 0\.1s/);
+    t.mock.timers.tick(200); assert.match(rendered(), /Running · 0\.3s/, 'elapsed time is not frozen at pane construction');
+    assert.equal(calls, reads, 'animation/rendering must not read state');
+    snapshot = [{ ...agent, phase: 'idle', lastStatus: 'completed', updatedAt: 1400 }];
+    t.mock.timers.tick(500);
+    assert.equal(calls, reads + 1, 'the existing monitor supplies exactly one shared read');
+    assert.match(rendered(), /Idle.*Completed/); assert.match(rendered(), /c release idle \(1\)/);
+    snapshot = [{ ...agent, phase: 'waiting', questions: [{ id: 'q', method: 'confirm', title: 'Current question' }] }];
+    t.mock.timers.tick(800); h.state.listeners.at(-1)('i');
+    assert.match(rendered(), /Current question/); assert.match(rendered(), /r reply/);
+    snapshot = [{ ...agent, phase: 'closed', runtimeClosed: true }];
+    const beforeRelease = redraws; t.mock.timers.tick(800);
+    assert(redraws > beforeRelease, 'the pane redraws even when all outer status rows disappear');
+    assert.match(rendered(), /Subagents \(0\)/); assert.match(rendered(), /h history/);
+    h.state.listeners.at(-1)('q'); await running;
+    const closedRedraws = redraws;
+    snapshot = [{ ...agent, role: 'replacement', phase: 'idle' }]; t.mock.timers.tick(800);
+    assert.equal(redraws, closedRedraws, 'closed panes receive no snapshots or redraws');
+    assert.doesNotMatch(rendered(), /replacement/);
+    const replacement = open(); assert.match(replacement(), /replacement/);
+    const savedPath = process.env.PATH; process.env.PATH = '';
+    try { h.handlers.session_start({ type: 'session_start', reason: 'resume' }, h.ctx); }
+    finally { if (savedPath === undefined) delete process.env.PATH; else process.env.PATH = savedPath; }
+    await running; const switchedRedraws = redraws;
+    snapshot = [{ ...agent, role: 'different-parent', phase: 'idle' }]; t.mock.timers.tick(1000);
+    assert.equal(redraws, switchedRedraws); assert.doesNotMatch(replacement(), /different-parent/);
+    assert.equal(h.state.listeners.length, 0);
+  } finally {
+    h.handlers.session_shutdown?.(); await running;
+    t.mock.timers.reset(); AgentManager.prototype.list = original;
+  }
+});
+
 test('status widget registers only in TUI, shows agents and unregisters at shutdown', { timeout: 20_000 }, async (t) => {
   const h = harness(t);
   h.start();

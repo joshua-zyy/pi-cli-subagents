@@ -137,7 +137,8 @@ export default function extension(pi: ExtensionAPI): void {
     return state;
   }
 
-  let active: { file: string; ctx: ExtensionContext; manager: AgentManager; pending: Set<string>; timer: NodeJS.Timeout; agents: AgentView[]; widget?: StatusWidget } | undefined;
+  let active: { file: string; ctx: ExtensionContext; manager: AgentManager; pending: Set<string>; timer: NodeJS.Timeout; agents: AgentView[]; widget?: StatusWidget;
+    updatePanel?: (agents: AgentView[]) => void } | undefined;
   /** Paged transcript windows for this extension instance; cleared when monitoring stops. */
   const transcriptCache = new TranscriptCache();
 
@@ -149,7 +150,7 @@ export default function extension(pi: ExtensionAPI): void {
       deliverReports(active.manager, pi, active.ctx, active.pending, Date.now(), active.agents);
     }
     catch (error) { console.error("[pi-cli-subagents] Report delivery failed; retrying:", error); }
-    try { active.widget?.update(); }
+    try { active.updatePanel?.(active.agents); active.widget?.update(); }
     catch (error) { console.error("[pi-cli-subagents] Status refresh failed; retrying:", error); }
   }
   function stopMonitor(): void {
@@ -450,6 +451,7 @@ ${view(state)}`);
       if (panelBusy) { ctx.ui.notify("The agent panel is already open or processing an action; wait or close it with Esc.", "warning"); return; }
       panelBusy = true;
       const epoch = sessionEpoch;
+      const monitor = active?.file === ctx.sessionManager.getSessionFile() ? active : undefined;
       let panel: AgentsPanel | undefined;
       let widget: PaneWidget | undefined;
       let overlayActive = false;
@@ -484,11 +486,17 @@ ${view(state)}`);
           if (!agents.length) { ctx.ui.notify("No subagents in this session.", "info"); return; }
           let action = await new Promise<PanelAction | undefined>((resolve) => {
             let settled = false;
-            const done = (result: PanelAction | undefined) => { if (!settled) { settled = true; deliver = undefined; resolve(result); } };
+            const done = (result: PanelAction | undefined) => {
+              if (settled) return;
+              settled = true; deliver = undefined;
+              if (monitor) monitor.updatePanel = undefined;
+              resolve(result);
+            };
             // Esc during shutdown must still release this loop.
             dismissPanel = () => done(undefined);
             panel = new AgentsPanel(agents, theme, done, { rows: () => paneRows(widget?.terminal.rows ?? 24, panel?.mode ?? "list"), frameColor,
-              frame: () => active?.widget?.animationFrame ?? 0 });
+              frame: () => monitor?.widget?.animationFrame ?? 0 });
+            if (monitor) monitor.updatePanel = (snapshot) => { panel?.update(snapshot); refresh(); };
             deliver = (data) => panel?.handleInput(data);
             refresh();
           });
@@ -602,6 +610,7 @@ ${view(state)}`);
         }
       } catch (error) { if (epoch === sessionEpoch) ctx.ui.notify((error as Error).message, "error"); }
       finally {
+        if (monitor) monitor.updatePanel = undefined;
         panel = undefined; widget = undefined; deliver = undefined;
         stopInput();
         if (epoch === sessionEpoch) ctx.ui.setWidget(AGENTS_PANEL_KEY, undefined);

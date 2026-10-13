@@ -43,11 +43,10 @@ const isText = (value: string | undefined): value is string => typeof value === 
  * It returns actions; the command handler performs send/close/reply after the pane closes.
  */
 export class AgentsPanel {
-  private agents: AgentView[];
-  private readonly allAgents: AgentView[];
+  private agents: AgentView[] = [];
+  private allAgents: AgentView[] = [];
   private showReleased = false;
-  private readonly idleTargets: AgentView[];
-  private readonly now: number;
+  private readonly now: number | undefined;
   private readonly maxRows: number;
   private readonly rowLimit: () => number;
   private readonly frameColor?: (text: string) => string;
@@ -66,16 +65,33 @@ export class AgentsPanel {
     private readonly done: (action: PanelAction | undefined) => void,
     options: { now?: number; maxRows?: number; rows?: number | (() => number); frameColor?: (text: string) => string; frame?: () => number } = {},
   ) {
-    this.allAgents = [...(Array.isArray(agents) ? agents : [])]
-      .sort((a, b) => (a.startedAt ?? a.updatedAt) - (b.startedAt ?? b.updatedAt));
-    this.agents = this.allAgents.filter(agent => !isReleased(agent));
-    this.idleTargets = this.agents.filter(canRelease);
-    this.now = options.now ?? Date.now();
+    this.update(agents);
+    this.now = options.now;
     this.maxRows = options.maxRows ?? PANEL_MAX_ROWS;
     this.frameColor = options.frameColor;
     this.frame = options.frame ?? (() => 0);
     const rows = options.rows;
     this.rowLimit = typeof rows === "function" ? rows : () => rows ?? 0;
+  }
+
+  private get idleTargets(): AgentView[] { return this.agents.filter(canRelease); }
+
+  /** Apply the monitor's snapshot without changing which instance the user is inspecting. */
+  update(agents: AgentView[]): void {
+    if (this.settled) return;
+    const selected = this.agents[this.index];
+    this.allAgents = [...(Array.isArray(agents) ? agents : [])]
+      .sort((a, b) => (a.startedAt ?? a.updatedAt) - (b.startedAt ?? b.updatedAt));
+    this.agents = this.showReleased ? this.allAgents : this.allAgents.filter(agent => !isReleased(agent));
+    const index = selected ? this.agents.findIndex(agent => agent.id === selected.id) : -1;
+    if (index >= 0) {
+      this.index = index;
+      if (this.agents[index].runId !== selected?.runId) this.scroll = 0;
+    } else {
+      this.index = Math.max(0, Math.min(this.index, this.agents.length - 1));
+      this.view = "list";
+      this.scroll = 0;
+    }
   }
 
   private get rows(): number {
@@ -202,7 +218,7 @@ export class AgentsPanel {
     const icon = isActive(agent.phase) && agent.phase !== "waiting" ? SPINNER[this.frame()] : status.icon;
     const role = current ? this.theme.bold(this.theme.fg("text", agent.role)) : this.theme.fg("muted", agent.role);
     const task = oneLine(agent.task, 80) || "(No task summary)";
-    const stats = `${status.label} · ${formatElapsed(viewElapsed(agent, this.now))}`;
+    const stats = `${status.label} · ${formatElapsed(viewElapsed(agent, this.now ?? Date.now()))}`;
     const identity = `  ${cursor} ${this.theme.fg(status.color, icon)} ${role} ${this.theme.fg("dim", shortId(agent.id))}`;
     const left = `${identity}  ${current ? this.theme.fg("text", task) : this.theme.fg("dim", task)}`;
     // A long idle/outcome label must not crowd out the cursor or the instance's identity.
@@ -224,7 +240,7 @@ export class AgentsPanel {
       : [title,
         this.field("ID", agent.id),
         this.field("Directory", agent.cwd),
-        this.field("Elapsed", formatElapsed(viewElapsed(agent, this.now))),
+        this.field("Elapsed", formatElapsed(viewElapsed(agent, this.now ?? Date.now()))),
         this.field("Session", agent.sessionId ?? "None"),
         this.field("Log", agent.logFile),
         ""];

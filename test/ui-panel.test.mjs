@@ -30,6 +30,50 @@ test('roster icons follow the supplied frame only for executing phases', () => {
   }
 });
 
+test('live snapshots preserve the selected identity and detail scroll while updating pending actions', () => {
+  const focused = view({ id: 'focused', startedAt: 2000, text: Array.from({ length: 20 }, (_, i) => `Line ${i}`).join('\n') });
+  const p = panel([view({ id: 'first' }), focused]);
+  p.instance.handleInput(keys.down); p.instance.handleInput('i'); p.render(); p.instance.handleInput(keys.down);
+  const before = view({ id: 'inserted', startedAt: 500 });
+  p.instance.update([before, view({ id: 'first' }), { ...focused, lastActivity: 'Fresh activity' }]);
+  assert.equal(p.instance.mode, 'detail'); assert.equal(p.instance.selection, 2);
+  assert.match(text(p.render()), /ID focused/); assert.match(text(p.render()), /Fresh activity/);
+  assert.match(text(p.render()), /↑ 1 lines above/, 'same-run refresh must not reset detail scrolling');
+  p.instance.update([before, { ...focused, runId: 'next-run' }]);
+  assert.equal(p.instance.mode, 'detail'); assert.doesNotMatch(text(p.render()), /↑ 1 lines above/, 'new runs must not inherit the previous result scroll');
+  const waiting = { ...focused, phase: 'waiting', questions: [{ id: 'fresh-question', method: 'confirm', title: 'New request' }] };
+  p.instance.update([before, waiting]);
+  assert.match(text(p.render()), /New request/); assert.match(text(p.render()), /r reply/);
+  assert.doesNotMatch(text(p.render()), /s message|x release/);
+  p.instance.handleInput('s'); assert.deepEqual(p.actions, []);
+  p.instance.handleInput('r'); assert.deepEqual(p.actions, [{ kind: 'reply', id: 'focused', questionId: 'fresh-question' }]);
+  p.instance.update([]); assert.match(text(p.render()), /New request/, 'settled panes must ignore late snapshots');
+});
+
+test('live release filtering preserves history mode and never silently swaps the detail target', () => {
+  const first = view({ id: 'first' }), second = view({ id: 'second', startedAt: 2000 });
+  const released = { ...second, phase: 'closed', protocolVersion: 2, runtimeClosed: true };
+  const p = panel([first, second]); p.instance.handleInput(keys.down); p.instance.handleInput('i');
+  p.instance.update([first, released]);
+  assert.equal(p.instance.mode, 'list'); assert.equal(p.instance.selection, 0);
+  assert.doesNotMatch(text(p.render()), /worker second/); assert.match(text(p.render()), /h history/);
+  p.instance.handleInput('h'); p.instance.handleInput(keys.down);
+  p.instance.update([first, { ...released, text: 'Retained result' }]);
+  assert.equal(p.instance.selection, 1); assert.match(text(p.render()), /h hide released/);
+  p.instance.handleInput('i'); assert.match(text(p.render()), /Retained result/);
+  p.instance.update([]); assert.equal(p.instance.mode, 'list'); assert.equal(p.instance.selection, 0);
+  p.instance.update([first]); assert.match(text(p.render()), /›.*first/);
+});
+
+test('live idle admission uses the latest runtime and excludes newly busy or questioning siblings', () => {
+  const idle = view({ id: 'old-idle', phase: 'idle', protocolVersion: 2, runtimeId: 'old-runtime' });
+  const p = panel([idle, view({ id: 'next', startedAt: 2000 })]);
+  const next = view({ id: 'next', startedAt: 2000, phase: 'idle', protocolVersion: 2, runId: 'new-run', runtimeId: 'new-runtime' });
+  p.instance.update([{ ...idle, phase: 'running' }, next, { ...idle, id: 'pending', questions: [{ id: 'q' }] }]);
+  assert.match(text(p.render()), /release idle \(1\)/);
+  p.instance.handleInput('c'); assert.deepEqual(p.actions, [{ kind: 'close-idle', targets: [next] }]);
+});
+
 test('released instances are hidden by default but remain available in explicit history', () => {
   const released=view({id:'released',phase:'closed',protocolVersion:2,runtimeClosed:true,text:'RESULT_EVIDENCE',sessionId:'original'});
   const uncertain=view({id:'uncertain',phase:'closed',receipt:{status:'unconfirmed'}});
