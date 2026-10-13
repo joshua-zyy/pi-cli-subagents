@@ -687,7 +687,7 @@ ${view(state)}`);
           // A different scope holds a different role set, so start it from the top.
           if (action.kind === "scope") { scope = action.scope; cursor = {}; continue; }
           if (action.kind === "save") {
-            const file = writeScope(scope, agentDir, cwd, draft[scope]);
+            const file = writeScope(scope, agentDir, cwd, draft[scope], disk[scope]);
             disk[scope] = readScope(scope, agentDir, cwd); draft[scope] = structuredClone(disk[scope]); dirty[scope] = false;
             refreshRoleCatalog(ctx);
             ctx.ui.notify(`Saved ${file}`, "info");

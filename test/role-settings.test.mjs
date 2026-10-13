@@ -28,6 +28,30 @@ test('an invalid document is rejected before it can overwrite the file', () => {
   assert.throws(() => readScope('user', agent, cwd), /Unexpected|JSON/);
 });
 
+test('conditional scope writes reject stale documents without reverting an external safety-mode change', () => {
+  for (const scope of ['user', 'project']) {
+    const agent = temp(), cwd = temp(), original = { worker: { ...base, cli: 'codex', mode: 'full-access' } };
+    const file = writeScope(scope, agent, cwd, original), expected = readScope(scope, agent, cwd);
+    writeScope(scope, agent, cwd, { worker: { ...original.worker, mode: 'read-only' } });
+    const external = fs.readFileSync(file, 'utf8');
+    assert.throws(() => writeScope(scope, agent, cwd, { worker: { ...original.worker, model: 'fixture-model' } }, expected), /changed on disk.*reopen/i);
+    assert.equal(fs.readFileSync(file, 'utf8'), external);
+    assert.equal(readScope(scope, agent, cwd).worker.mode, 'read-only');
+  }
+});
+
+test('conditional scope writes compare validated values, allow formatting changes and reject broken external JSON', () => {
+  const agent = temp(), cwd = temp(), original = { worker: { ...base, cli: 'pi' } };
+  const file = writeScope('user', agent, cwd, original), expected = readScope('user', agent, cwd);
+  fs.writeFileSync(file, JSON.stringify({ worker: { cli: 'pi', instructions: base.instructions, description: base.description } }));
+  assert.doesNotThrow(() => writeScope('user', agent, cwd, original, expected), 'formatting and key order do not change the role definition');
+  fs.writeFileSync(file, '{broken');
+  assert.throws(() => writeScope('user', agent, cwd, original, expected), /JSON|Unexpected|Expected/);
+  assert.equal(fs.readFileSync(file, 'utf8'), '{broken', 'an invalid external edit is never repaired by saving the old draft');
+  const missingAgent = temp();
+  assert.doesNotThrow(() => writeScope('user', missingAgent, cwd, original, {}), 'an unchanged empty scope can be created');
+});
+
 test('visible fields follow the chosen CLI instead of exposing every field at once', () => {
   assert.deepEqual(visibleFields(base), ['cli', 'description', 'instructions'], 'an empty role still chooses a CLI first');
   assert.deepEqual(visibleFields({ ...base, provider: 'opencode-go', model: 'deepseek' }), ['cli', 'provider', 'model', 'thinking', 'description', 'instructions'],

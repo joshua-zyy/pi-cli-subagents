@@ -84,6 +84,37 @@ test('shutdown settles role settings in list, picker and rebuilt dirty views wit
   assert.deepEqual(h.notices,[]);
 });
 
+for(const scope of ['project','user']) test(`the ${scope} role pane preserves external edits, keeps the draft dirty and saves after reopen`, {timeout:5000}, async t => {
+  const h = harness(t); h.ctx.isProjectTrusted = () => scope === 'project';
+  const file = h.files[scope === 'project' ? 1 : 0], untouched = h.files[scope === 'project' ? 0 : 1];
+  const opening = h.open();
+  for(let i=0;i<3;i++) h.press('\r'); await turn();
+  assert.match(opening.widget.component.render(120).join('\n'),/unsaved/);
+  const external = JSON.stringify({external:{description:'External legitimate change',instructions:'Retain this role.'}});
+  fs.writeFileSync(file,external);
+  h.press('s'); await turn();
+  assert.equal(fs.readFileSync(file,'utf8'),external,'stale panel save must not overwrite the external role');
+  assert.equal(fs.readFileSync(untouched,'utf8'),'{}\n');
+  assert(h.notices.some(([message,level])=>level==='error' && /changed on disk.*reopen/i.test(message)));
+  assert(!h.notices.some(([message])=>message.startsWith('Saved ')));
+  assert.match(opening.widget.component.render(120).join('\n'),/unsaved/,'a conflict must not silently discard the local draft');
+  h.press(escape); h.press(escape); await opening.running;
+  assert.equal(h.confirms.length,1,'closing the dirty draft still asks before discarding it');
+  const reopened = h.open();
+  for(let i=0;i<3;i++) h.press('\r'); await turn();
+  h.press('s'); await turn();
+  const saved = JSON.parse(fs.readFileSync(file,'utf8'));
+  assert.deepEqual(saved.external,JSON.parse(external).external);
+  assert.equal(saved.explore.cli,'pi');
+  assert.doesNotMatch(reopened.widget.component.render(120).join('\n'),/unsaved/);
+  // A second save must use the last successful snapshot, not the original open-time document.
+  h.press('\r'); h.press('\r'); await turn(); h.press('s'); await turn();
+  assert.equal(h.notices.filter(([message])=>message.startsWith('Saved ')).length,2);
+  assert.equal(h.notices.filter(([,level])=>level==='error').length,1);
+  h.press(escape); h.press(escape); await reopened.running;
+  assert.equal(h.confirms.length,1,'success cleared dirty state; normal close does not ask again');
+});
+
 test('session replacement closes the old settings pane and subsequent normal close and shutdown remain independent', {timeout:5000}, async t => {
   const h = harness(t), old = h.open();
   h.events.get('session_start')({reason:'switch'},h.ctx);

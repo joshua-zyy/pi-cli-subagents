@@ -1,4 +1,5 @@
 import path from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import { EMPTY_CATALOG, modelEfforts, type ModelCatalog, type ModelEntry } from "./cli-discovery.js";
 import { CLAUDE_MODES, CLAUDE_MODELS, CLAUDE_THINKING_LEVELS, CODEX_MODES, EFFORT_LEVELS, PI_THINKING_LEVELS, validateRoleFile } from "./roles.js";
 import { readJson, writeJson } from "./storage.js";
@@ -46,10 +47,13 @@ export function readScope(scope: Scope, agentDir: string, cwd: string): Record<s
   return validateRoleFile(value, file);
 }
 
-/** Validate the whole document before writing so a partial edit can never corrupt the file. */
-export function writeScope(scope: Scope, agentDir: string, cwd: string, doc: Record<string, Role>): string {
-  const file = scopeFile(scope, agentDir, cwd);
-  writeJson(file, validateRoleFile(doc, file));
+/** Validate edits and, for a panel save, reject a stale disk snapshot before the atomic write. */
+export function writeScope(scope: Scope, agentDir: string, cwd: string, doc: Record<string, Role>, expected?: Record<string, Role>): string {
+  const file = scopeFile(scope, agentDir, cwd), next = validateRoleFile(doc, file);
+  // Detect already-published edits, not a cross-process CAS against arbitrary external writers.
+  if (expected !== undefined && !isDeepStrictEqual(readScope(scope, agentDir, cwd), expected))
+    throw new Error(`Roles changed on disk: ${file}. Close and reopen the panel to review them; your unsaved draft is still here.`);
+  writeJson(file, next);
   return file;
 }
 
