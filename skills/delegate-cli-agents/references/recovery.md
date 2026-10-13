@@ -6,11 +6,11 @@ conflicts, uncertain integrations, stale locks, unreadable instances and failed 
 
 ## Results and delivery
 
-完整通知不附 `Read result` 补读提示。截断通知的定位器保留原 id/runId，并给出省略区起点 `offset` 和本页 `limit`；按该定位器补读，省略区超过一页时沿 `nextOffset` 继续，直到全部省略内容可见，不猜偏移或跳过中段，也不必重读通知已显示的尾部。若只有 `subagent_query({ action: "get", id })` 的预览，或单独分页读取 `result`，则沿 `nextOffset` 读至 null。收到报告或读完整正文都不等于核验了报告中的主张。
+Complete notifications have no `Read result` hint. A truncated notification's locator preserves the original `id`/`runId` and gives the omitted range's starting `offset` and page `limit`. Follow that locator; if the omitted range spans multiple pages, continue with `nextOffset` until all omitted content is visible. Do not guess offsets or skip the middle, and do not reread the tail already shown in the notification. If you only have a `subagent_query({ action: "get", id })` preview, or are paging through `result` separately, follow `nextOffset` until it is null. Receiving a report or reading its full text does not verify its claims.
 
 Use `subagent_query({ action: "activity", id })` for bounded recent activity and its opaque cursor for older pages. Read notice and truncation/partial markers. An invalid or stale cursor fails explicitly; it does not silently reset. This projection is not the full final result and reads retained logs without starting a native process. Do not poll it for completion.
 
-自动协作通知（waiting/completed/failed/stopped/stalled）返回原父会话，统一用 steer 在忙碌父代理的下一次模型请求前送达，不取消在途工具。成功报告仍有两秒合批窗口；普通活动只在查看器展示，不触发模型轮次。空闲父代理可能启动新轮；继续独立工作或结束当前轮，不靠轮询或 sleep 等待。
+Automatic collaboration notifications (`waiting`/`completed`/`failed`/`stopped`/`stalled`) return to the original parent session. All use `steer` to reach a busy parent before its next model request without cancelling in-flight tools. Successful reports still have a two-second batching window; ordinary activity appears only in the viewer and does not trigger model turns. An idle parent may start a new turn. Continue independent work or end the current turn; do not wait by polling or sleeping.
 
 Queued notifications are not delivery receipts until recorded in parent history. Reopening the original parent replays unrecorded reports with their original run IDs; recorded reports are not delivered again.
 
