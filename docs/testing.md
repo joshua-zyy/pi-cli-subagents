@@ -35,6 +35,14 @@ The Node runner uses `--test-concurrency=1` and does not modify the parent proce
 
 Launcher tests use independent miniature repositories to verify real process boundaries. Before starting the inner runner, they remove `NODE_TEST_CONTEXT` only in the fixture environment so Node does not mistake it for recursive execution of the outer test and silently skip it.
 
+## 开发 SDK 与安全依赖
+
+开发用的 Pi AI、coding-agent、TUI 三个直接依赖统一固定为 `1.0.1`，运行时 peer 仍为 `*`，不打包宿主副本。它是 `0.87.1` 之后首个显式依赖 `brace-expansion 5.0.12` 的稳定 SDK；更早版本的 shrinkwrap 会把传递依赖恢复为有告警的 `5.0.9`。
+
+仅对 SDK `1.0.1` 的 `pi-codemode` 使用同版本 override：其 `^1.0.1` 范围会解析到移除了 `MCP_TYPESCRIPT_PREAMBLE` 的新版，导致 SDK 导入失败。不能只因 audit 清零就删除这个兼容约束；变更后须验证真实导入和加载器。
+
+升级后用干净的 `npm ci --ignore-scripts` 验证实际安装树与 `npm audit`，不要只检查锁文件字面值。就地升级可能残留旧嵌套依赖；按当前 manifest 重建干净锁后再验收。复用既有隔离解包加载器与本地 worker 夹具，分别检查开发 SDK 和实际宿主；这些 PASS 不代表真实模型验收。
+
 ## Tier selection rules
 
 1. For everyday changes, run the fast tier and relevant domain files. Changes to shared entry points such as `src/index.ts` or notifications/receipts also need the corresponding local acceptance checks.

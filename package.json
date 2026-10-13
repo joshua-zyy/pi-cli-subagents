@@ -38,10 +38,15 @@
     "@earendil-works/pi-coding-agent": "*",
     "@earendil-works/pi-tui": "*"
   },
+  "overrides": {
+    "@earendil-works/pi-coding-agent@1.0.1": {
+      "@earendil-works/pi-codemode": "1.0.1"
+    }
+  },
   "devDependencies": {
-    "@earendil-works/pi-ai": "0.87.1",
-    "@earendil-works/pi-coding-agent": "0.87.1",
-    "@earendil-works/pi-tui": "0.87.1",
+    "@earendil-works/pi-ai": "1.0.1",
+    "@earendil-works/pi-coding-agent": "1.0.1",
+    "@earendil-works/pi-tui": "1.0.1",
     "@types/node": "22.19.19",
     "typescript": "5.9.3"
   }
