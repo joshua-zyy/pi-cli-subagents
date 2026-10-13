@@ -696,9 +696,9 @@ ${view(state)}`);
           if (action.kind === "set" || action.kind === "edit") {
             // Kept even when a dialog is cancelled, so the same field stays under the cursor.
             cursor = { role: action.role, field: action.field };
-            const base = preview[action.role];
+            const base = Object.hasOwn(preview, action.role) ? preview[action.role] : undefined;
             if (!base) throw new Error(`Unknown role: ${action.role}`);
-            const field = action.field, role = draft[scope][action.role] ?? base;
+            const field = action.field, role = Object.hasOwn(draft[scope], action.role) ? draft[scope][action.role] : base;
             const value = action.kind === "set" ? action.value : field === "instructions" || field === "description"
               ? await ctx.ui.editor(`${field === "instructions" ? "Instructions" : "Description"} for ${action.role}`, fieldValue(role, field))
               : await ctx.ui.input(`${FIELD_LABELS[field]} for ${action.role}`, field === "model" ? "Exact model name or alias" : "", undefined);
@@ -719,7 +719,7 @@ ${view(state)}`);
             if (name === undefined || epoch !== sessionEpoch) continue;
             const clean = name.trim();
             if (!/^[a-z][a-z0-9-]*$/.test(clean)) { ctx.ui.notify("Role names use lowercase letters, digits and dashes.", "error"); continue; }
-            if (preview[clean]) { ctx.ui.notify(`Role ${clean} already exists; select it and press enter to customize it here.`, "warning"); continue; }
+            if (Object.hasOwn(preview, clean)) { ctx.ui.notify(`Role ${clean} already exists; select it and press enter to customize it here.`, "warning"); continue; }
             draft[scope] = addRole(draft[scope], clean); dirty[scope] = true;
             cursor = { role: clean };   // the new role needs its description and instructions written
             continue;

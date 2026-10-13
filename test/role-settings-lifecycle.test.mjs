@@ -141,6 +141,34 @@ test('catalog selection persists provider/model together; later provider edits w
   h.press(escape); h.press(escape); await opening.running;
 });
 
+test('a constructor role inherited from personal scope edits the right baseline in project scope', {timeout:5000}, async t => {
+  const h = harness(t), source = {description:'Personal constructor',instructions:'Keep these instructions',cli:'pi'};
+  fs.writeFileSync(h.files[0],JSON.stringify({constructor:source}));
+  const editors = []; h.ctx.ui.editor = async (_title,value) => {editors.push(value);return 'Project constructor';};
+  const opening = h.open();
+  assert.match(opening.widget.component.render(160).join('\n'),/constructor.*personal/);
+  for(let i=0;i<4;i++) h.press('\x1b[B'); h.press('\r');
+  for(let i=0;i<4;i++) h.press('\x1b[B'); h.press('\r'); await turn();
+  assert.deepEqual(editors,['Personal constructor']);
+  h.press('s'); await turn();
+  assert.deepEqual(JSON.parse(fs.readFileSync(h.files[1],'utf8')).constructor,{...source,description:'Project constructor'});
+  assert.deepEqual(JSON.parse(fs.readFileSync(h.files[0],'utf8')).constructor,source);
+  assert(!h.notices.some(([,level])=>level==='error'));
+  h.press(escape); h.press(escape); await opening.running;
+});
+
+test('the settings command can add a constructor role without a prototype collision', {timeout:5000}, async t => {
+  const h = harness(t); h.ctx.ui.input = async () => 'constructor';
+  const opening = h.open(); h.press('a'); await turn();
+  assert.match(opening.widget.component.render(120).join('\n'),/constructor.*unsaved/);
+  h.press('s'); await turn();
+  const saved = JSON.parse(fs.readFileSync(h.files[1],'utf8'));
+  assert.equal(Object.hasOwn(saved,'constructor'),true);
+  assert.equal(saved.constructor.description,'constructor role');
+  assert(!h.notices.some(([message])=>/already exists/.test(message)));
+  h.press(escape); h.press(escape); await opening.running;
+});
+
 test('session replacement closes the old settings pane and subsequent normal close and shutdown remain independent', {timeout:5000}, async t => {
   const h = harness(t), old = h.open();
   h.events.get('session_start')({reason:'switch'},h.ctx);

@@ -58,11 +58,12 @@ export function writeScope(scope: Scope, agentDir: string, cwd: string, doc: Rec
 }
 
 export function roleRows(effective: Record<string, Role>, userDoc: Record<string, Role>, projectDoc: Record<string, Role>, scope: Scope): RoleRow[] {
+  const doc = scope === "user" ? userDoc : projectDoc;
   return Object.entries(effective).map(([name, role]) => ({
     name,
-    origin: projectDoc[name] ? "project" : userDoc[name] ? "user" : "built-in",
+    origin: Object.hasOwn(projectDoc, name) ? "project" : Object.hasOwn(userDoc, name) ? "user" : "built-in",
     effective: role,
-    override: (scope === "user" ? userDoc : projectDoc)[name],
+    override: Object.hasOwn(doc, name) ? doc[name] : undefined,
   }));
 }
 
@@ -79,7 +80,7 @@ export function withCli(role: Role, cli: Cli): Role {
 const asCli = (value: string): Cli => (value === "codex" ? "codex" : value === "claude" ? "claude" : "pi");
 
 export function setField(doc: Record<string, Role>, name: string, base: Role, field: EditableField, value: string): Record<string, Role> {
-  const current = doc[name] ?? base;
+  const current = Object.hasOwn(doc, name) ? doc[name] : base;
   if (field === "cli") return { ...doc, [name]: withCli(current, asCli(value)) };
   if (field === "description") return { ...doc, [name]: { ...current, description: value } };
   if (field === "instructions") return { ...doc, [name]: { ...current, instructions: value } };
@@ -107,7 +108,7 @@ export function deleteRole(doc: Record<string, Role>, name: string): Record<stri
 
 /** Seed a new role with editable placeholders; `description`/`instructions` are required by validation. */
 export function addRole(doc: Record<string, Role>, name: string): Record<string, Role> {
-  if (doc[name]) return doc;
+  if (Object.hasOwn(doc, name)) return doc;
   return { ...doc, [name]: { description: `${name} role`, instructions: `Describe what the ${name} role must do, what it may change, and how it must report evidence.` } };
 }
 

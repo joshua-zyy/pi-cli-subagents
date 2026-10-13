@@ -183,6 +183,20 @@ test('rows report where the effective definition comes from', () => {
   assert.equal(roleRows(effective, user, project, 'project').find((row) => row.name === 'worker').override.model, 'project-model');
 });
 
+test('constructor is an own role, never an inherited origin, override or edit baseline', () => {
+  const user = {constructor:{...base,cli:'pi'}}, project = {}, effective = mergeRoles([user,project]);
+  const entry = roleRows(effective,user,project,'project').find(row=>row.name==='constructor');
+  assert.equal(entry.origin,'user'); assert.equal(entry.override,undefined);
+  assert.deepEqual(roleRows(effective,user,project,'user').find(row=>row.name==='constructor').override,user.constructor);
+  const edited = setField(project,'constructor',user.constructor,'model','custom');
+  assert.deepEqual(edited.constructor,{...user.constructor,model:'custom'});
+  assert.equal(Object.hasOwn(project,'constructor'),false,'the lower scope is not mutated');
+  const added = addRole({},'constructor');
+  assert.equal(Object.hasOwn(added,'constructor'),true);
+  assert.equal(added.constructor.description,'constructor role');
+  assert.equal(addRole(added,'constructor'),added,'an actual own entry is not replaced');
+});
+
 test('add and remove only touch the edited scope', () => {
   const doc = addRole({}, 'tester');
   assert.equal(doc.tester.description, 'tester role');
