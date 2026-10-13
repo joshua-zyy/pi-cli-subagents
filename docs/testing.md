@@ -43,6 +43,15 @@ Launcher tests use independent miniature repositories to verify real process bou
 
 升级后用干净的 `npm ci --ignore-scripts` 验证实际安装树与 `npm audit`，不要只检查锁文件字面值。就地升级可能残留旧嵌套依赖；按当前 manifest 重建干净锁后再验收。复用既有隔离解包加载器与本地 worker 夹具，分别检查开发 SDK 和实际宿主；这些 PASS 不代表真实模型验收。
 
+## 角色默认值回显
+
+角色面板只回显未覆盖字段，不加“原生默认”标注，不把回显值写入角色文件。保存其他字段、打开/关闭选择器不会冻结继承；用户明确选中一个值才创建该字段的覆盖。切换 CLI 仍清除旧后端字段，个人草稿即使被项目同名角色遮盖，也按个人草稿的 CLI 显示字段和选择器。
+
+- Pi 回显父会话当前 provider/model/thinking；Codex 用原生 `config/read` 读取当前 cwd 的配置层，不创建 thread/turn。只有审批策略和 sandbox 都匹配时才显示我们的 mode 预设，否则显示原生组合，不静默改成近似权限。
+- Claude Code 只读实际 `CLAUDE_CONFIG_DIR`、当前 cwd 的共享/本地 settings 和文件型 managed settings，白名单保留模型/effort 相关环境变量；不读取认证文件、不保留或输出凭证字段，不启动 Claude、不执行 hooks/helpers，不获取账户或服务器管理策略。这是本地配置快照，不是运行中实例的生效值证明。
+- 未明确配置或动态模型/权限默认值无法离线确定时显示 `default`，不猜订阅默认模型或固定 effort；读取失败显示 `unavailable`。非 Windows 的 Git 子目录/linked worktree 等无法确定 local settings 路径时也不猜。重新打开面板刷新快照；已有 worker 不热更新。
+- 回显中的 `bypassPermissions`、`full-access` 和原生 `never` 审批组合仍保留权限告警。本地 fixture 覆盖来源、父模型、CLI 切换、默认选择定位、同名模型 provider、保存不冻结、重开刷新、关闭/会话切换后的迟到结果；不替代人工 TUI 或真实模型验收。
+
 ## Tier selection rules
 
 1. For everyday changes, run the fast tier and relevant domain files. Changes to shared entry points such as `src/index.ts` or notifications/receipts also need the corresponding local acceptance checks.

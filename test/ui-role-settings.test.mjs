@@ -3,6 +3,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { visibleWidth } from '@earendil-works/pi-tui';
 import { RoleSettingsPanel } from '../dist/ui/role-settings.js';
+import { withCli } from '../dist/role-settings.js';
 
 const theme = { fg: (_, text) => text, bold: text => text };
 const keys = { up: '\u001b[A', down: '\u001b[B', enter: '\r', escape: '\u001b', tab: '\t', left: '\u001b[D' };
@@ -268,6 +269,14 @@ test('Pi model choices distinguish identical model IDs and carry the selected pr
   assert.deepEqual(p.actions, [{ kind: 'set', role: 'worker', field: 'model', value: 'shared', provider: 'b' }]);
 });
 
+test('an inherited Pi provider/model pair highlights and marks only that provider current', () => {
+  const catalog={pi:[{provider:'a',model:'shared'},{provider:'b',model:'shared'}],codex:[]};
+  const p=panel([row({effective:role({cli:'pi'})})],{cursor:{role:'worker',field:'model'},choices:{catalog,defaults:()=>({provider:'b',model:'shared',thinking:'high'})}});
+  p.instance.handleInput(keys.enter);const text=p.render(160);
+  assert.match(text,/› b\/shared\s+current/);assert.doesNotMatch(text,/a\/shared\s+current/);
+  p.instance.handleInput(keys.enter);assert.deepEqual(p.actions,[{kind:'set',role:'worker',field:'model',value:'shared',provider:'b'}]);
+});
+
 test('without a catalog the model stays a plain text field', () => {
   const { instance, actions } = panel([row({ effective: role({ cli: 'pi' }) })]);
   instance.handleInput(keys.enter);
@@ -364,6 +373,47 @@ test('short model pickers keep every choice visible even with a current-value fo
     assert.match(lines.join('\n'), /Current value: custom-model/);
     p.instance.handleInput(keys.down);
   }
+});
+
+test('default values are displayed without badges or changing the role, including permission warnings', () => {
+  const defaults = { pi: {provider:'p',model:'parent-model',thinking:'high'},
+    codex: {model:'native-codex',effort:'xhigh',mode:'full-access',defaultModeQuestions:'false'},
+    claude: {model:'native-claude',thinking:'high',mode:'bypassPermissions'} };
+  for (const cli of ['pi','codex','claude']) {
+    const source = role({cli}), before = structuredClone(source);
+    const p = panel([row({effective:source,override:source})],{cursor:{role:'worker'},choices:{defaults:r=>defaults[r.cli]}});
+    const text = p.render(180);
+    for(const [field,value] of Object.entries(defaults[cli])) assert.match(text,new RegExp(`(?:› |  )${field}\\s+${value}(?:\\s*│)?$`,'m'));
+    assert.doesNotMatch(text,/native default|\(inherited\)|\(empty\)|unsaved/);
+    if(cli !== 'pi') assert.match(text,/stops asking for approval/,'an inherited unsafe mode must not hide its warning');
+    p.instance.handleInput(keys.escape); p.instance.handleInput(keys.escape);
+    assert.deepEqual(p.actions,[{kind:'close'}]); assert.deepEqual(source,before,'display never freezes defaults into the role');
+  }
+});
+
+test('switching CLI displays its defaults, preserves explicit values and highlights the displayed choice', () => {
+  const switched = withCli(role({cli:'codex',model:'old-codex',effort:'max',mode:'read-only'}),'claude');
+  const values = {model:'sonnet',thinking:'medium',mode:'manual'};
+  const choices = {defaults:()=>values};
+  const p = panel([row({effective:switched,override:switched})],{choices,cursor:{role:'worker',field:'mode'}});
+  assert.match(p.render(160),/model\s+sonnet/); assert.match(p.render(160),/thinking\s+medium/);
+  assert.doesNotMatch(p.render(160),/old-codex|effort\s+max|read-only/);
+  p.instance.handleInput(keys.enter);
+  assert.match(p.render(160),/› manual\s+current/,'opening the picker must not jump to acceptEdits');
+  p.instance.handleInput(keys.escape); assert.deepEqual(p.actions,[]);
+  values.model='updated-model'; assert.match(p.render(160),/model\s+updated-model/,'defaults remain live presentation data');
+  const explicit = role({cli:'claude',model:'custom',thinking:'max',mode:'plan'});
+  const q=panel([row({effective:explicit,override:explicit})],{choices,cursor:{role:'worker'}});
+  assert.match(q.render(160),/model\s+custom/); assert.match(q.render(160),/thinking\s+max/); assert.match(q.render(160),/mode\s+plan/);
+  assert.doesNotMatch(q.render(160),/updated-model|medium|manual/);
+});
+
+test('a personal draft uses its own backend defaults and fields even when project runtime roles shadow it', () => {
+  const effective=role({cli:'codex',model:'project-model'}), override=role({cli:'claude'});
+  const p=panel([row({effective,override,origin:'project'})],{scope:'user',cursor:{role:'worker'},
+    choices:{defaults:r=>r.cli==='claude'?{model:'claude-local',thinking:'high',mode:'manual'}:{model:'wrong-codex',effort:'low'}}});
+  const text=p.render(180); assert.match(text,/cli\s+claude/); assert.match(text,/model\s+claude-local/); assert.match(text,/thinking\s+high/);
+  assert.doesNotMatch(text,/wrong-codex|effort|defaultModeQuestions/);
 });
 
 test('dirty Esc hints match back and close behavior without discarding the draft', () => {

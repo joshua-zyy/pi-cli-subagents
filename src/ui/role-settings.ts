@@ -51,7 +51,7 @@ export class RoleSettingsPanel {
       this.rowIndex = reopened;
       this.view = "fields";
       // A field can disappear when the CLI changed, so fall back to the top of this role.
-      const field = cursor.field ? visibleFields(this.rows[reopened].effective).indexOf(cursor.field) : -1;
+      const field = cursor.field ? visibleFields(this.rows[reopened].override ?? this.rows[reopened].effective).indexOf(cursor.field) : -1;
       this.fieldIndex = field >= 0 ? field : 0;
     }
   }
@@ -66,14 +66,14 @@ export class RoleSettingsPanel {
     return this.rows[Math.min(this.rowIndex, this.rows.length - 1)];
   }
   private get fields(): EditableField[] {
-    const role = this.selected?.effective;
+    const role = this.selected?.override ?? this.selected?.effective;
     return role ? visibleFields(role) : [];
   }
   private get field(): EditableField | undefined {
     return this.fields[Math.min(this.fieldIndex, this.fields.length - 1)];
   }
   private get values(): string[] {
-    const role = this.selected?.effective, field = this.field;
+    const role = this.selected?.override ?? this.selected?.effective, field = this.field;
     if (!role || !field) return [];
     return fieldChoices(role, field, this.choiceOptions());
   }
@@ -101,7 +101,7 @@ export class RoleSettingsPanel {
       // The escape hatch reopens the host text dialog instead of setting a literal sentinel.
       else if (value === CUSTOM_CHOICE) this.finish({ kind: "edit", role: selected.name, field });
       else if (value !== undefined) {
-        const provider = field === "model" ? catalogEntries(selected.effective, field, this.choiceOptions().catalog ?? EMPTY_CATALOG)[this.choiceIndex]?.provider : undefined;
+        const provider = field === "model" ? catalogEntries(selected.override ?? selected.effective, field, this.choiceOptions().catalog ?? EMPTY_CATALOG)[this.choiceIndex]?.provider : undefined;
         this.finish({ kind: "set", role: selected.name, field, value, ...(provider ? { provider } : {}) });
       }
     } else if (matchesKey(data, "escape") || matchesKey(data, "left")) this.view = "fields";
@@ -113,9 +113,14 @@ export class RoleSettingsPanel {
     if (matchesKey(data, "up")) this.fieldIndex = Math.max(0, this.fieldIndex - 1);
     else if (matchesKey(data, "down")) this.fieldIndex = Math.min(fields.length - 1, this.fieldIndex + 1);
     else if (matchesKey(data, "return") && field) {
-      if (fieldIsChoice(selected.effective, field, this.choiceOptions())) {
+      const role = selected.override ?? selected.effective;
+      if (fieldIsChoice(role, field, this.choiceOptions())) {
         this.view = "choices";
-        this.choiceIndex = Math.max(0, this.choices.indexOf(fieldValue(selected.effective, field)));
+        const current = field === "defaultModeQuestions" ? fieldValue(role, field) : this.displayedValue(selected, field);
+        const entries = field === "model" ? catalogEntries(role, field, this.choiceOptions().catalog ?? EMPTY_CATALOG) : [];
+        const provider = this.displayedValue(selected, "provider");
+        const pair = entries.findIndex(entry => entry.model === current && (!provider || entry.provider === provider));
+        this.choiceIndex = Math.max(0, pair >= 0 ? pair : this.choices.indexOf(current));
       } else this.finish({ kind: "edit", role: selected.name, field });
     } else if (matchesKey(data, "s") && this.dirty) this.finish({ kind: "save" });
     else if (matchesKey(data, "d")) this.finish({ kind: "remove", role: selected.name });
@@ -228,7 +233,7 @@ export class RoleSettingsPanel {
     if (this.dirty) actions.push(["s", "save"]);
     actions.push(["esc", "close"]);
     lines.push(this.hint(actions));
-    return this.window(lines, this.rows, this.rowIndex, (row, selected) => this.row(selected, row.name, `${roleSummary(row.effective)} · ${this.originLabel(row)}`), room);
+    return this.window(lines, this.rows, this.rowIndex, (row, selected) => this.row(selected, row.name, `${roleSummary(row.effective, this.choiceOptions().defaults?.(row.effective))} · ${this.originLabel(row)}`), room);
   }
 
   private renderFields(room: number): string[] {
@@ -240,20 +245,27 @@ export class RoleSettingsPanel {
     actions.push(["esc", "back"]);
     lines.push(this.hint(actions));
     // Preserve permission warnings ahead of lower-priority help when space is tight.
-    if (selected.effective.mode && suppressesApprovals(selected.effective.mode))
-      lines.push(this.theme.fg("warning", `mode ${selected.effective.mode}: this role stops asking for approval`));
+    const role = selected.override ?? selected.effective, mode = this.displayedValue(selected, "mode");
+    if (mode && suppressesApprovals(mode))
+      lines.push(this.theme.fg("warning", `mode ${mode}: this role stops asking for approval`));
     // Only prompt for a CLI when nothing CLI-specific is on screen yet.
     const cliSpecific = this.fields.some((field) => field !== "cli" && field !== "description" && field !== "instructions");
-    if (!selected.effective.cli && !cliSpecific) lines.push(this.theme.fg("muted", "Choose a CLI first; its specific options appear after that."));
-    if (this.choiceOptions().pending && cliSpecific && ((selected.effective.cli ?? "pi") === "pi" || selected.effective.cli === "codex"))
+    if (!role.cli && !cliSpecific) lines.push(this.theme.fg("muted", "Choose a CLI first; its specific options appear after that."));
+    if (this.choiceOptions().pending && cliSpecific && ((role.cli ?? "pi") === "pi" || role.cli === "codex"))
       lines.push(this.theme.fg("muted", "Reading each CLI's own model list; that field becomes a picker when it arrives."));
     if (!selected.override) lines.push(this.theme.fg("muted", `No ${SCOPE_LABEL[this.scope]} entry yet; changing a field creates one.`));
     return this.window(lines, this.fields, this.fieldIndex, (field, isSelected) => this.row(isSelected, FIELD_LABELS[field], this.fieldDisplay(selected, field)), room);
   }
 
+  private displayedValue(row: RoleRow, field: EditableField): string {
+    const role = row.override ?? row.effective, value = fieldValue(role, field);
+    if (value && !(field === "defaultModeQuestions" && role.defaultModeQuestions === undefined)) return value;
+    return this.choiceOptions().defaults?.(role)[field] ?? value;
+  }
+
   private fieldDisplay(row: RoleRow, field: EditableField): string {
-    const value = fieldValue(row.override ?? row.effective, field);
-    if (!row.override && value) return `${oneLine(value, 80)}  (inherited)`;
+    const role = row.override ?? row.effective, value = this.displayedValue(row, field);
+    if (!row.override && role[field] !== undefined && value) return `${oneLine(value, 80)}  (inherited)`;
     return oneLine(value, 80) || "(empty)";
   }
 
@@ -263,14 +275,17 @@ export class RoleSettingsPanel {
     const lines = [this.theme.bold(this.theme.fg("accent", `${selected.name} · ${FIELD_LABELS[field]}`))];
     lines.push(this.hint([["↑↓", "select"], ["enter", "apply"], ["esc", "back"]]));
     if (field === "defaultModeQuestions") lines.push(this.theme.fg("muted", "Experimental Default-mode questions; approvals and sandbox unchanged."));
-    const choices = this.choices, current = fieldValue(selected.override ?? selected.effective, field);
+    const role = selected.override ?? selected.effective, choices = this.choices;
+    const current = field === "defaultModeQuestions" ? fieldValue(role, field) : this.displayedValue(selected, field);
     // While discovery runs the list only holds the escape hatch, so say why it is still empty.
     if (!this.values.length && this.choiceOptions().pending) lines.push(this.theme.fg("muted", "Reading this CLI's own model list…"));
     const footer = current && !choices.includes(current) ? [this.theme.fg("dim", `Current value: ${current}`)] : [];
-    const entries = catalogEntries(selected.effective, field, this.choiceOptions().catalog ?? EMPTY_CATALOG);
+    const entries = catalogEntries(role, field, this.choiceOptions().catalog ?? EMPTY_CATALOG);
     return this.window(lines, choices, this.choiceIndex, (choice, isSelected, index) => {
-      const provider = field === "model" && !selected.effective.provider ? entries[index]?.provider : undefined;
-      return this.row(isSelected, provider ? `${provider}/${choice}` : choice, this.choiceDetail(field, choice, current));
+      const provider = field === "model" && !role.provider ? entries[index]?.provider : undefined;
+      const currentProvider = field === "model" ? this.displayedValue(selected, "provider") : "";
+      const sameProvider = !provider || !currentProvider || provider === currentProvider;
+      return this.row(isSelected, provider ? `${provider}/${choice}` : choice, this.choiceDetail(field, choice, sameProvider ? current : ""));
     }, room, footer);
   }
 }

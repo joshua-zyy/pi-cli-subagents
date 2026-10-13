@@ -4,6 +4,8 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import childProcess from 'node:child_process';
+import { EventEmitter } from 'node:events';
+import { PassThrough } from 'node:stream';
 import { syncBuiltinESMExports } from 'node:module';
 import extension, { inheritParentModel } from '../dist/index.js';
 import { tempDir } from './helpers/tmp.mjs';
@@ -15,11 +17,21 @@ function harness(t, piModels = 'provider  model\nfixture  test-model\n') {
   fs.mkdirSync(home); fs.mkdirSync(path.join(cwd,'.pi'),{recursive:true});
   const files = [path.join(home,'cli-subagents.roles.json'),path.join(cwd,'.pi','cli-subagents.roles.json')];
   for (const file of files) fs.writeFileSync(file,'{}\n');
-  const oldHome = process.env.PI_CODING_AGENT_DIR; process.env.PI_CODING_AGENT_DIR = home;
+  const savedEnv = Object.fromEntries(['PI_CODING_AGENT_DIR','CLAUDE_CONFIG_DIR','CODEX_HOME','ProgramFiles','PATH'].map(key=>[key,process.env[key]]));
+  const bin=path.join(dir,'bin');fs.mkdirSync(path.join(bin,'node_modules','@openai','codex','bin'),{recursive:true});
+  for(const file of ['claude.exe','claude','codex','node_modules/@openai/codex/bin/codex.js'])fs.writeFileSync(path.join(bin,file),'');
+  Object.assign(process.env,{PI_CODING_AGENT_DIR:home,CLAUDE_CONFIG_DIR:home,CODEX_HOME:home,ProgramFiles:path.join(dir,'system'),PATH:bin});
   const probes = [], events = new Map(), commands = new Map(), listeners = [], widgets = [], notices = [], confirms = [], openings = [];
   const exec = t.mock.method(childProcess,'execFile',(_command,args,_options,callback)=>{
     probes.push(()=>callback(null,args.includes('--list-models') ? piModels : '{"models":[]}'));
     return {stdin:{end(){}}};
+  });
+  const config={model:'native-codex',model_reasoning_effort:'xhigh',sandbox_mode:'read-only',approval_policy:'on-request'};
+  const spawn=t.mock.method(childProcess,'spawn',(_command,args)=>{
+    assert.equal(args.at(-1),'app-server','settings must not start a model turn or another executable');
+    const child=new EventEmitter();child.stdout=new PassThrough();child.stdin=new EventEmitter();
+    child.stdin.write=s=>{const m=JSON.parse(s);if(m.id)probes.push(()=>child.stdout.write(JSON.stringify({id:m.id,result:m.id===1?{}:{config}})+'\n'));};
+    child.stdin.end=()=>child.emit('close',0);return child;
   });
   syncBuiltinESMExports();
   const ctx = {cwd,mode:'tui',isProjectTrusted:()=>true,sessionManager:{getSessionFile:()=>undefined,getEntries:()=>[]},
@@ -33,7 +45,7 @@ function harness(t, piModels = 'provider  model\nfixture  test-model\n') {
       },
     }};
   extension({on:(name,handler)=>events.set(name,handler),registerCommand:(name,command)=>commands.set(name,command),registerTool(){},registerShortcut(){},registerMessageRenderer(){}});
-  const h = {ctx,events,listeners,widgets,notices,confirms,files,
+  const h = {ctx,events,listeners,widgets,notices,confirms,files,home,config,
     open(){
       const before = widgets.length, opening = {finished:false};
       opening.running = commands.get('cli-agents-setting').handler('',ctx).then(()=>{opening.finished=true;});
@@ -43,7 +55,7 @@ function harness(t, piModels = 'provider  model\nfixture  test-model\n') {
       return opening;
     },
     press(key){assert.deepEqual(listeners.at(-1)(key),{consume:true});},
-    async finishProbes(){for(const complete of probes.splice(0)) complete();await turn();},
+    async finishProbes(){while(probes.length)for(const complete of probes.splice(0)) complete();await turn();},
   };
   t.after(async()=>{
     events.get('session_shutdown')();
@@ -51,8 +63,8 @@ function harness(t, piModels = 'provider  model\nfixture  test-model\n') {
     for(const listener of [...listeners]) for(let i=0;i<3;i++) listener(escape);
     await Promise.all(openings.map(opening=>opening.running));
     await h.finishProbes();
-    exec.mock.restore(); syncBuiltinESMExports();
-    if(oldHome === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = oldHome;
+    exec.mock.restore(); spawn.mock.restore(); syncBuiltinESMExports();
+    for(const [key,value]of Object.entries(savedEnv))if(value===undefined)delete process.env[key];else process.env[key]=value;
     fs.rmSync(dir,{recursive:true,force:true});
   });
   return h;
@@ -167,6 +179,38 @@ test('the settings command can add a constructor role without a prototype collis
   assert.equal(saved.constructor.description,'constructor role');
   assert(!h.notices.some(([message])=>/already exists/.test(message)));
   h.press(escape); h.press(escape); await opening.running;
+});
+
+test('switching reviewer backends fills live defaults without saving a snapshot or altering native settings', {timeout:5000}, async t => {
+  const h=harness(t);h.ctx.model={provider:'parent-provider',id:'parent-model'};h.ctx.thinkingLevel='high';
+  const file=path.join(h.home,'settings.json'), native=JSON.stringify({model:'sonnet',permissions:{defaultMode:'bypassPermissions'},env:{CLAUDE_CODE_EFFORT_LEVEL:'high'}});
+  fs.writeFileSync(file,native);
+  const opening=h.open();await h.finishProbes();
+  for(const key of ['\x1b[B','\x1b[B','\r','\r','\x1b[B','\x1b[B','\r'])h.press(key);await turn();
+  const text=opening.widget.component.render(180).join('\n');
+  assert.match(text,/reviewer — project/);assert.match(text,/model\s+sonnet/);assert.match(text,/thinking\s+high/);assert.match(text,/mode\s+bypassPermissions/);
+  assert.match(text,/stops asking for approval/);assert.doesNotMatch(text,/native default|parent-model|parent-provider|\(empty\)/);
+  h.press('s');await turn();let saved=JSON.parse(fs.readFileSync(h.files[1],'utf8')).reviewer;
+  assert.equal(saved.cli,'claude');for(const key of ['model','thinking','mode','effort','provider'])assert.equal(Object.hasOwn(saved,key),false,key);
+  assert.equal(fs.readFileSync(file,'utf8'),native);
+  // Current CLI is Claude, so moving one row up switches to Codex; defaults change without old Claude fields.
+  for(const key of ['\r','\x1b[A','\r'])h.press(key);await turn();
+  const codex=opening.widget.component.render(180).join('\n');assert.match(codex,/model\s+native-codex/);assert.match(codex,/effort\s+xhigh/);assert.match(codex,/mode\s+read-only/);assert.doesNotMatch(codex,/sonnet|thinking|bypassPermissions/);
+  h.press('s');await turn();saved=JSON.parse(fs.readFileSync(h.files[1],'utf8')).reviewer;
+  assert.equal(saved.cli,'codex');assert.equal(Object.hasOwn(saved,'model'),false);assert.equal(Object.hasOwn(saved,'mode'),false);
+  h.press(escape);h.press(escape);await opening.running;
+});
+
+test('opening the settings pane again reads fresh native defaults without dirtying or saving roles', {timeout:5000}, async t => {
+  const h=harness(t), file=path.join(h.home,'settings.json');
+  fs.writeFileSync(h.files[1],JSON.stringify({reviewer:{cli:'claude',description:'Reviewer',instructions:'Review only.'}}));
+  for(const model of ['first-model','updated-model']) {
+    fs.writeFileSync(file,JSON.stringify({model,env:{CLAUDE_CODE_EFFORT_LEVEL:'medium'},permissions:{defaultMode:'manual'}}));
+    const opening=h.open();await h.finishProbes();h.press('\x1b[B');h.press('\x1b[B');h.press('\r');
+    const text=opening.widget.component.render(160).join('\n');assert.match(text,new RegExp(`model\\s+${model}`));assert.doesNotMatch(text,/unsaved/);
+    h.press(escape);h.press(escape);await opening.running;
+  }
+  assert.deepEqual(h.confirms,[]);assert.equal(JSON.parse(fs.readFileSync(h.files[1],'utf8')).reviewer.model,undefined);
 });
 
 test('session replacement closes the old settings pane and subsequent normal close and shutdown remain independent', {timeout:5000}, async t => {

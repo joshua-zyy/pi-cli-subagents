@@ -105,7 +105,12 @@ function harness(t) {
     get editorAnswer() { return state.editorAnswer; },
     set editorAnswer(value) { state.editorAnswer = value; },
     set mode(value) { state.mode = value; },
-    start() { extension(pi); handlers.session_start({ type: 'session_start', reason: 'startup' }, ctx); },
+    start() {
+      // Catalog/default discovery must not see or start the machine's optional native CLIs.
+      const savedPath = process.env.PATH; process.env.PATH = '';
+      try { extension(pi); handlers.session_start({ type: 'session_start', reason: 'startup' }, ctx); }
+      finally { if (savedPath === undefined) delete process.env.PATH; else process.env.PATH = savedPath; }
+    },
     async invoke(tool, params) {
       return (await tools.get(tool).execute('id', params, undefined, undefined, ctx)).content[0].text;
     },

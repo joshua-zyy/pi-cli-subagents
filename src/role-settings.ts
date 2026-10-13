@@ -23,6 +23,8 @@ export interface ChoiceOptions {
   catalog?: ModelCatalog;
   /** True while that probe is still running, so a picker waits instead of falling back to text. */
   pending?: boolean;
+  /** Read-only presentation values. Never merged into a role document. */
+  defaults?: (role: Role) => Partial<Record<EditableField, string>>;
 }
 
 export interface RoleRow {
@@ -188,13 +190,13 @@ export function modeDetail(mode: string): string {
 
 /** Postures that remove the native approval request, so the parent's approval surface goes silent. */
 export function suppressesApprovals(mode: string): boolean {
-  return mode === "dontAsk" || mode === "bypassPermissions" || mode === "full-access";
+  return mode === "dontAsk" || mode === "bypassPermissions" || mode === "full-access" || mode.endsWith(" / never");
 }
 
-export function roleSummary(role: Role): string {
-  const cli = role.cli ?? "pi";
-  const mode = role.mode ? ` · mode ${role.mode}` : "";
-  if (cli === "codex") return `codex · ${role.model ?? "native model"} · effort ${role.effort ?? "default"}${mode}`;
-  if (cli === "claude") return `claude · ${role.model ?? "native model"} · ${role.thinking ? `effort ${role.thinking}` : "native effort"}${mode}`;
-  return `pi · ${role.provider ?? "default provider"}/${role.model ?? "default model"} · thinking ${role.thinking ?? "off"}`;
+export function roleSummary(role: Role, defaults: Partial<Record<EditableField, string>> = {}): string {
+  const cli = role.cli ?? "pi", model = role.model ?? defaults.model, thinking = role.thinking ?? defaults.thinking;
+  const posture = role.mode ?? defaults.mode, mode = posture ? ` · mode ${posture}` : "";
+  if (cli === "codex") return `codex · ${model ?? "native model"} · effort ${role.effort ?? defaults.effort ?? "default"}${mode}`;
+  if (cli === "claude") return `claude · ${model ?? "native model"} · ${thinking ? `effort ${thinking}` : "native effort"}${mode}`;
+  return `pi · ${role.provider ?? defaults.provider ?? "default provider"}/${model ?? "default model"} · thinking ${thinking ?? "off"}`;
 }

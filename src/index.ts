@@ -8,6 +8,7 @@ import { deliverHumanActions, saveHumanAction } from "./human-actions.js";
 import { renderReportMessage } from "./ui/report.js";
 import { CLI_CHOICES, loadRoles, mergeRoles } from "./roles.js";
 import { detectClis, probeCatalog, type ModelCatalog } from "./cli-discovery.js";
+import { claudeDefaultValues, probeRoleDefaults, type NativeDefaults } from "./role-defaults.js";
 import { addRole, deleteRole, FIELD_LABELS, fieldValue, readScope, roleRows, setField, writeScope, type Scope } from "./role-settings.js";
 import { AgentsPanel, paneRows, type PanelAction } from "./ui/panel.js";
 import { RoleSettingsPanel, SETTINGS_MAX_ROWS, type RoleSettingsAction, type RoleSettingsCursor } from "./ui/role-settings.js";
@@ -649,6 +650,21 @@ ${view(state)}`);
     discover(cwd);
     const available = cliAvailability ?? detectClis(), clis = CLI_CHOICES.filter((choice) => available[choice]);
     void catalogProbe?.then(() => refresh());
+    let defaults: NativeDefaults | undefined;
+    // Per-open snapshot; late reads must never repaint a closed or replacement pane.
+    void probeRoleDefaults(cwd, available).then(found => {
+      if (epoch !== sessionEpoch || !widget) return;
+      defaults = found; refresh();
+    });
+    const displayDefaults = (role: Role) => {
+      if ((role.cli ?? "pi") === "pi") {
+        const parent = inheritParentModel(role, ctx);
+        return { provider: parent.provider ?? "default", model: parent.model ?? "default", thinking: parent.thinking ?? "default" };
+      }
+      const unknown = defaults ? "unavailable" : "loading…";
+      if (role.cli === "codex") return defaults?.codex ?? { model: unknown, effort: unknown, mode: unknown, defaultModeQuestions: unknown };
+      return defaults?.claude ? claudeDefaultValues(defaults.claude, role) : { model: unknown, thinking: unknown, mode: unknown };
+    };
     try {
       try {
         disk.user = readScope("user", agentDir, cwd);
@@ -669,7 +685,7 @@ ${view(state)}`);
           panel = new RoleSettingsPanel(rows, scope, trusted, dirty[scope], theme, done,
             () => Math.max(6, Math.min(SETTINGS_MAX_ROWS + 4, Math.floor((widget?.terminal.rows ?? 24) / 3))),
             (text) => ctx.ui.theme.getThinkingBorderColor(ctx.thinkingLevel ?? "off")(text),
-            () => ({ clis, ...(catalog ? { catalog } : {}), ...(catalog ? {} : { pending: true }) }), cursor);
+            () => ({ clis, defaults: displayDefaults, ...(catalog ? { catalog } : {}), ...(catalog ? {} : { pending: true }) }), cursor);
           deliver = (data) => panel?.handleInput(data);
           refresh();
         });
