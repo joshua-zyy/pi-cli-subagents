@@ -82,6 +82,50 @@ test('Claude fails missing/ambiguous/foreign native metadata before launching a 
   fs.writeFileSync(file, bytes.toString().replaceAll(session.sessionId, 'foreign'));
   assert.throws(() => client(session), /identity|session/i);
   fs.unlinkSync(file); assert.throws(() => client(session), /missing/i);
+  assert.equal(fs.readFileSync(path.join(home, 'launches.jsonl'), 'utf8').trim().split('\n').length, 1,
+    'rejected identity must not launch a resume or a replacement');
+});
+
+test('Claude preflight keeps the initial mainline cwd while later tool directories change', () => {
+  const cwd = tempDir('claude-cwd'), home = path.join(cwd, 'home'), sessionId = '11111111-1111-4111-8111-111111111111';
+  const file = path.join(home, 'projects', 'fixture-project', `${sessionId}.jsonl`);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const spec = { cwd, claudeHome: home }, session = { cli: 'claude', sessionId, claudeHome: home };
+  for (const changed of [path.join(cwd, 'apps', 'cli'), path.join(path.dirname(cwd), 'other-project')]) {
+    const rows = [
+      { type: 'user', sessionId, cwd: changed, isSidechain: true },
+      { type: 'user', sessionId, cwd, parentUuid: null, isSidechain: false },
+      { type: 'attachment', sessionId, cwd: changed, isSidechain: false },
+      { type: 'assistant', sessionId, cwd: changed, isSidechain: false },
+      { type: 'progress', data: 'x'.repeat(70_000) },
+      { type: 'user', sessionId, cwd: changed, isSidechain: false },
+    ];
+    const bytes = Buffer.from(rows.map(row => JSON.stringify(row)).join('\n') + '\n');
+    fs.writeFileSync(file, bytes);
+    assert.equal(inspectClaudeSession(spec, session), file);
+    assert.deepEqual(fs.readFileSync(file), bytes, 'preflight must not rewrite the original history');
+    assert.throws(() => inspectClaudeSession({ ...spec, cwd: changed }, session), /directory|cwd/i,
+      'a later matching cwd must not replace the original mainline cwd');
+  }
+});
+
+test('Claude preflight does not use later cwd matches or a sampled tail as startup identity', () => {
+  const cwd = tempDir('claude-cwd-guards'), home = path.join(cwd, 'home'), sessionId = '11111111-1111-4111-8111-111111111111';
+  const file = path.join(home, 'projects', 'fixture-project', `${sessionId}.jsonl`);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const spec = { cwd, claudeHome: home }, session = { cli: 'claude', sessionId, claudeHome: home };
+  const original = { type: 'user', sessionId, cwd, isSidechain: false };
+  for (const [rows, error] of [
+    [[{ ...original, cwd: path.dirname(cwd) }, original], /directory|cwd/i],
+    [[{ ...original, cwd: undefined }, original], /identity|metadata|cwd/i],
+    [[{ ...original, sessionId: undefined }, original], /identity|metadata/i],
+    [[{ ...original, message: 'x'.repeat(70_000) }, original], /identity|metadata/i],
+    [[original, { type: 'progress', data: 'x'.repeat(70_000) }, { ...original, sessionId: 'foreign' }], /identity|session/i],
+    [[original, { type: 'attachment', sessionId, cwd: 42 }], /metadata|cwd|directory/i],
+  ]) {
+    fs.writeFileSync(file, rows.map(row => JSON.stringify(row)).join('\n') + '\n');
+    assert.throws(() => inspectClaudeSession(spec, session), error);
+  }
 });
 
 test('Claude startup identity notification is optional on new and resumed sessions', async t => {

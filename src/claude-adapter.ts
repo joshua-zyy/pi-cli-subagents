@@ -44,8 +44,14 @@ export function inspectClaudeSession(spec: AgentSpec, session: ClaudeSession): s
         const row: unknown = JSON.parse(line);
         if (!object(row)) throw new Error("Malformed Claude session metadata");
         if (row.sessionId !== undefined && row.sessionId !== session.sessionId) throw new Error("Claude session identity mismatch");
-        if (row.cwd !== undefined && (typeof row.cwd !== "string" || !row.cwd.trim() || path.resolve(row.cwd) !== path.resolve(spec.cwd))) throw new Error("Original Claude working directory differs");
-        if (row.sessionId === session.sessionId && row.cwd && row.isSidechain !== true && ["user", "assistant"].includes(row.type)) identified = true;
+        if (row.cwd !== undefined && (typeof row.cwd !== "string" || !row.cwd.trim())) throw new Error("Malformed Claude session cwd metadata");
+        // Tool calls can change later cwd values. Only the first mainline message in the
+        // file head establishes the original directory; a matching tail cannot replace it.
+        if (!identified && offset === 0 && row.isSidechain !== true && ["user", "assistant"].includes(row.type)) {
+          if (row.sessionId !== session.sessionId || !row.cwd) throw new Error("Original Claude session lacks verifiable identity and cwd metadata");
+          if (path.resolve(row.cwd) !== path.resolve(spec.cwd)) throw new Error("Original Claude working directory differs");
+          identified = true;
+        }
       }
     }
   } finally { closeSync(fd); }

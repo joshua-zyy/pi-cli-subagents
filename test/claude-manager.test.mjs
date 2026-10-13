@@ -73,11 +73,13 @@ test('Claude manager reopens the same native session and retains prior home/mode
   const {m,cwd,home,parent,launch,options,done}=setup(t);
   const child=await m.spawn('claude',role,cwd,'REMEMBER alpha');const first=await done(child.id);
   assert.equal(first.cli,'claude');assert.equal(first.session.claudeHome,home);assert.equal(first.sessionFile,undefined);
+  const log=path.join(home,'projects','fixture-project',`${first.sessionId}.jsonl`);
+  fs.appendFileSync(log,JSON.stringify({type:'attachment',sessionId:first.sessionId,cwd:path.join(cwd,'apps','cli'),isSidechain:false})+'\n');
   const reopened=new AgentManager(parent,launch,undefined,{...options,home:path.join(cwd,'different')});
   await reopened.send(child.id,'RECALL');const second=await done(child.id);
   assert.equal(second.text,'alpha');assert.deepEqual(second.session,first.session);assert.equal(second.runCount,2);
   assert.equal(m.reports().filter(r=>r.status==='completed').length,2);
-  const log=path.join(home,'projects','fixture-project',`${first.sessionId}.jsonl`);fs.unlinkSync(log);
+  fs.unlinkSync(log);
   await assert.rejects(reopened.send(child.id,'NO REPLACEMENT'),/missing/);assert.equal(m.get(child.id).runCount,2);
 });
 test('Claude public query and parent reply preserve the native task, report fields and one question audit', {timeout:20000}, async t=>{
@@ -128,7 +130,7 @@ test('Claude native rule-forced questions show the signal to the parent and stil
 });
 
 test('Claude parent decisions on signalled approvals are scoped and audited; close retains native history', {timeout:25000}, async t=>{
-  const {m,cwd,done}=setup(t);
+  const {m,cwd,home,done}=setup(t);
   const child=await m.spawn('claude',role,cwd,'APPROVAL_MANUAL');
   const waiting=await waitUntil('Claude waiting',()=>{const s=m.get(child.id);return s.questions.length?s:undefined;});const q=waiting.questions[0];
   assert.notEqual(q.humanOnly,true);assert.deepEqual(q.parentPolicy,{values:['Deny once','Approve once','Cancel turn']});
@@ -136,6 +138,10 @@ test('Claude parent decisions on signalled approvals are scoped and audited; clo
   const audit=fs.readFileSync(path.join(m.root,child.id,'runs',finished.runId,'permissions.jsonl'),'utf8').trim().split('\n').map(JSON.parse);
   assert.equal(audit.length,1);assert.equal(audit[0].actor,'parent');assert.equal(audit[0].reason,'task scope');assert.equal(audit[0].selectedOption,'Approve once');
   const held=await m.spawn('claude',role,cwd,'HOLD');await assert.rejects(m.send(held.id,'steer'),/steer.*not supported/);
+  const heldState=m.get(held.id);
+  const log=path.join(home,'projects','fixture-project',`${heldState.sessionId}.jsonl`);
+  fs.appendFileSync(log,JSON.stringify({type:'attachment',sessionId:heldState.sessionId,cwd:path.join(cwd,'apps','cli'),isSidechain:false})+'\n');
   await m.close(held.id);const stopped=await done(held.id,'stopped');assert(stopped.sessionId);assert.equal(stopped.forced,false);
-  await m.send(held.id,'RECALL');assert.equal((await done(held.id)).sessionId,stopped.sessionId);
+  await m.send(held.id,'CWD');const resumed=await done(held.id);
+  assert.equal(resumed.sessionId,stopped.sessionId);assert.equal(resumed.text,cwd);
 });
