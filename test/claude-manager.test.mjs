@@ -22,10 +22,8 @@ const setup = t => {
   const done=async(id,status='completed')=>{
     const state=await waitUntil('run result',()=>{const s=m.get(id);return ['idle','closed'].includes(s.phase)?s:undefined;},12000);
     assert.equal(state.lastStatus,status);
-    if(state.cli==='claude'){
-      assert.equal(state.phase,'closed');
-      await waitUntil('Claude worker release',()=>!processAlive(state.workerPid),5000);
-    }
+    if(state.runtimeClosed)await waitUntil('Claude worker release',()=>!processAlive(state.workerPid),5000);
+    else assert.equal(state.phase,'idle');
     return state;
   };
   return{m,cwd,home,parent,launch,options,done};
@@ -75,13 +73,29 @@ test('Claude manager reopens the same native session and retains prior home/mode
   assert.equal(first.cli,'claude');assert.equal(first.session.claudeHome,home);assert.equal(first.sessionFile,undefined);
   const log=path.join(home,'projects','fixture-project',`${first.sessionId}.jsonl`);
   fs.appendFileSync(log,JSON.stringify({type:'attachment',sessionId:first.sessionId,cwd:path.join(cwd,'apps','cli'),isSidechain:false})+'\n');
+  await m.close(child.id);
   const reopened=new AgentManager(parent,launch,undefined,{...options,home:path.join(cwd,'different')});
   await reopened.send(child.id,'RECALL');const second=await done(child.id);
   assert.equal(second.text,'alpha');assert.deepEqual(second.session,first.session);assert.equal(second.runCount,2);
   assert.equal(m.reports().filter(r=>r.status==='completed').length,2);
-  fs.unlinkSync(log);
+  await reopened.close(child.id);fs.unlinkSync(log);
   await assert.rejects(reopened.send(child.id,'NO REPLACEMENT'),/missing/);assert.equal(m.get(child.id).runCount,2);
 });
+test('Claude manager keeps ownership and one worker through busy messages, interrupt and idle continuation', {timeout:30000}, async t=>{
+  const {m,cwd,home,done}=setup(t);
+  const child=await m.spawn('claude',role,cwd,'REMEMBER alpha'),first=await done(child.id);assert.equal(first.phase,'idle');
+  const old=JSON.stringify(m.getResult(child.id,first.runId));
+  await m.send(child.id,'HOLD');await m.send(child.id,'correction','steer');assert.equal((await done(child.id)).text,'STEER:correction');
+  await m.send(child.id,'HOLD');await m.send(child.id,'MUST_NOT_RUN','followUp');
+  const interrupted=await m.interrupt(child.id);assert.equal(interrupted.receipt.status,'settled');await done(child.id,'stopped');
+  await m.send(child.id,'RECALL');const last=await done(child.id);assert.equal(last.text,'alpha');assert.equal(last.runCount,4);
+  for(const key of ['workerPid','cliPid','runtimeId','sessionId','logFile'])assert.equal(last[key],first[key],key);
+  assert(fs.existsSync(path.join(m.root,child.id,'owner.lock')));assert.equal(JSON.stringify(m.getResult(child.id,first.runId)),old);
+  assert.equal(fs.readFileSync(path.join(home,'launches.jsonl'),'utf8').trim().split('\n').length,1);
+  assert(!m.reports().some(r=>r.text==='MUST_NOT_RUN'));const closed=await m.close(child.id);assert.equal(closed.receipt.status,'released');
+  assert(!fs.existsSync(path.join(m.root,child.id,'owner.lock')));
+});
+
 test('Claude public query and parent reply preserve the native task, report fields and one question audit', {timeout:20000}, async t=>{
   const {m,cwd,home,parent,done}=setup(t), {ctx,invoke}=publicApi(parent,cwd,{select(){throw Error('No human escalation');},input(){throw Error('No human escalation');}});
   const child=await m.spawn('claude',role,cwd,'QUESTION');
@@ -137,7 +151,7 @@ test('Claude parent decisions on signalled approvals are scoped and audited; clo
   await m.reply(child.id,q.id,{value:'Approve once'},{actor:'parent',reason:'task scope'});const finished=await done(child.id);assert.equal(finished.text,'ALLOW');
   const audit=fs.readFileSync(path.join(m.root,child.id,'runs',finished.runId,'permissions.jsonl'),'utf8').trim().split('\n').map(JSON.parse);
   assert.equal(audit.length,1);assert.equal(audit[0].actor,'parent');assert.equal(audit[0].reason,'task scope');assert.equal(audit[0].selectedOption,'Approve once');
-  const held=await m.spawn('claude',role,cwd,'HOLD');await assert.rejects(m.send(held.id,'steer'),/steer.*not supported/);
+  const held=await m.spawn('claude',role,cwd,'HOLD');
   const heldState=m.get(held.id);
   const log=path.join(home,'projects','fixture-project',`${heldState.sessionId}.jsonl`);
   fs.appendFileSync(log,JSON.stringify({type:'attachment',sessionId:heldState.sessionId,cwd:path.join(cwd,'apps','cli'),isSidechain:false})+'\n');

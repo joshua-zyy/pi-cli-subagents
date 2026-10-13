@@ -47,7 +47,9 @@ Launcher tests use independent miniature repositories to verify real process bou
 
 恢复保留原 native home、sessionId 和唯一转录文件，不自动新建替代会话。只读预检保持首尾各最多 65,536 字节的预算：文件头首条非 sidechain 的 user/assistant 记录必须含原 sessionId 和与 spec.cwd 一致的启动目录；后续工具执行可改变 cwd，不再将动态目录当作启动身份。首尾采样中的外国 sessionId、非法 cwd 类型、错误启动目录仍拒绝。文件头缺少可验证起点时 fail-closed，不用后续匹配行或文件尾代替原始身份，也不改写原转录。
 
-依据 [官方会话恢复文档](https://platform.claude.com/docs/en/agent-sdk/sessions) 和 [官方 SDK 的文件头 cwd 提取](https://github.com/anthropics/claude-agent-sdk-python/blob/main/src/claude_agent_sdk/_internal/sessions.py)，沿用现有 native-resume 接线，不引入 SDK 依赖。既有 adapter 域测试覆盖动态目录和拒绝边界；manager 本地替身覆盖自然完成及 stop 后同身份恢复、历史记忆和固定启动目录。真实 Claude 续聊仍须单独授权；这项修复不启用常驻、运行中消息或独立 interrupt。
+依据 [官方会话恢复文档](https://platform.claude.com/docs/en/agent-sdk/sessions) 和 [官方 SDK 的文件头 cwd 提取](https://github.com/anthropics/claude-agent-sdk-python/blob/main/src/claude_agent_sdk/_internal/sessions.py)，沿用现有 native-resume 接线，不引入 SDK 依赖。既有 adapter 域测试覆盖动态目录和拒绝边界；manager 本地替身覆盖自然完成及 stop 后同身份恢复、历史记忆和固定启动目录。真实 Claude 续聊仍须单独授权；cwd 预检与驻留生命周期分别验收，前者通过不代表真实驻留能力通过。
+
+Claude 驻留验收复用原 adapter/manager/workspace 替身：同 worker/CLI 多轮、初始化只出现一次、队列多结果合成一轮结果、后台屏障、旧 UUID/旧问题隔离、显式中断与自然完成竞态、取消排队输入、回执缺失及超时后的新工作拒绝。运行中 steer/followUp 对应原生 priority next/later，不发送隐式 interrupt；忙碌消息要求 msg_lifecycle_v1，独立中断要求 interrupt_receipt_v1 和 interrupt_cancel_queued_v1。中断回执和原生终态都确认后才返回 settled；背景工作仍未收口时不能假装 idle。idle 保留工作区 writer，交接/集成前仍须 stop；stop 释放资源而不删历史。真实 Claude 驻留、多轮消息和中断、人工 TUI 均未运行。
 
 ## 角色默认值回显
 

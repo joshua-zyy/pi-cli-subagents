@@ -15,6 +15,8 @@ type Json = Record<string, any>;
 const object = (value: unknown): value is Json => value !== null && typeof value === "object" && !Array.isArray(value);
 const uuid = /^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/;
 type ClaudeSession = Extract<NativeSession, { cli: "claude" }>;
+/** A known pre-dispatch refusal, not an uncertain native operation. */
+export class ClaudeCapabilityError extends Error {}
 
 /** Bounded, read-only identity check. This does not assert that an external Claude process is idle. */
 export function inspectClaudeSession(spec: AgentSpec, session: ClaudeSession): string {
@@ -62,7 +64,7 @@ export function inspectClaudeSession(spec: AgentSpec, session: ClaudeSession): s
 type Approval = { id: string; requestId: string; toolId: string; input: Json; messageId: string; attempted: boolean; fields?: QuestionField[] };
 /** Native stream-json stays inside this adapter; the worker retains ownership and audit. */
 export class ClaudeAdapter implements CliAdapter {
-  readonly resident = false;
+  readonly resident = true;
   private runId?: string;
   private emit(event: AdapterEvent): void {
     this.options.onEvent({ ...event, ...(this.runId === undefined ? {} : { runId: this.runId }) });
@@ -81,6 +83,11 @@ export class ClaudeAdapter implements CliAdapter {
   private settled = false;
   private initialized = false;
   private activeMessage?: string;
+  private readonly messages = new Set<string>();
+  private readonly pendingMessages = new Set<string>();
+  private readonly completedMessages = new Set<string>();
+  private interrupting?: Promise<void>;
+  private interruptVerified = false;
   private result?: Json;
   private tools = new Map<string, string>();
   private approvals = new Map<string, Approval>();
@@ -189,6 +196,12 @@ export class ClaudeAdapter implements CliAdapter {
     }
     if (record.parent_tool_use_id != null) return;
     if (record.session_id !== undefined && record.session_id !== this.session.sessionId) throw new Error("Claude returned a different native session identity");
+    if (record.type === "command_lifecycle" && this.messages.has(record.command_uuid)) {
+      const marker = `input:${record.command_uuid}`;
+      if (["queued", "started", "completed", "cancelled"].includes(record.state)) this.mark(marker);
+      if (record.state === "cancelled") { this.pendingMessages.delete(record.command_uuid); this.mark(`cancelled:${record.command_uuid}`); }
+    }
+    if (record.type === "user" && record.isReplay === true && this.messages.has(record.uuid)) this.mark(`input:${record.uuid}`);
     if (record.type === "system" && record.subtype === "init") {
       if (record.session_id !== this.session.sessionId || typeof record.cwd !== "string" || path.resolve(record.cwd) !== path.resolve(this.options.spec.cwd)) throw new Error("Claude init has a different session or working directory");
       this.initialized = true; this.capabilities = new Set(Array.isArray(record.capabilities) ? record.capabilities : []); this.mark("init");
@@ -206,15 +219,17 @@ export class ClaudeAdapter implements CliAdapter {
     if (record.type === "result") {
       const ids = Array.isArray(record.user_message_uuids) ? record.user_message_uuids : [record.user_message_uuid];
       if (!this.initialized && (record.is_error === true || record.subtype !== "success")) throw new Error(`Claude startup failed: ${String(record.result ?? record.errors?.join("\n") ?? "unknown failure")}`);
-      if (record.session_id !== this.session.sessionId || !this.activeMessage || !ids.includes(this.activeMessage)) return;
-      this.clearApprovals(); this.result = record; this.maybeSettle();
+      if (record.session_id !== this.session.sessionId || !this.activeMessage || !ids.some((id: unknown) => typeof id === "string" && this.messages.has(id))) return;
+      if (ids.every((id: unknown) => typeof id !== "string" || !this.messages.has(id) || this.completedMessages.has(id))) return;
+      for (const id of ids) if (this.messages.has(id)) { this.pendingMessages.delete(id); this.completedMessages.add(id); this.mark(`input:${id}`); }
+      this.clearApprovals(); this.tools.clear(); this.result = record; this.maybeSettle();
     }
     if (!this.settled && this.activeMessage && ["assistant", "stream_event", "tool_progress", "user"].includes(record.type)) this.emit({ type: "activity", detail: record.type });
   }
   private maybeSettle(): void {
     // Local stream-json may omit session_state_changed entirely. The matching result is
     // the turn-complete signal; retain the explicit queue and background-work barriers.
-    if (!this.result || this.background.size || this.settled || this.ending) return;
+    if (!this.result || this.background.size || this.pendingMessages.size || this.settled || this.ending || this.interrupting && !this.interruptVerified) return;
     const r = this.result;
     if (!Number.isSafeInteger(r.queued_turn_count) || r.queued_turn_count < 0) throw new Error("Claude result lacks a verifiable queue boundary");
     if (r.queued_turn_count) return;
@@ -226,7 +241,7 @@ export class ClaudeAdapter implements CliAdapter {
   }
   private permission(record: Json): void {
     const p = record.request, requestId = record.request_id;
-    const scoped = this.initialized && this.activeMessage && !this.result && !this.settled && object(p) && p.subtype === "can_use_tool" &&
+    const scoped = this.initialized && this.activeMessage && this.pendingMessages.size > 0 && !this.settled && !this.interrupting && object(p) && p.subtype === "can_use_tool" &&
       typeof requestId === "string" && requestId.trim() && !this.seenRequests.has(requestId) && !p.agent_id &&
       typeof p.tool_use_id === "string" && p.tool_use_id.trim() && typeof p.tool_name === "string" && p.tool_name.trim() &&
       this.tools.has(p.tool_use_id) && this.tools.get(p.tool_use_id) === p.tool_name && object(p.input);
@@ -282,18 +297,40 @@ export class ClaudeAdapter implements CliAdapter {
     return this.session;
   }
   async start(message: string, runId?: string): Promise<void> {
-    if (!this.observed.has("ready") || this.activeMessage || this.settled) throw new Error("Claude is not ready for a new task");
-    this.runId = runId;
+    if (this.error) throw this.error;
+    if (!this.observed.has("ready") || this.activeMessage || this.interrupting || this.background.size || this.ending) throw new Error("Claude is not ready for a new task");
+    this.runId = runId; this.result = undefined; this.settled = false; this.observed.delete("terminal");
+    this.clearApprovals(); this.tools.clear(); this.seenRequests.clear();
+    for (const id of this.messages) { this.observed.delete(`input:${id}`); this.observed.delete(`cancelled:${id}`); }
+    this.messages.clear(); this.pendingMessages.clear(); this.completedMessages.clear();
     this.activeMessage = randomUUID();
-    await this.write({ type: "user", uuid: this.activeMessage, session_id: this.session.sessionId, parent_tool_use_id: null, message: { role: "user", content: message } });
-    await this.wait("init");
+    const id = this.activeMessage; this.messages.add(id); this.pendingMessages.add(id);
+    try {
+      await this.write({ type: "user", uuid: id, session_id: this.session.sessionId, parent_tool_use_id: null, message: { role: "user", content: message } });
+      await this.wait("init");
+      await this.wait(`input:${id}`);
+    } finally { this.observed.delete(`input:${id}`); this.observed.delete(`cancelled:${id}`); }
   }
-  async send(_message: string, mode: Delivery): Promise<void> {
-    throw new Error(`Claude ${mode} while running is not supported; wait for this run to finish and continue the same instance`);
+  async send(message: string, mode: Delivery): Promise<void> {
+    if (this.error) throw this.error;
+    if (!this.activeMessage || this.settled || this.interrupting || this.ending) throw new Error("Claude has no available active run; inspect before sending");
+    if (!this.capabilities.has("msg_lifecycle_v1")) throw new ClaudeCapabilityError("Claude busy input requires the msg_lifecycle_v1 receipt capability");
+    if (!["steer", "followUp"].includes(mode)) throw new Error("Unsupported Claude delivery mode");
+    const id = randomUUID(); this.messages.add(id); this.pendingMessages.add(id);
+    try {
+      // Native next folds input without aborting; later queues it after the foreground turn.
+      await this.write({ type: "user", uuid: id, session_id: this.session.sessionId, parent_tool_use_id: null,
+        priority: mode === "steer" ? "next" : "later", message: { role: "user", content: message } });
+      await this.wait(`input:${id}`);
+      if (this.observed.has(`cancelled:${id}`)) throw new Error("Native input was cancelled");
+    } catch (error) {
+      this.rejectPending(new Error(`Claude input delivery is uncertain; stop/release before new work: ${(error as Error).message}`));
+      throw this.error;
+    } finally { this.observed.delete(`input:${id}`); this.observed.delete(`cancelled:${id}`); }
   }
   async reply(answer: InteractionReply): Promise<void> {
     const a = this.approvals.get(answer.id);
-    if (!a || a.attempted || !this.activeMessage || a.messageId !== this.activeMessage || this.result || this.settled || this.ending) throw new Error("Claude approval is no longer pending or was already answered");
+    if (!a || a.attempted || !this.activeMessage || a.messageId !== this.activeMessage || !this.pendingMessages.size || this.interrupting || this.settled || this.ending) throw new Error("Claude approval is no longer pending or was already answered");
     let response: Json;
     if (a.fields) {
       if (Number(answer.cancelled === true) + Number(answer.answers !== undefined) !== 1 || answer.value !== undefined || answer.confirmed !== undefined)
@@ -311,8 +348,31 @@ export class ClaudeAdapter implements CliAdapter {
     // Native stdio has no approval receipt. A successful write is not proof of tool execution.
     if (this.approvals.delete(a.id)) this.emit({ type: "resolved", id: a.id });
   }
-  async interrupt(): Promise<void> {
-    throw new Error("Claude interrupt without resource release is not supported; use stop on this non-resident runtime");
+  interrupt(): Promise<void> {
+    if (this.error) return Promise.reject(this.error);
+    if (this.interrupting) return this.interrupting;
+    if (!this.activeMessage) return Promise.resolve();
+    if (!this.capabilities.has("interrupt_receipt_v1") || !this.capabilities.has("interrupt_cancel_queued_v1"))
+      return Promise.reject(new ClaudeCapabilityError("Claude interrupt requires native receipt and queued-cancellation capabilities"));
+    let timer: NodeJS.Timeout;
+    const operation = (async () => {
+      const receipt = await this.request({ subtype: "interrupt", cancel_queued: true });
+      if (!Array.isArray(receipt.still_queued) || receipt.still_queued.length || !Array.isArray(receipt.cancelled) || receipt.cancelled.some((id: unknown) => typeof id !== "string"))
+        throw new Error("Claude interrupt left queued work or lacks a verifiable cancellation receipt");
+      for (const id of receipt.cancelled) this.pendingMessages.delete(id);
+      this.interruptVerified = true;
+      // A natural result can precede the cancellation of queued follow-ups. The receipt
+      // verifies that queue, but never substitutes for a native foreground result.
+      if (this.result && !this.pendingMessages.size) this.result = { ...this.result, queued_turn_count: 0 };
+      this.maybeSettle(); await this.wait("terminal");
+    })();
+    this.interrupting = Promise.race([operation, new Promise<void>((_, reject) => {
+      timer = setTimeout(() => reject(new Error("Claude interrupt timed out")), this.timeout);
+    })]).catch(error => {
+      this.rejectPending(new Error(`Claude interrupt outcome is uncertain; stop/release before new work: ${(error as Error).message}`));
+      throw this.error;
+    }).finally(() => { clearTimeout(timer); this.interrupting = undefined; this.interruptVerified = false; });
+    return this.interrupting;
   }
   async end(): Promise<{ exit: Exit; forced: boolean }> {
     this.ending = true;
@@ -321,12 +381,12 @@ export class ClaudeAdapter implements CliAdapter {
     try { return { exit: await this.closed, forced: this.forced }; } finally { clearTimeout(timer); }
   }
   async stop(): Promise<{ exit: Exit; forced: boolean }> {
+    if (this.error) await this.kill();
     if (this.activeMessage && !this.error && !this.ending) {
       // One stop budget, not two sequential request/event timeouts beyond the parent's deadline.
       const timer = setTimeout(() => { void this.kill(); }, 5000);
       try {
-        await this.request({ subtype: "interrupt", ...(this.capabilities.has("interrupt_cancel_queued_v1") ? { cancel_queued: true } : {}) });
-        await this.wait("terminal");
+        await this.interrupt();
       } catch { await this.kill(); }
       finally { clearTimeout(timer); }
     }

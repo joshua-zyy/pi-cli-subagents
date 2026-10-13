@@ -295,10 +295,10 @@ test('summary resizes without hiding action hints and preserves errors alongside
   }
 });
 
-test('t interrupts only v2 Pi/Codex active runs from the selected roster row or detail', () => {
+test('t interrupts v2 Pi/Codex/Claude active runs from the selected roster row or detail', () => {
   for (const cli of ['pi', 'codex', 'claude', undefined]) for (const protocolVersion of [undefined, 2]) {
     for (const phase of ['starting', 'running', 'waiting', 'stopping', 'idle', 'closed', 'completed', 'failed', 'stopped', 'unreachable']) {
-      const allowed = protocolVersion === 2 && ['pi', 'codex'].includes(cli) && ['starting', 'running', 'waiting'].includes(phase);
+      const allowed = protocolVersion === 2 && ['pi', 'codex', 'claude'].includes(cli) && ['starting', 'running', 'waiting'].includes(phase);
       for (const detail of [false, true]) {
         const p = panel([view({ id: 'other' }), view({ id: 'target', startedAt: 2000, cli, protocolVersion, phase })]);
         p.instance.handleInput(keys.down);

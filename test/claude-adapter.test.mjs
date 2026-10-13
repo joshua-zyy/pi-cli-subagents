@@ -32,13 +32,71 @@ const taskQuestion = async events => {
 };
 const skipped = q => Object.fromEntries(q.fields.map(field => [field.id, []]));
 
-test('Claude explicitly remains non-resident and rejects interrupt without submitting control work', async t => {
-  const { client, requests } = setup(t); const { c, events } = client(); await c.ready(); await c.start('HOLD', 'run-one');
-  assert.equal(c.resident, false); const before = requests().length;
-  await assert.rejects(c.interrupt(), /not supported|non-resident/i);
-  assert.equal(requests().length, before);
-  await c.stop(); assert.equal((await terminal(events)).status, 'stopped');
-  assert(events.every(e => e.runId === 'run-one'));
+test('Claude stays resident across completed, interrupted and subsequent runs without another init', async t => {
+  const { client, requests } = setup(t); const { c, events } = client(undefined,['--init-once','--result-before-receipt']);
+  await c.ready(); assert.equal(c.resident,true); const pid=c.pid;
+  await c.start('REMEMBER marker','one'); assert.equal((await terminal(events)).text,'OK');
+  await c.start('HOLD','two'); await c.send('MUST_NOT_RUN','followUp'); await c.interrupt();
+  const stopped=events.find(e=>e.type==='settled'&&e.runId==='two');assert.equal(stopped.status,'stopped');
+  assert.equal(c.child.exitCode,null);assert.equal(c.pid,pid);
+  await c.start('RECALL','three'); const last=await waitUntil('third Claude result',()=>events.find(e=>e.type==='settled'&&e.runId==='three'));
+  assert.equal(last.text,'marker');assert.equal(events.filter(e=>e.type==='settled').length,3);
+  assert.equal(requests().filter(r=>r.request?.subtype==='interrupt').length,1);
+  assert.equal(requests().find(r=>r.request?.subtype==='interrupt').request.cancel_queued,true);
+  assert.equal((await c.end()).exit.code,0);
+});
+
+test('Claude steer is non-preempting next input and followUp stays in the same run through queue drain', async t => {
+  const {client,requests}=setup(t),{c,events}=client();await c.ready();await c.start('HOLD','steer');
+  await c.send('correction','steer');assert.equal((await terminal(events)).text,'STEER:correction');
+  await c.start('HOLD','follow');await c.send('FOLLOW','followUp');
+  assert(!events.some(e=>e.type==='settled'&&e.runId==='follow'));
+  c.child.stdin.write(JSON.stringify({type:'fixture/release-turn'})+'\n');
+  const last=await waitUntil('followUp final result',()=>events.find(e=>e.type==='settled'&&e.runId==='follow'));
+  assert.equal(last.text,'FOLLOW');assert.equal(events.filter(e=>e.type==='settled'&&e.runId==='follow').length,1);
+  const input=requests().filter(r=>r.type==='user');assert.equal(input[1].priority,'next');assert.equal(input[3].priority,'later');
+  assert(!requests().some(r=>r.request?.subtype==='interrupt'));await c.end();
+});
+
+test('Claude queued input can ask permission after an earlier native result without approving stale tools', async t => {
+  const {client}=setup(t),{c,events}=client();await c.ready();await c.start('HOLD','queued-approval');
+  await c.send('APPROVAL','followUp');c.child.stdin.write(JSON.stringify({type:'fixture/release-turn'})+'\n');
+  const q=await taskQuestion(events);assert(c.result,'the earlier foreground result is still available');
+  await c.reply({type:'reply',id:q.id,value:'Approve once',actor:'parent'});
+  assert.equal((await terminal(events)).text,'ALLOW');await c.end();
+});
+
+test('Claude resets result, background and approval state, and ignores old result UUIDs in a later run', async t => {
+  const {client}=setup(t),{c,events}=client();await c.ready();await c.start('BACKGROUND','background');
+  await waitUntil('background root result',()=>c.result);const old=c.result;
+  await assert.rejects(c.start('TOO_EARLY','new'),/not ready|active/i);
+  c.record({...old,result:'STALE_DUPLICATE'});
+  c.child.stdin.write(JSON.stringify({type:'fixture/release-background'})+'\n');assert.equal((await terminal(events)).text,'ROOT');
+  await c.start('QUESTION','question');const q=await waitUntil('next-run form',()=>events.find(e=>e.type==='question'&&e.runId==='question')?.question);
+  await c.reply({type:'reply',id:q.id,answers:skipped(q),actor:'parent'});
+  await waitUntil('question run done',()=>events.find(e=>e.type==='settled'&&e.runId==='question'));
+  await c.start('HOLD','last');c.record(old);
+  assert(!events.some(e=>e.type==='settled'&&e.runId==='last'));
+  await assert.rejects(c.reply({type:'reply',id:q.id,cancelled:true}),/pending|answered/);
+  await c.interrupt();assert.equal(events.find(e=>e.type==='settled'&&e.runId==='last').status,'stopped');await c.end();
+});
+
+test('Claude rejects missing native receipts before delivery and poisons uncertain input or interrupt outcomes', async t => {
+  const {client,requests}=setup(t);
+  for(const [flag,operation,error] of [
+    ['--no-lifecycle-cap','send',/capability|receipt|lifecycle/i],
+    ['--no-cancel-cap','interrupt',/capability|queued|receipt/i],
+    ['--no-send-ack','send',/uncertain|timed out/i],
+    ['--interrupt-survivor','interrupt',/uncertain|queued|surviv/i],
+    ['--interrupt-no-terminal','interrupt',/uncertain|timed out/i],
+  ]) {
+    const {c}=client(undefined,[flag]);await c.ready();await c.start('HOLD');c.timeout=100;
+    const before=requests().filter(r=>r.type==='user').length;
+    await assert.rejects(operation==='send'?c.send('FOLLOW','followUp'):c.interrupt(),error);
+    if(flag.startsWith('--no-')&&flag!=='--no-send-ack')assert.equal(requests().filter(r=>r.type==='user').length,before);
+    else await assert.rejects(c.send('DO_NOT_REPLAY','steer'),/uncertain|timed out|queued|surviv/i);
+    await c.stop();
+  }
 });
 
 test('Claude terminal result does not require optional session-state events', async t => {
@@ -171,10 +229,9 @@ test('Claude ignores foreign result UUIDs, waits for background tasks and never 
   }
 });
 
-test('Claude stop cancels the native turn/queue, preserves session, and unsupported active steering writes nothing', async t => {
+test('Claude stop cancels the native turn/queue and preserves the session', async t => {
   const {client, requests, spec} = setup(t); const {c, events} = client(); const session = await c.ready(); await c.start('HOLD');
-  const before = requests().length; await assert.rejects(c.send('STEER', 'steer'), /steer.*not supported/i);
-  await assert.rejects(c.send('FOLLOW', 'followUp'), /followUp.*not supported/i); assert.equal(requests().length, before);
+  await c.send('FOLLOW', 'followUp');
   const end = await c.stop(); assert.equal(end.exit.code, 0); assert.equal(end.forced, false);
   assert.equal((await terminal(events)).status, 'stopped'); assert(fs.existsSync(inspectClaudeSession(spec, session)));
   assert.equal(requests().find(r => r.request?.subtype === 'interrupt').request.cancel_queued, true);

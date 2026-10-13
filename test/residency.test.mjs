@@ -378,14 +378,14 @@ test('P3 Codex unsupported followUp is not sent and its previous acceptance is n
   noPersistedReceipt(m, child.id);
 });
 
-test('P3 unsupported Claude busy messages and interruption leave the active native run unchanged', { timeout: 15000 }, async t => {
+test('Claude missing native capabilities reject busy input and interrupt without changing the active run', { timeout: 15000 }, async t => {
   const { cwd, parent, home, m, codex } = setup(t);
-  const cm = new AgentManager(parent, pi, codex, { home, launch: { command: process.execPath, args: [fixture('claude')] } });
+  const cm = new AgentManager(parent, pi, codex, { home, launch: { command: process.execPath, args: [fixture('claude'), '--no-lifecycle-cap', '--no-cancel-cap'] } });
   const child = await cm.spawn('worker', { ...role, cli: 'claude' }, cwd, 'HOLD'); receipt(child, 'start', 'accepted');
   const requests = () => fs.readFileSync(path.join(home, 'requests.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
   const before = requests().length;
   for (const operation of [() => cm.send(child.id, 'must-not-send', 'steer'), () => cm.send(child.id, 'must-not-send', 'followUp'), () => cm.interrupt(child.id)]) {
-    await assert.rejects(operation(), /not supported/i);
+    await assert.rejects(operation(), /capabilit/i);
     assert.equal(requests().length, before); assert.equal(cm.get(child.id).phase, 'running');
   }
   noPersistedReceipt(m, child.id);

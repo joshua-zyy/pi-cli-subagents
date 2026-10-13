@@ -5,7 +5,7 @@ import path from "node:path";
 import { PiAdapter } from "./pi-adapter.js";
 import { CodexAdapter } from "./codex-adapter.js";
 import { validateQuestionAnswers } from "./codex-question.js";
-import { ClaudeAdapter } from "./claude-adapter.js";
+import { ClaudeAdapter, ClaudeCapabilityError } from "./claude-adapter.js";
 import { claudeQuestionAnswers } from "./claude-question.js";
 import { nativeSession, type CliAdapter, type AdapterEvent } from "./cli-adapter.js";
 import { readJson, writeJson } from "./storage.js";
@@ -176,7 +176,6 @@ async function run(dir: string, runId: string): Promise<void> {
       catch (error) { await release(true, { status: "failed", text: finalText, error: (error as Error).message }); throw error; }
     } else if (input.type === "interrupt") {
       if (!runOpen || !runCaptured) return { ...state, receipt: { operation: "interrupt", status: "not_running", runId, runtimeId } };
-      if (spec.cli === "claude") throw new Error("Claude interrupt without resource release is not supported; use stop");
       const captured = runId;
       try {
         await rpc.interrupt();
@@ -184,7 +183,10 @@ async function run(dir: string, runId: string): Promise<void> {
         // A natural terminal may beat the interrupt. Acknowledge settlement, not
         // a claim that interruption caused the outcome or released the runtime.
         receipt = { operation: "interrupt", status: "settled", runId: captured, runtimeId };
-      } catch (error) { state.phase = "unreachable"; state.error = `Interrupt outcome uncertain: ${(error as Error).message}`; save(); throw error; }
+      } catch (error) {
+        if (error instanceof ClaudeCapabilityError) throw error;
+        state.phase = "unreachable"; state.error = `Interrupt outcome uncertain: ${(error as Error).message}`; save(); throw error;
+      }
     } else if (input.type === "send") {
       if (!runOpen) throw new Error("No active run; use start for a new assignment");
       if (!state.accepted) throw new Error("Initial task has not been accepted; resolve any startup interaction first.");

@@ -223,11 +223,11 @@ test('a loading snapshot followed by failure uses the normal retry interval', as
   assert.match(viewer.render(80).join('\n'), /read failed/);
 });
 
-test('viewer offers t only for v2 Pi/Codex active runs, including while history loads', async () => {
+test('viewer offers t for v2 Pi/Codex/Claude active runs, including while history loads', async () => {
   for (const cli of ['pi', 'codex', 'claude', undefined]) for (const protocolVersion of [undefined, 2]) {
     for (const phase of ['starting', 'running', 'waiting', 'stopping', 'idle', 'closed', 'completed', 'failed', 'stopped', 'unreachable']) {
       const agent = { ...state, cli, protocolVersion, phase };
-      const allowed = protocolVersion === 2 && ['pi', 'codex'].includes(cli) && ['starting', 'running', 'waiting'].includes(phase);
+      const allowed = protocolVersion === 2 && ['pi', 'codex', 'claude'].includes(cli) && ['starting', 'running', 'waiting'].includes(phase);
       const h = harness(async () => ({ agent, entries: [], loading: true }));
       try {
         await new Promise(setImmediate);

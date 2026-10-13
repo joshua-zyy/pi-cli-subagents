@@ -39,15 +39,15 @@ The following is a logical parameter contract, not the final TypeBox/JSON Schema
 |---|---|
 | Running Pi | Deliver using the selected steer/followUp mode; receipt does not imply execution |
 | Running Codex | Use the supported steer path; explicitly reject followUp |
-| Running Claude | Running delivery is currently unsupported and explicitly rejected; wait for the run to end before continuing |
+| Running Claude | steer uses native non-aborting priority next; followUp uses priority later. Require msg_lifecycle_v1 and a correlated native input receipt |
 | Unresolved blocking interaction request | Direct the caller to `subagent_reply` or the user interaction entry point; ordinary messages are not approvals |
-| Idle Pi/Codex runtime | Begin a new run in the same worker/CLI; retain the native session and runtime identity |
+| Idle Pi/Codex/Claude runtime | Begin a new run in the same worker/CLI; retain the native session and runtime identity |
 | Closed, with a recoverable original session | Resume the original session in a new runtime; never replay a prior assignment |
 | Missing session, unclear occupation or uncertain state | Reject with diagnostic guidance; do not silently create a replacement |
 
 These CLI capabilities describe the current implementation, not a promise that every upstream version will behave identically forever.
 
-New Pi/Codex workers remain resident after a run ends: `phase: idle` describes the runtime, while `lastStatus` and the immutable per-run report describe the outcome. `stop` releases both idle and active runtimes; it never rewrites an already finished report. Claude remains non-resident until its native multi-turn/background boundary is verified. Residency preserves the opportunity for background work, not permanent process survival or authorization for more model work. A confirmed native exit becomes closed with a distinct runtime notice; missing worker/ownership proof becomes unreachable and prevents replacement work.
+New Pi/Codex/Claude workers remain resident after a run ends: `phase: idle` describes the runtime, while `lastStatus` and the immutable per-run report describe the outcome. `stop` releases both idle and active runtimes; it never rewrites an already finished report. Claude resets per-run UUID/result/approval state, correlates all submitted inputs, and waits for the native queue and background-work barriers before idle. Independent interruption requires interrupt_receipt_v1 and interrupt_cancel_queued_v1, confirms no surviving queued work, and waits for the captured terminal result without closing stdin. Missing capabilities reject before dispatch; uncertain outcomes block new work until explicit stop. Local fixtures cover these paths; real Claude multi-turn acceptance is NOT_RUN. Residency preserves the opportunity for background work, not permanent process survival or authorization for more model work. A confirmed native exit becomes closed with a distinct runtime notice; missing worker/ownership proof becomes unreachable and prevents replacement work.
 
 New control endpoints use protocol v2, `runtimeId` and an expected current `runId`; stale or legacy control requests cannot operate a v2 worker. Existing workers are not hot-replaced. Only after confirmed native release is a terminal snapshot persisted with `runtimeClosed: true`, retaining old terminal enums for downgrade readers; the current manager exposes this as closed. Interrupt is public with captured-run confirmation and no replay after uncertainty; it does not substitute for release. Continuous runtime logs reuse the first run's events file, with instance-contained references and deduplicated history sources. Queries do not start a CLI.
 

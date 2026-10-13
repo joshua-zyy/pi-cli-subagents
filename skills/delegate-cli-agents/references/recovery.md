@@ -46,7 +46,7 @@ replacement thread automatically — see [workspaces.md](workspaces.md) for what
 
 Resuming preserves the native session identity and saved history, not necessarily the old process, background jobs or in-memory state. Stopping does not roll back file edits.
 
-Use `subagent({ action: "interrupt", id })` to end only the captured Pi/Codex turn while retaining its runtime. A `not_running` receipt does not cancel a pending initial task; use `stop` when startup must be cancelled or native resources must be released. Unsupported interruption fails explicitly.
+Use `subagent({ action: "interrupt", id })` to end only the captured Pi/Codex/Claude run while retaining its runtime. Claude also cancels that run's queued inputs and requires native receipt/cancellation capabilities. A `not_running` receipt does not cancel a pending initial task; use `stop` when startup must be cancelled or native resources must be released. Unsupported interruption fails explicitly.
 
 `subagent({ action: "stop", id })` releases active or idle native processes but keeps the session/history; do not stop merely because a task finished. Release an idle writer when integration, synchronization or handoff actually needs it. A completed report alone is not release proof.
 

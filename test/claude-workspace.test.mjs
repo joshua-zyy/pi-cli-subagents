@@ -19,10 +19,8 @@ function setup(t,flags=[]){
  const done=async(id,status='completed')=>{
    const state=await waitUntil('workspace run result',()=>{const s=m.get(id);return ['idle','closed'].includes(s.phase)?s:undefined;},12000);
    assert.equal(state.lastStatus,status);
-   if(state.cli==='claude'){
-     assert.equal(state.phase,'closed');
-     await waitUntil('Claude worker release',()=>!processAlive(state.workerPid),5000);
-   }
+   if(state.runtimeClosed)await waitUntil('Claude worker release',()=>!processAlive(state.workerPid),5000);
+   else assert.equal(state.phase,'idle');
    return state;
  };
  const release=async id=>{
@@ -39,6 +37,8 @@ test('Claude workspaces isolate parallel writes, permit independent Pi review, a
  const [wa,wb]=await Promise.all([m.spawn('worker',role,repo,fileTask('a.txt','A\n'),a.id),m.spawn('worker',role,repo,fileTask('b.txt','B\n'),b.id)]);
  const [first,second]=await Promise.all([done(wa.id),done(wb.id)]);assert.notEqual(first.sessionId,second.sessionId);
  assert(!fs.existsSync(path.join(repo,'a.txt')));assert(!fs.existsSync(path.join(a.path,'b.txt')));
+ await assert.rejects(m.spawn('reviewer',piRole,repo,fileTask('a.txt'),a.id),/occupied/);
+ await release(first.id);await release(second.id);
  const review=await m.spawn('reviewer',piRole,repo,fileTask('a.txt'),a.id);assert.equal((await release(review.id)).text,'A\n');
  for(const ws of [a,b])assert.equal((await m.workspaces.integrate(ws.id)).status,'applied');
  const held=await m.send(first.id,'HOLD','steer',{baseline:'keep'});const other=new AgentManager(parent,launch,undefined,options);
@@ -51,13 +51,14 @@ test('Claude keep/sync and old-reviewer continuation preserve sessions and paren
  const before={head:git(repo,'rev-parse','HEAD'),index:fs.readFileSync(path.join(repo,'.git/index'))};
  const ws=await m.workspaces.create(repo,{includeUncommitted:{reason:'Authorized initial snapshot'}});
  const worker=await m.spawn('worker',role,repo,fileTask('base.txt'),ws.id);const first=await done(worker.id);assert.equal(first.text,'snapshot\n');
- await m.send(worker.id,fileTask('base.txt','first\n'));await done(worker.id);
- const reviewer=await m.spawn('reviewer',role,repo,'CWD',ws.id);const firstReview=await done(reviewer.id);
+ await m.send(worker.id,fileTask('base.txt','first\n'));await done(worker.id);await m.close(worker.id);
+ const reviewer=await m.spawn('reviewer',role,repo,'CWD',ws.id);const firstReview=await done(reviewer.id);await m.close(reviewer.id);
  await m.workspaces.integrate(ws.id);fs.writeFileSync(path.join(repo,'parent.txt'),'later\n');
  await assert.rejects(m.send(worker.id,'CWD'),/baseline/i);
  await m.send(worker.id,fileTask('base.txt','second\n'),'steer',{baseline:'keep'});await done(worker.id);assert(!fs.existsSync(path.join(ws.path,'parent.txt')));
- await m.workspaces.integrate(ws.id);await m.send(worker.id,fileTask('parent.txt'),'steer',sync);const next=await done(worker.id);
+ await m.close(worker.id);await m.workspaces.integrate(ws.id);await m.send(worker.id,fileTask('parent.txt'),'steer',sync);const next=await done(worker.id);
  assert.equal(next.text,'later\n');assert.deepEqual(next.session,first.session);assert.equal(m.workspaces.get(ws.id).sync.status,'applied');
+ await m.close(worker.id);
  await assert.rejects(m.send(reviewer.id,'CWD'),/baseline/i);await m.send(reviewer.id,fileTask('parent.txt'),'steer',{baseline:'keep'});
  const review=await done(reviewer.id);assert.deepEqual(review.session,firstReview.session);assert.equal(review.text,'later\n');
  assert.equal(git(repo,'rev-parse','HEAD'),before.head);assert.deepEqual(fs.readFileSync(path.join(repo,'.git/index')),before.index);

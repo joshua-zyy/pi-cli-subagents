@@ -17,7 +17,13 @@ const system = (subtype, extra = {}) => {
 const success = (request_id, response = {}) => emit({ type: 'control_response', response: { subtype: 'success', request_id, response } });
 const requests = path.join(home, 'requests.jsonl');
 fs.appendFileSync(path.join(home, 'launches.jsonl'), JSON.stringify({args, cwd: process.cwd()}) + '\n');
-let active, task, approval, remembered = '';
+let active, task, approval, remembered = '', initialized = false, consumed = [];
+const queued = [];
+const lifecycle = (command_uuid, state) => emit({type:'command_lifecycle',command_uuid,state,session_id:sessionId});
+const persist = record => {
+  fs.mkdirSync(path.dirname(file), {recursive:true});
+  fs.appendFileSync(file,JSON.stringify({type:'user',uuid:record.uuid,parentUuid:null,sessionId,cwd:process.cwd(),message:record.message})+'\n');
+};
 if (args.includes('--resume')) {
   if (!fs.existsSync(file)) throw Error('Original session missing');
   for (const row of fs.readFileSync(file, 'utf8').trim().split('\n').map(JSON.parse)) {
@@ -25,11 +31,18 @@ if (args.includes('--resume')) {
   }
 }
 const finish = (text = 'OK', extra = {}) => {
-  const uuid = active; active = undefined;
+  const uuids = consumed; active = undefined; consumed = [];
   emit({ type: 'result', subtype: 'success', is_error: false, session_id: sessionId,
-    uuid: randomUUID(), user_message_uuid: uuid, user_message_uuids: [uuid], result: text,
-    terminal_reason: 'completed', queued_turn_count: 0, ...extra });
-  system('session_state_changed', { state: 'idle' });
+    uuid: randomUUID(), user_message_uuid: uuids.at(-1), user_message_uuids: uuids, result: text,
+    terminal_reason: 'completed', queued_turn_count: queued.length, ...extra });
+  for(const id of uuids)lifecycle(id,extra.terminal_reason==='aborted_tools'?'cancelled':'completed');
+  if(!queued.length)system('session_state_changed', { state: 'idle' });
+  else {
+    const next=queued.shift();active=next.uuid;consumed=[active];persist(next);
+    lifecycle(active,'started');emit({...next,session_id:sessionId,isReplay:true});
+    task=next.message.content.split('\n')[0];
+    if(task==='APPROVAL')ask();else finish(next.message.content==='RECALL'?remembered:next.message.content);
+  }
 };
 const ask = (extra = {}) => {
   const toolId = randomUUID();
@@ -76,16 +89,29 @@ for await (const line of readline.createInterface({ input: process.stdin })) {
     else if (subtype === 'list_permission_rules') success(record.request_id, { state: { originalCwd: args.includes('--wrong-cwd') ? path.dirname(process.cwd()) : process.cwd(), rules: [], workspaceDirectories: [], errors: [] } });
     else if (subtype === 'interrupt') {
       if (args.includes('--ignore-interrupt')) continue;
-      success(record.request_id, { still_queued: [], cancelled: [] });
-      if (active) finish('INTERRUPTED', { terminal_reason: 'aborted_tools' });
+      const cancelled=record.request.cancel_queued?queued.splice(0).map(r=>r.uuid):[];
+      for(const id of cancelled)lifecycle(id,'cancelled');
+      const receipt={still_queued:args.includes('--interrupt-survivor')?['unexpected-survivor']:queued.map(r=>r.uuid),cancelled};
+      if(!args.includes('--result-before-receipt'))success(record.request_id,receipt);
+      if(active&&!args.includes('--interrupt-no-terminal'))finish('INTERRUPTED',{terminal_reason:'aborted_tools'});
+      if(args.includes('--result-before-receipt'))success(record.request_id,receipt);
     } else emit({ type: 'control_response', response: { subtype: 'error', request_id: record.request_id, error: 'Unsupported fixture control' } });
   } else if (record.type === 'user') {
-    active = record.uuid; task = record.message.content.split('\n')[0];
-    fs.mkdirSync(path.dirname(file), { recursive: true });
-    fs.appendFileSync(file, JSON.stringify({ type: 'user', uuid: active, parentUuid: null, sessionId, cwd: process.cwd(), message: record.message }) + '\n');
+    if(active) {
+      if(!args.includes('--no-send-ack'))lifecycle(record.uuid,'queued');
+      if(record.priority==='later'){queued.push(record);continue;}
+      assert.equal(record.priority,'next','steer must not preempt the running turn');
+      consumed.push(record.uuid);persist(record);
+      if(!args.includes('--no-send-ack')){lifecycle(record.uuid,'started');emit({...record,session_id:sessionId,isReplay:true});}
+      finish('STEER:'+record.message.content);continue;
+    }
+    active = record.uuid; consumed=[active]; task = record.message.content.split('\n')[0];
+    approval=undefined;questionRequests.clear();questionResults.length=0;persist(record);
+    lifecycle(active,'queued');
     if (task === 'CRASH') { process.exit(7); }
     if (task === 'NOISE') { process.stdout.write('not-json\n'); continue; }
-    system('init', { cwd: args.includes('--wrong-init-cwd') ? path.dirname(process.cwd()) : process.cwd(), claude_code_version: '2.1.283', model: 'fixture-model', capabilities: ['interrupt_receipt_v1', 'interrupt_cancel_queued_v1'], ...(args.includes('--wrong-init') ? { session_id: randomUUID() } : {}) });
+    if(!initialized||!args.includes('--init-once'))system('init', { cwd: args.includes('--wrong-init-cwd') ? path.dirname(process.cwd()) : process.cwd(), claude_code_version: '2.1.283', model: 'fixture-model', capabilities: ['interrupt_receipt_v1', ...(args.includes('--no-cancel-cap')?[]:['interrupt_cancel_queued_v1']), ...(args.includes('--no-lifecycle-cap')?[]:['msg_lifecycle_v1'])], ...(args.includes('--wrong-init') ? { session_id: randomUUID() } : {}) });
+    initialized=true;lifecycle(active,'started');
     system('session_state_changed', { state: 'running' });
     emit({ ...record, session_id: sessionId, isReplay: true });
     if (task === 'HOLD') continue;
@@ -131,6 +157,8 @@ for await (const line of readline.createInterface({ input: process.stdin })) {
     }
     if (task.startsWith('REMEMBER ')) remembered = task.slice(9);
     finish(task === 'RECALL' ? remembered : task === 'CWD' ? process.cwd() : task === 'FOREIGN_RESULT' ? 'CURRENT' : 'OK');
+  } else if (record.type === 'fixture/release-turn') {
+    if(active)finish('ROOT');
   } else if (record.type === 'fixture/release-background') {
     system('task_notification', { task_id: 'background', status: 'completed', summary: 'finished' });
   } else if (record.type === 'control_response' && active) {
