@@ -21,6 +21,9 @@ const workerFile = fileURLToPath(new URL("./worker.js", import.meta.url));
 const idPattern = /^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/;
 /** Enough recent assignments to choose a reusable instance without pasting a whole work history. */
 const HISTORY_LIMIT = 5;
+/** Serialized UTF-16 payload + keys, not process RSS; the entry cap also bounds object overhead. */
+const HISTORY_CACHE_BYTES = 4 * 1024 * 1024;
+const HISTORY_CACHE_ENTRIES = 1024;
 
 /** One-line assignment summary: the parent matches an instance to its work, not to a transcript. */
 function summarize(message: string | undefined, limit = 200): string | undefined {
@@ -32,7 +35,8 @@ export class AgentManager {
   readonly root: string;
   readonly parentFile: string;
   readonly workspaces: WorkspaceStore;
-  private historyCache = new Map<string, { version: string; value: unknown }>();
+  private historyCache = new Map<string, { version: string; json: string; bytes: number }>();
+  private historyCacheBytes = 0;
   constructor(parentFile: string, private readonly launch: Launch, private readonly codex?: { launch: Launch; home: string }, private readonly claude?: { launch: Launch; home: string }) {
     this.parentFile = path.resolve(parentFile);
     this.root = `${this.parentFile}.subagents`;
@@ -48,20 +52,27 @@ export class AgentManager {
     if (!spec || ![1, 2, 3].includes(spec.version) || (spec.version === 1 && spec.cli !== undefined && spec.cli !== "pi") || (spec.version === 2 && (spec.cli !== "codex" || !spec.codexHome)) || (spec.version === 3 && (spec.cli !== "claude" || !spec.claudeHome)) || spec.parentFile !== this.parentFile || spec.id !== id) throw new Error("This subagent does not belong to the current parent session, or its record is missing");
     return spec;
   }
-  /** Cache only bounded request/report summaries, never live state, ownership or endpoints. */
+  /** Cache bounded serialized summaries, never live state, ownership or endpoints. */
   private readHistory<T>(file: string, load: (mtimeMs: number) => T | undefined): T | undefined {
+    const cached = this.historyCache.get(file);
     try {
       const stat = statSync(file, { bigint: true });
       const version = `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeNs}:${stat.ctimeNs}`;
-      const cached = this.historyCache.get(file);
-      if (cached?.version === version) return cached.value as T;
+      if (cached?.version === version) return JSON.parse(cached.json) as T;
+      if (cached && this.historyCache.delete(file)) this.historyCacheBytes -= cached.bytes;
       const value = load(Number(stat.mtimeNs) / 1e6);
-      if (value === undefined) this.historyCache.delete(file);
-      else this.historyCache.set(file, { version, value });
+      if (value !== undefined) {
+        // Materialize summaries: a clipped string must not keep a huge original backing store.
+        const json = JSON.stringify(value), bytes = 2 * (json.length + file.length + version.length);
+        // Full scans defeat LRU; bypass overflow rather than evicting every hit on the next poll.
+        if (this.historyCache.size < HISTORY_CACHE_ENTRIES && this.historyCacheBytes + bytes <= HISTORY_CACHE_BYTES) {
+          this.historyCache.set(file, { version, json, bytes }); this.historyCacheBytes += bytes;
+        }
+      }
       return value;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-      this.historyCache.delete(file);
+      if (cached && this.historyCache.delete(file)) this.historyCacheBytes -= cached.bytes;
       return undefined;
     }
   }

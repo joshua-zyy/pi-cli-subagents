@@ -61,6 +61,57 @@ test('unchanged history refresh reuses bounded summaries instead of rereading ev
   assert.notEqual(manager.get(id).history[0].task, 'caller mutation');
 });
 
+test('the aggregate history payload budget bypasses misses without turning each warm scan into a cold scan', t => {
+  const {manager,id,dir} = fixture(180);
+  const refresh = () => {const agents=manager.list();return {agents,reports:manager.reports(Date.now(),agents)};};
+  const cost = () => [...manager.historyCache].reduce((total,[file,entry])=>total+2*(file.length+entry.version.length+entry.json.length),0);
+  const cold = measure(refresh);
+  assert.ok(cost() <= 4*1024*1024, `retained serialized UTF-16 payload is ${cost()} bytes`);
+  const admitted = [...manager.historyCache.keys()], warm = measure(refresh), again = measure(refresh);
+  assert.equal(warm.result.reports.length,180,'overflow must not omit reports');
+  assert.deepEqual(warm.result,cold.result);
+  assert.deepEqual(again.result,warm.result);
+  assert.deepEqual([...manager.historyCache.keys()],admitted,'a full scan must not churn the admitted set');
+  assert.ok(warm.count.reads < 60,`over-budget polling reread ${warm.count.reads} files`);
+  assert.deepEqual(again.count,warm.count);
+  t.diagnostic(JSON.stringify({cold:cold.count,warm:warm.count,entries:admitted.length,serializedBytes:cost()}));
+  // A cached entry can grow beyond the whole budget: invalidate it but still expose fresh data.
+  const file = admitted.find(file=>file.includes(path.join(dir,'reports')));
+  writeJson(file,{...readJson(file),extra:'Q'.repeat(3*1024*1024)});
+  assert.equal(manager.reports().find(r=>r.notificationId===path.basename(file,'.json')).extra.length,3*1024*1024);
+  assert.equal(manager.historyCache.has(file),false,'an oversized replacement must not retain its old success');
+  assert.equal(manager.historyCacheBytes,cost(),'replacements release the old accounted size');
+  const request = admitted.find(file=>file.endsWith('request.json'));
+  fs.writeFileSync(request,'broken JSON');
+  assert.throws(()=>manager.get(id),SyntaxError,'the strict history contract is retained');
+  assert.equal(manager.historyCache.has(request),false);
+  assert.equal(manager.historyCacheBytes,cost(),'a malformed replacement also releases its cached size');
+  fs.unlinkSync(file); manager.reports(Date.now(),warm.result.agents);
+  assert.equal(manager.historyCacheBytes,cost(),'ENOENT must not double-subtract a removed entry');
+});
+
+test('metadata-only approvals have an aggregate entry cap without losing new live approval bodies', () => {
+  const {manager,id,dir,parent,runs,stateFile} = fixture(1), runId = runs[0];
+  for(let n=0;n<1030;n++) {
+    const notificationId = `${runId}-waiting-${randomUUID()}`;
+    writeJson(path.join(dir,'reports',notificationId+'.json'),{notificationId,agentId:id,runId,parentFile:parent,
+      status:'waiting',questionId:'resolved-'+n,time:n,text:'old approval'});
+  }
+  manager.reports();
+  assert.ok(manager.historyCache.size <= 1024,`cache has ${manager.historyCache.size} entries`);
+  const warm = measure(()=>manager.reports());
+  assert.ok(warm.count.reads < 30,'an over-cap scan must not evict every previously admitted metadata entry');
+  const text = 'A'.repeat(13000)+'TAIL', notificationId = `${runId}-waiting-live`;
+  writeJson(path.join(dir,'reports',notificationId+'.json'),{notificationId,agentId:id,runId,parentFile:parent,
+    status:'waiting',questionId:'live',time:Date.now(),text});
+  writeJson(stateFile,{...readJson(stateFile),phase:'waiting',workerPid:process.pid,resultFile:undefined,
+    questions:[{id:'live',method:'confirm',title:'New fixture',parentPolicy:{confirm:true}}]});
+  const live = manager.reports().find(r=>r.questionId==='live');
+  assert.equal(live.text,text); assert.equal(live.truncated,false);
+  assert.equal(live.request.parentPolicy.confirm,true);
+  assert.ok(manager.historyCache.size <= 1024);
+});
+
 test('live approval text stays complete through manager and notifier without retaining resolved bodies', () => {
   const { manager, id, dir, parent, stateFile } = fixture(1);
   const runId = randomUUID(), notificationId = `${runId}-waiting-${randomUUID()}`;
@@ -86,7 +137,7 @@ test('live approval text stays complete through manager and notifier without ret
   assert.ok(content.includes(text), 'including the approval tail, not merely a pointer to it');
   assert.doesNotMatch(content.slice(content.indexOf(`[Subagent ${id} · waiting]`)), /characters omitted|truncated preview/);
   assert.match(content, /truncated preview/, 'ordinary terminal reports remain bounded');
-  assert.equal(manager.historyCache.get(waitingFile).value.text, '', 'the historical cache stores no approval body');
+  assert.equal(JSON.parse(manager.historyCache.get(waitingFile).json).text, '', 'the historical cache stores no approval body');
   // Metadata may be cached before the full read. Do not pair foreign body content with live policy.
   const read = fs.readFileSync, error = console.error, errors = [];
   fs.readFileSync = function (...args) {
@@ -111,9 +162,9 @@ test('live approval text stays complete through manager and notifier without ret
   assert.equal(warm.result.some(r => r.status === 'waiting'), false);
   assert.ok(warm.count.reads <= 4, 'resolved approvals must not cause full-body reads on every poll');
   assert.ok(warm.count.bytes < 5000);
-  const waitingCache = [...manager.historyCache.values()].filter(entry => entry.value?.status === 'waiting');
+  const waitingCache = [...manager.historyCache.values()].map(entry => JSON.parse(entry.json)).filter(report => report.status === 'waiting');
   assert.equal(waitingCache.length, 17);
-  assert.ok(waitingCache.every(entry => entry.value.text === ''), 'only approval metadata stays cached');
+  assert.ok(waitingCache.every(report => report.text === ''), 'only approval metadata stays cached');
 });
 
 test('history memoization sees external publication, replacement, deletion and live permission changes', () => {
