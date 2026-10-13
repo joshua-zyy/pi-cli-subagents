@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { spawnSync } from 'node:child_process';
 import { CodexAdapter } from '../dist/codex-adapter.js';
 import { waitUntil } from '../dist/storage.js';
 import { tempDir } from './helpers/tmp.mjs';
@@ -680,6 +681,73 @@ test('Codex uncertain async steering is never retried or converted into a new tu
   await assert.rejects(c.reply({ type: 'reply', id: q.id, answers }), /pending|answered/);
   assert.equal(requests().filter(r => r.method === 'turn/steer').length, 1);
   assert.equal(requests().filter(r => r.method === 'turn/start').length, 1);
+});
+
+for (const fault of ['write', 'deadline']) test(`Codex observes approval rejection before the ${fault} completes`, () => {
+  const source = `
+    import assert from 'node:assert/strict';
+    import { CodexAdapter } from ${JSON.stringify(new URL('../dist/codex-adapter.js', import.meta.url).href)};
+    const c = Object.create(CodexAdapter.prototype), fault = ${JSON.stringify(fault)};
+    Object.assign(c, { approvals: new Map(), approvalByRpcId: new Map(), activeTurn: 'turn',
+      thread: { threadId: 'thread' }, timeout: 10, options: { onEvent() {} } });
+    const approval = { id: 'question', rpcId: 17, threadId: 'thread', turnId: 'turn', attempted: false };
+    c.approvals.set(approval.id, approval);
+    c.approvalByRpcId.set('number:17', approval);
+    let writes = 0;
+    c.write = async () => {
+      writes++;
+      if (fault === 'write') {
+        c.clearApproval(approval, new Error('fixture stream closed during write'));
+        throw new Error('fixture write failed');
+      }
+      await new Promise(resolve => setTimeout(resolve, 40));
+    };
+    await assert.rejects(c.reply({ id: approval.id, confirmed: false }),
+      fault === 'write' ? /fixture write failed/ : /resolution timed out/);
+    await assert.rejects(c.reply({ id: approval.id, confirmed: true }), /pending|answered/);
+    assert.equal(writes, 1, 'uncertain delivery must not be replayed');
+    await new Promise(resolve => setImmediate(resolve));
+    console.log('APPROVAL_FAILURE_OBSERVED');
+  `;
+  const env = { ...process.env }; delete env.NODE_TEST_CONTEXT;
+  const result = spawnSync(process.execPath, ['--unhandled-rejections=strict', '--input-type=module', '-e', source],
+    { env, encoding: 'utf8', timeout: 10_000, windowsHide: true });
+  assert.equal(result.error, undefined);
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /APPROVAL_FAILURE_OBSERVED/, 'the inner process must actually execute the assertions');
+});
+
+test('Codex server request callback failure poisons its run and requests release', async t => {
+  const { client } = setup(t), { c, events } = client(); await c.ready();
+  const record = c.options.onEvent;
+  c.options.onEvent = event => {
+    if (event.type === 'question') throw new Error('fixture question persistence failed');
+    record(event);
+  };
+  await c.start('APPROVAL', 'failed-question');
+  const result = await runSettled(events, 'failed-question');
+  assert.equal(result.status, 'failed'); assert.equal(result.stop, true);
+  assert.match(result.error, /fixture question persistence failed/);
+  assert.equal(c.approvals.size, 0);
+  await assert.rejects(c.start('REPLAY', 'next'), /fixture question persistence failed/);
+  await assert.rejects(c.send('REPLAY', 'steer'), /fixture question persistence failed/);
+  await c.stop();
+  assert.notEqual(c.child.exitCode ?? c.child.signalCode, null, 'the fixture CLI is reaped before release');
+});
+
+test('Codex still closes after both question and failure-event persistence throw', async t => {
+  const { client } = setup(t), { c } = client(); await c.ready();
+  let failed = false;
+  c.options.onEvent = event => {
+    if (event.type === 'question') failed = true;
+    if (failed) throw new Error('fixture persistent event failure');
+  };
+  await c.start('APPROVAL', 'failed-sink');
+  await waitUntil('fixture CLI closed after event failure', () => c.child.exitCode !== null || c.child.signalCode !== null, 10_000);
+  await c.closed;
+  assert.equal(c.approvals.size, 0);
+  await assert.rejects(c.reply({ id: 'expired', confirmed: true }), /no longer pending/);
+  await assert.rejects(c.start('REPLAY', 'next'), /fixture persistent event failure/);
 });
 
 test('Codex approval response without server resolution cannot be submitted a second time', async t => {

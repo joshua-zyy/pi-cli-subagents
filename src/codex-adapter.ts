@@ -66,12 +66,7 @@ export class CodexAdapter implements CliAdapter {
       env: { ...childEnvironment(), CODEX_HOME: options.spec.codexHome },
       stdio: ["pipe", "pipe", "pipe"], shell: false, windowsHide: true, detached: process.platform !== "win32",
     });
-    const fail = (error: Error) => {
-      this.exitError ??= error;
-      for (const entry of this.pending.values()) { clearTimeout(entry.timer); entry.reject(this.exitError); }
-      this.pending.clear();
-      for (const approval of [...this.approvals.values()]) this.clearApproval(approval, this.exitError);
-    };
+    const fail = (error: Error) => this.fail(error);
     output.on("error", (error) => { fail(error); void this.kill(); });
     stderr.on("error", (error) => { fail(error); void this.kill(); });
     this.child.stderr.pipe(stderr);
@@ -100,6 +95,16 @@ export class CodexAdapter implements CliAdapter {
     }));
   }
 
+  private fail(error: Error): void {
+    this.exitError ??= error;
+    for (const entry of this.pending.values()) { clearTimeout(entry.timer); entry.reject(this.exitError); }
+    this.pending.clear();
+    for (const approval of [...this.approvals.values()]) {
+      try { this.clearApproval(approval, this.exitError); }
+      catch { /* A failed event sink must not prevent other waiters or native close from settling. */ }
+    }
+  }
+
   private write(record: RecordValue): Promise<void> {
     if (this.exitError) return Promise.reject(this.exitError);
     return new Promise((resolve, reject) => this.child.stdin.write(`${JSON.stringify(record)}\n`, error => error ? reject(error) : resolve()));
@@ -125,7 +130,16 @@ export class CodexAdapter implements CliAdapter {
     if (typeof record.method === "string" && "id" in record) {
       // Server-initiated requests can reuse a client ID; method takes precedence over ID.
       if (this.staged) { this.staged.push(record); return; }
-      void this.serverRequest(record);
+      const run = this.run;
+      void this.serverRequest(record).catch(error => {
+        this.poisoned ??= error;
+        this.fail(error);
+        try { this.emit({ type: "settled", status: "failed", text: "", error: (error as Error).message, stop: true }, run); }
+        catch {
+          // If even failure publication is broken, close the CLI without claiming release.
+          void this.kill().catch(error => console.error("[pi-cli-subagents] Codex release is uncertain:", error));
+        }
+      });
       return;
     }
     if ("id" in record) {
@@ -212,9 +226,11 @@ export class CodexAdapter implements CliAdapter {
   private clearApproval(approval: Approval, error?: Error): void {
     if (!this.approvals.delete(approval.id)) return;
     if (approval.rpcId !== undefined) this.approvalByRpcId.delete(requestKey(approval.rpcId));
-    this.emit({ type: "resolved", id: approval.id });
-    if (error) approval.rejected?.(error);
-    else approval.resolved?.();
+    try { this.emit({ type: "resolved", id: approval.id }); }
+    finally {
+      if (error) approval.rejected?.(error);
+      else approval.resolved?.();
+    }
   }
 
   private async serverRequest(record: RecordValue): Promise<void> {
@@ -442,6 +458,9 @@ export class CodexAdapter implements CliAdapter {
       approval.resolved = resolve; approval.rejected = reject;
       timer = setTimeout(() => reject(new Error("Codex interaction resolution timed out; delivery is uncertain. Do not retry this response.")), this.timeout);
     });
+    // Resolution can fail while write is still pending, or write can fail before its await.
+    // Observe immediately; awaiting the original promise below still propagates the failure.
+    void resolved.catch(() => {});
     try {
       await this.write({ id: approval.rpcId, result });
       await resolved;
