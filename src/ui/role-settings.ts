@@ -245,7 +245,7 @@ export class RoleSettingsPanel {
     // Only prompt for a CLI when nothing CLI-specific is on screen yet.
     const cliSpecific = this.fields.some((field) => field !== "cli" && field !== "description" && field !== "instructions");
     if (!selected.effective.cli && !cliSpecific) lines.push(this.theme.fg("muted", "Choose a CLI first; its specific options appear after that."));
-    if (this.choiceOptions().pending && (selected.effective.cli === "pi" || selected.effective.cli === "codex"))
+    if (this.choiceOptions().pending && cliSpecific && ((selected.effective.cli ?? "pi") === "pi" || selected.effective.cli === "codex"))
       lines.push(this.theme.fg("muted", "Reading each CLI's own model list; that field becomes a picker when it arrives."));
     if (!selected.override) lines.push(this.theme.fg("muted", `No ${SCOPE_LABEL[this.scope]} entry yet; changing a field creates one.`));
     return this.window(lines, this.fields, this.fieldIndex, (field, isSelected) => this.row(isSelected, FIELD_LABELS[field], this.fieldDisplay(selected, field)), room);

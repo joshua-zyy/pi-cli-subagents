@@ -152,10 +152,23 @@ test('a discovered catalog turns provider and model into pickers that keep an es
   assert.equal(fieldIsChoice({ ...base, cli: 'claude' }, 'model', { catalog }), true);
   assert.equal(fieldIsChoice({ ...base, cli: 'pi' }, 'model', { pending: true }), true, 'a pending probe keeps the picker open instead of asking for typing');
   assert.equal(fieldIsChoice({ ...base, cli: 'pi' }, 'provider', { pending: true }), true);
-  assert.equal(fieldIsChoice({ ...base }, 'model', { pending: true }), false, 'a role without a CLI cannot pick a model yet');
+  assert.equal(fieldIsChoice({ ...base }, 'model', { pending: true }), true, 'missing cli means Pi; visibleFields still gates an empty role before CLI selection');
   assert.equal(fieldIsChoice({ ...base, cli: 'claude' }, 'model'), true, 'Claude aliases are always offered');
   assert.equal(fieldIsChoice({ ...base, cli: 'codex', model: 'm' }, 'model'), false, 'a finished probe with nothing found leaves that field as text');
   assert.deepEqual(fieldChoices(pi, 'cli', { clis: ['pi'] }), ['pi'], 'the CLI picker offers only what this machine can launch');
+});
+
+test('implicit and explicit Pi roles share catalog filtering, pending choices and free-text fallback', () => {
+  const implicit = { ...base, provider:'p',model:'m' }, explicit = { ...implicit,cli:'pi' };
+  const catalog = {pi:[{provider:'p',model:'m'},{provider:'q',model:'other'}],codex:[{model:'c'}]};
+  for(const field of ['provider','model']) {
+    assert.deepEqual(fieldChoices(implicit,field,{catalog}),fieldChoices(explicit,field,{catalog}));
+    assert.equal(fieldIsChoice(implicit,field,{pending:true}),true);
+    assert.equal(fieldIsChoice(implicit,field),false,'a finished empty probe still allows typing');
+  }
+  assert.deepEqual(fieldChoices({...base,model:'m'},'model',{catalog}),['m','other'],'unset provider lists all Pi models');
+  assert.deepEqual(fieldChoices({...base,cli:'codex'},'model',{catalog}),['c']);
+  assert.deepEqual(fieldChoices({...base,cli:'claude'},'provider',{catalog}),[]);
 });
 
 test('rows report where the effective definition comes from', () => {

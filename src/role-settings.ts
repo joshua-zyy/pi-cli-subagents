@@ -114,7 +114,7 @@ export function addRole(doc: Record<string, Role>, name: string): Record<string,
 /** Catalog entries a role can actually use: Codex models, or Pi models filtered by its provider. */
 export function catalogEntries(role: Role, field: EditableField, catalog: ModelCatalog): ModelEntry[] {
   if (role.cli === "codex") return field === "model" ? catalog.codex : [];
-  if (role.cli !== "pi") return [];
+  if ((role.cli ?? "pi") !== "pi") return [];
   return field === "model" && role.provider ? catalog.pi.filter((entry) => entry.provider === role.provider) : catalog.pi;
 }
 
@@ -132,7 +132,7 @@ export function fieldIsChoice(role: Role, field: EditableField, options: ChoiceO
   if (fieldValues(role, field, options.catalog ?? EMPTY_CATALOG).length) return true;
   // Discovery is still running for the CLI that would publish this list: wait rather than ask for typing.
   if (!options.pending) return false;
-  return field === "provider" ? (role.cli ?? "pi") === "pi" : role.cli !== undefined;
+  return field === "provider" ? (role.cli ?? "pi") === "pi" : true;
 }
 
 export function fieldChoices(role: Role, field: EditableField, options: ChoiceOptions = {}): string[] {

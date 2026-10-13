@@ -285,6 +285,20 @@ test('a role that already carries Pi fields edits them without demanding a CLI',
   assert.doesNotMatch(text, /Choose a CLI first/, 'the Pi fields are already on screen');
 });
 
+test('an implicit Pi model waits in a usable picker and binds provider when discovery completes', () => {
+  const choices = {pending:true};
+  const p = panel([row({effective:role({model:'seed'})})],{choices,cursor:{role:'worker',field:'model'}});
+  assert.match(p.render(),/Reading each CLI/);
+  p.instance.handleInput(keys.enter);
+  assert.equal(p.instance.mode,'choices','missing cli is Pi, not an immediate text dialog');
+  assert.match(p.render(),/Reading this CLI/); assert.match(p.render(),/✎ type a value/);
+  assert.deepEqual(p.actions,[]);
+  choices.pending = false; choices.catalog = {pi:[{provider:'p',model:'new'}],codex:[]};
+  assert.match(p.render(),/p\/new/);
+  p.instance.handleInput(keys.enter);
+  assert.deepEqual(p.actions,[{kind:'set',role:'worker',field:'model',value:'new',provider:'p'}]);
+});
+
 test('the panel reopens where the user left off instead of at the top of the list', () => {
   const rows = [row({ name: 'explore', effective: role({ cli: 'pi' }) }), row({ name: 'oracle', effective: role({ cli: 'pi', model: 'deepseek' }) })];
   const resumed = panel(rows, { cursor: { role: 'oracle', field: 'model' } });
