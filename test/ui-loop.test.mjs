@@ -9,7 +9,6 @@ import { randomUUID } from 'node:crypto';
 import extension from '../dist/index.js';
 import { waitUntil, processAlive } from '../dist/storage.js';
 import { AgentManager } from '../dist/manager.js';
-import { Editor } from '@earendil-works/pi-tui';
 import { tempDir } from './helpers/tmp.mjs';
 
 const fixture = fileURLToPath(new URL('./fixtures/pi.mjs', import.meta.url));
@@ -135,7 +134,7 @@ function harness(t) {
   };
 }
 
-test('one monitor tick shares one live snapshot across reports, status and fleet', t => {
+test('one monitor tick shares one live snapshot across reports and status without a bottom selector', t => {
   const h = harness(t), original = AgentManager.prototype.list;
   let calls = 0, phase = 'running';
   AgentManager.prototype.list = function () {
@@ -146,10 +145,12 @@ test('one monitor tick shares one live snapshot across reports, status and fleet
   t.mock.timers.enable({ apis: ['setTimeout', 'setInterval'] });
   try {
     h.start(); t.mock.timers.tick(100);
-    assert.equal(calls, 1, 'report delivery and both widgets must share one manager list');
+    assert.equal(calls, 1, 'report delivery and the status widget share one manager list');
     const components = h.widgetCalls.filter(call => typeof call.content === 'function')
       .map(call => call.content({ terminal: { columns: 120 }, requestRender() {} }, theme));
-    assert.equal(components.length, 2);
+    assert.equal(components.length, 1);
+    assert(!h.widgetCalls.some(call=>call.options?.placement==='belowEditor'));
+    assert.equal(h.state.listeners.length,0,'monitoring must not intercept prompt arrow keys');
     t.mock.timers.tick(500);
     assert.equal(calls, 1, 'animation between monitor ticks must not read another snapshot');
     // This synthetic record has no protocolVersion: legacy completion stays readable.
@@ -180,11 +181,10 @@ test('status widget registers only in TUI, shows agents and unregisters at shutd
   assert.match(rendered(), /└─ ○ worker/);
   component.invalidate();
   h.handlers.session_shutdown?.();
-  for (const key of ['cli-subagents','cli-subagents-fleet']) {
-    const last = h.widgetCalls.filter(call=>call.key===key).at(-1);
-    assert.equal(last.content, undefined, `parent shutdown must unregister ${key}`);
-  }
-  assert.equal(h.state.listeners.length,0,'shutdown must unsubscribe FleetView input');
+  const last = h.widgetCalls.filter(call=>call.key==='cli-subagents').at(-1);
+  assert.equal(last.content, undefined, 'parent shutdown unregisters status');
+  assert(!h.widgetCalls.some(call=>call.key==='cli-subagents-fleet'));
+  assert.equal(h.state.listeners.length,0,'no persistent prompt key listener');
 });
 
 test('roster pane resumes the original session, confirms stops, and rejects non-TUI use', { timeout: 30_000 }, async (t) => {
@@ -355,31 +355,6 @@ test('shortcut selects a running child and opens its live conversation directly'
   assert.equal(h.customCalls, 1, 'the shortcut opens the roster pane, and only the viewer is an overlay');
   assert.equal(h.manager.get(first.id).phase,'running');
   assert.equal(h.manager.get(second.id).phase,'running');
-});
-
-test('below-editor FleetView opens the selected active child without an intermediate panel', {timeout:15000},async t=>{
-  const h=harness(t);h.start();
-  const first=await h.spawn('HOLD fleet-one'),second=await h.spawn('HOLD fleet-two');
-  const entry=await waitUntil('fleet registered',()=>h.widgetCalls.find(call=>call.key==='cli-subagents-fleet'&&typeof call.content==='function'));
-  const editor=Object.create(Editor.prototype);let focus=editor;
-  const tui={terminal:{columns:120,rows:24},getFocusedComponent:()=>focus,requestRender(){}};
-  const widget=entry.content(tui,theme);
-  // The roster refreshes on the extension's monitor interval; wait for both children before keying.
-  await waitUntil('fleet lists both children',()=>widget.render(120).join('\n').includes('HOLD fleet-two'));
-  const key=h.state.listeners[0];assert.equal(typeof key,'function');
-  focus={};assert.equal(key(keys.down),undefined,'a modal must retain input');
-  focus=editor;assert.deepEqual(key(keys.down),{consume:true});
-  key(keys.down);key(keys.down);
-  assert.match(widget.render(120).join('\n'),/^\s*● worker.*HOLD fleet-two/m);
-  let loaded=false;
-  h.state.scripts.push(async viewer=>{
-    await waitUntil('selected child in viewer',()=>viewer.render(120).join('\n').includes(second.id.slice(0,8)));
-    loaded=true;viewer.handleInput('q');
-  });
-  assert.deepEqual(key(keys.enter),{consume:true});
-  await waitUntil('viewer closed',()=>loaded);
-  assert.equal(h.customCalls,1,'FleetView must not open /agents summary first');
-  assert.equal(h.manager.get(first.id).phase,'running');assert.equal(h.manager.get(second.id).phase,'running');
 });
 
 test('inline message from the viewer reaches the running child in the same session', {timeout:20000}, async t => {
@@ -607,10 +582,10 @@ test('the role editor is a framed pane above the editor that owns the keyboard w
   assert.match(rendered(), /› reviewer/, 'the list cursor follows the arrow keys');
   press(keys.enter);
   assert.match(rendered(), /reviewer — /, 'the highlighted role opens, not the first one');
-  assert.equal(h.state.listeners.length, 2, 'the fleet listener stays registered behind the panel listener');
+  assert.equal(h.state.listeners.length, 1, 'only the open pane owns terminal input');
   press(keys.escape); press(keys.escape);
   await running;
-  assert.equal(h.state.listeners.length, 1, 'only the fleet listener is left when the panel closes');
+  assert.equal(h.state.listeners.length, 0, 'closing the pane returns all keys to the editor');
   assert.equal(h.widgetCalls.at(-1).content, undefined, 'the pane is removed from above the editor');
   assert.deepEqual(h.notices, [], 'closing a clean panel changes nothing');
 });
@@ -632,6 +607,6 @@ test('changing a value reopens that role and field instead of the top of the lis
   assert.match(rendered(), /explore — /, 'the role must stay open after a change');
   assert.match(rendered(), /› cli  pi/, 'the field cursor returns to the field that changed');
   assert.doesNotMatch(rendered(), /Subagent roles —/, 'the user must not be thrown back to the top of the list');
-  await press(keys.escape); await press(keys.escape); await press(keys.escape);
+  await press(keys.escape); await press(keys.escape);
   await running;
 });

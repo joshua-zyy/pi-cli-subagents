@@ -14,7 +14,6 @@ import { AgentsPanel, paneRows, type PanelAction } from "./ui/panel.js";
 import { RoleSettingsPanel, SETTINGS_MAX_ROWS, type RoleSettingsAction, type RoleSettingsCursor } from "./ui/role-settings.js";
 import { canMessage, canResume, canSteer, canStop, hasFailure, oneLine, viewStatus } from "./ui/format.js";
 import { StatusWidget } from "./ui/status.js";
-import { FleetView } from "./ui/fleet.js";
 import { TranscriptWindow } from "./transcript-window.js";
 import { TranscriptCache, type TranscriptIdentity } from "./ui/transcript-cache.js";
 import { ConversationViewer } from "./ui/conversation.js";
@@ -137,7 +136,7 @@ export default function extension(pi: ExtensionAPI): void {
     return state;
   }
 
-  let active: { file: string; ctx: ExtensionContext; manager: AgentManager; pending: Set<string>; timer: NodeJS.Timeout; agents: AgentView[]; widget?: StatusWidget; fleet?: FleetView } | undefined;
+  let active: { file: string; ctx: ExtensionContext; manager: AgentManager; pending: Set<string>; timer: NodeJS.Timeout; agents: AgentView[]; widget?: StatusWidget } | undefined;
   /** Paged transcript windows for this extension instance; cleared when monitoring stops. */
   const transcriptCache = new TranscriptCache();
 
@@ -149,7 +148,7 @@ export default function extension(pi: ExtensionAPI): void {
       deliverReports(active.manager, pi, active.ctx, active.pending, Date.now(), active.agents);
     }
     catch (error) { console.error("[pi-cli-subagents] Report delivery failed; retrying:", error); }
-    try { active.widget?.update(); active.fleet?.update(); }
+    try { active.widget?.update(); }
     catch (error) { console.error("[pi-cli-subagents] Status refresh failed; retrying:", error); }
   }
   function stopMonitor(): void {
@@ -159,7 +158,7 @@ export default function extension(pi: ExtensionAPI): void {
     sessionEpoch++;
     humanPending.clear();
     dismissPanel?.(); dismissPanel = undefined;
-    if (active) { clearInterval(active.timer); active.widget?.dispose(); active.fleet?.dispose(); }
+    if (active) { clearInterval(active.timer); active.widget?.dispose(); }
     active = undefined;
     transcriptCache.clear();
   }
@@ -173,13 +172,9 @@ export default function extension(pi: ExtensionAPI): void {
     const timer = setInterval(pump, 800);
     timer.unref();
     const monitor: NonNullable<typeof active> = { file, ctx, manager, pending, timer, agents: [] };
-    // Both widgets render the monitor's snapshot; actions still re-read live state.
+    // Status renders the monitor's snapshot; panel actions still re-read live state.
     if (ctx.mode === "tui") {
       monitor.widget = new StatusWidget(ctx.ui, () => monitor.agents);
-      monitor.fleet = new FleetView(ctx.ui, () => monitor.agents, (id) => {
-        void openAgents(ctx, id).finally(() => monitor.fleet?.viewerClosed());
-        // The role editor keeps the editor on screen but owns the keyboard itself.
-      }, () => panelBusy);
       // Start the CLI discovery now so `/cli-agents-setting` opens with its pickers already populated.
       cliAvailability = undefined; catalog = undefined; catalogProbe = undefined;
       discover(ctx.cwd);
@@ -447,14 +442,13 @@ ${view(state)}`);
     cliAvailability ??= detectClis();
     catalogProbe ??= probeCatalog({ pi: launch, cwd, available: cliAvailability }).then((found) => { catalog = found; });
   };
-  async function openAgents(ctx: ExtensionContext, selectedId?: string): Promise<void> {
+  async function openAgents(ctx: ExtensionContext): Promise<void> {
       // The roster is a widget above the editor, so it needs Pi's TUI layout and raw input.
       if (ctx.mode !== "tui") { ctx.ui.notify("The panel requires a TUI; use subagent_query / subagent or /agent-reply instead.", "error"); return; }
       // Keep one panel/action loop per extension instance so concurrent commands cannot compete for input.
       if (panelBusy) { ctx.ui.notify("The agent panel is already open or processing an action; wait or close it with Esc.", "warning"); return; }
       panelBusy = true;
       const epoch = sessionEpoch;
-      const fromFleet = selectedId !== undefined;
       let panel: AgentsPanel | undefined;
       let widget: PaneWidget | undefined;
       let overlayActive = false;
@@ -483,24 +477,20 @@ ${view(state)}`);
       try {
         const manager = parentManager(ctx, launch);
         while (epoch === sessionEpoch) {
-          let action: PanelAction | undefined;
-          if (selectedId) { action = { kind: "view", id: selectedId }; selectedId = undefined; }
-          else {
-            let agents: AgentView[] = [];
-            try { agents = manager.list(); }
-            catch (error) { ctx.ui.notify((error as Error).message, "error"); return; }
-            if (!agents.length) { ctx.ui.notify("No subagents in this session.", "info"); return; }
-            action = await new Promise<PanelAction | undefined>((resolve) => {
-              let settled = false;
-              const done = (result: PanelAction | undefined) => { if (!settled) { settled = true; deliver = undefined; resolve(result); } };
-              // Esc during shutdown must still release this loop.
-              dismissPanel = () => done(undefined);
-              panel = new AgentsPanel(agents, theme, done, { rows: () => paneRows(widget?.terminal.rows ?? 24, panel?.mode ?? "list"), frameColor });
-              deliver = (data) => panel?.handleInput(data);
-              refresh();
-            });
-            dismissPanel = undefined;
-          }
+          let agents: AgentView[] = [];
+          try { agents = manager.list(); }
+          catch (error) { ctx.ui.notify((error as Error).message, "error"); return; }
+          if (!agents.length) { ctx.ui.notify("No subagents in this session.", "info"); return; }
+          let action = await new Promise<PanelAction | undefined>((resolve) => {
+            let settled = false;
+            const done = (result: PanelAction | undefined) => { if (!settled) { settled = true; deliver = undefined; resolve(result); } };
+            // Esc during shutdown must still release this loop.
+            dismissPanel = () => done(undefined);
+            panel = new AgentsPanel(agents, theme, done, { rows: () => paneRows(widget?.terminal.rows ?? 24, panel?.mode ?? "list"), frameColor });
+            deliver = (data) => panel?.handleInput(data);
+            refresh();
+          });
+          dismissPanel = undefined;
           if (!action || epoch !== sessionEpoch) return;
           try {
             if (action.kind === "view") {
@@ -539,7 +529,7 @@ ${view(state)}`);
                 }, { overlay: true, overlayOptions: { width: "96%", maxHeight: "100%", margin: 1 } });
               } finally { overlayActive = false; viewer?.dispose(); lease.release(); dismissPanel = undefined; }
               if (epoch !== sessionEpoch) return;
-              if (!action || action.kind === "view") { if (fromFleet) return; continue; }
+              if (!action || action.kind === "view") continue;
             }
             if (action.kind === "close-idle") {
               const targets = action.targets;
@@ -571,7 +561,7 @@ ${view(state)}`);
             }
             // Re-read state before acting: the list is a snapshot, not an authorization or lifecycle guarantee.
             const state = manager.get(action.id);
-            if (action.kind === "reply") { await replyPrompt(ctx, manager, action.id, action.questionId); if (fromFleet) return; continue; }
+            if (action.kind === "reply") { await replyPrompt(ctx, manager, action.id, action.questionId); continue; }
             if (action.kind === "stop" || action.kind === "interrupt") {
               const release = action.kind === "stop";
               if (release && !canStop(state.phase)) { ctx.ui.notify(`${state.role} has no releasable runtime (${state.phase}); nothing to stop.`, "info"); continue; }
@@ -590,7 +580,6 @@ ${view(state)}`);
               recordHumanAction(ctx, manager, result, receiptText(result), epoch);
               if (epoch !== sessionEpoch) return;
               ctx.ui.notify(receiptText(result), result.receipt?.status === "unconfirmed" ? "warning" : "info");
-              if (fromFleet) return;
               continue;
             }
             if (state.phase === "waiting") { ctx.ui.notify("This child has a pending interaction: use r, /agent-reply, or the parent permission tool.", "error"); continue; }
@@ -603,10 +592,9 @@ ${view(state)}`);
             const sent = await sendHuman(ctx, manager, action.id, message, epoch,
               steerable ? "Requested input" : resuming ? "Requested original-session continuation with" : "Requested a new resident task with");
             if (epoch !== sessionEpoch) return;
-            if (!sent) { if (fromFleet) return; continue; }
+            if (!sent) continue;
             ctx.ui.notify(receiptText(sent), sent.receipt?.status === "unconfirmed" ? "warning" : "info");
-            if (fromFleet) return;
-          } catch (error) { if (epoch !== sessionEpoch) return; ctx.ui.notify((error as Error).message, "error"); if (fromFleet) return; }
+          } catch (error) { if (epoch !== sessionEpoch) return; ctx.ui.notify((error as Error).message, "error"); }
         }
       } catch (error) { if (epoch === sessionEpoch) ctx.ui.notify((error as Error).message, "error"); }
       finally {

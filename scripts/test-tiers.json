@@ -15,7 +15,6 @@
     "conversation-session-view.test.mjs",
     "conversation-tools.test.mjs",
     "conversation.test.mjs",
-    "fleet.test.mjs",
     "notifier.test.mjs",
     "pi-question.test.mjs",
     "pi-session.test.mjs",
