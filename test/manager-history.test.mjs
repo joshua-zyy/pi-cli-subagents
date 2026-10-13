@@ -7,6 +7,7 @@ import { randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { syncBuiltinESMExports } from 'node:module';
 import { AgentManager } from '../dist/manager.js';
+import { deliverReports } from '../dist/notifier.js';
 import { readJson, writeJson } from '../dist/storage.js';
 import { tempDir } from './helpers/tmp.mjs';
 
@@ -58,6 +59,61 @@ test('unchanged history refresh reuses bounded summaries instead of rereading ev
   warm.result.reports[0].text = 'caller mutation'; warm.result.agents[0].history[0].task = 'caller mutation';
   assert.notEqual(manager.reports()[0].text, 'caller mutation');
   assert.notEqual(manager.get(id).history[0].task, 'caller mutation');
+});
+
+test('live approval text stays complete through manager and notifier without retaining resolved bodies', () => {
+  const { manager, id, dir, parent, stateFile } = fixture(1);
+  const runId = randomUUID(), notificationId = `${runId}-waiting-${randomUUID()}`;
+  const tail = 'TAIL: the separately protected resource is also affected; do not approve.';
+  const question = { id: 'long-approval', method: 'confirm', title: 'Review this non-executable fixture',
+    message: 'A'.repeat(13_000) + '\n' + tail, parentPolicy: { confirm: true } };
+  const text = `${question.title}\n${question.message}`;
+  writeJson(path.join(dir, 'runs', runId, 'request.json'), { runId, message: 'Review fixture only', createdAt: 2 });
+  writeJson(stateFile, { ...readJson(stateFile), runId, phase: 'waiting', workerPid: process.pid,
+    resultFile: undefined, questions: [question], updatedAt: Date.now() });
+  const waitingFile = path.join(dir, 'reports', `${notificationId}.json`);
+  writeJson(waitingFile, { notificationId, agentId: id, runId, parentFile: parent, status: 'waiting',
+    questionId: question.id, time: 2, text, logFile: 'events.jsonl' });
+  const states = manager.list(), waiting = manager.reports(Date.now(), states).find(r => r.status === 'waiting');
+  assert.ok(waiting.text === text, `the complete decision input must survive: expected ${text.length} characters, got ${waiting.text.length}`);
+  assert.equal(waiting.truncated, false);
+  assert.deepEqual(waiting.request.parentPolicy, question.parentPolicy);
+  const sent = [];
+  deliverReports(manager, { sendMessage: (message, options) => sent.push({ message, options }) },
+    { sessionManager: { getEntries: () => [] }, ui: { notify() {}, setStatus() {} } }, new Set(), Date.now(), states);
+  assert.equal(sent.length, 1); assert.equal(sent[0].options.deliverAs, 'steer');
+  const content = sent[0].message.content;
+  assert.ok(content.includes(text), 'including the approval tail, not merely a pointer to it');
+  assert.doesNotMatch(content.slice(content.indexOf(`[Subagent ${id} · waiting]`)), /characters omitted|truncated preview/);
+  assert.match(content, /truncated preview/, 'ordinary terminal reports remain bounded');
+  assert.equal(manager.historyCache.get(waitingFile).value.text, '', 'the historical cache stores no approval body');
+  // Metadata may be cached before the full read. Do not pair foreign body content with live policy.
+  const read = fs.readFileSync, error = console.error, errors = [];
+  fs.readFileSync = function (...args) {
+    const body = read.apply(this, args);
+    return args[0] === waitingFile ? JSON.stringify({ ...JSON.parse(body), parentFile: `${parent}.foreign` }) : body;
+  };
+  console.error = (...args) => errors.push(args.map(String).join(' ')); syncBuiltinESMExports();
+  try { assert.equal(manager.reports(Date.now(), states).some(r => r.status === 'waiting'), false); }
+  finally { fs.readFileSync = read; console.error = error; syncBuiltinESMExports(); }
+  assert.ok(errors.some(message => message.includes('does not belong to this pending request')));
+  assert.equal(readJson(waitingFile).parentFile, parent, 'no stored record was repaired or rewritten');
+  assert.equal(manager.reports(Date.now(), states).find(r => r.status === 'waiting').text, text);
+  // Completed approvals are still enumerated, but their text must not accumulate or be reread.
+  for (let n = 0; n < 16; n++) {
+    const oldId = `${runId}-waiting-${randomUUID()}`;
+    writeJson(path.join(dir, 'reports', `${oldId}.json`), { notificationId: oldId, agentId: id, runId, parentFile: parent,
+      status: 'waiting', questionId: `resolved-${n}`, time: 3 + n, text: 'Z'.repeat(16_000) });
+  }
+  writeJson(stateFile, { ...readJson(stateFile), phase: 'idle', questions: [] });
+  const refresh = () => manager.reports(); refresh();
+  const warm = measure(refresh);
+  assert.equal(warm.result.some(r => r.status === 'waiting'), false);
+  assert.ok(warm.count.reads <= 4, 'resolved approvals must not cause full-body reads on every poll');
+  assert.ok(warm.count.bytes < 5000);
+  const waitingCache = [...manager.historyCache.values()].filter(entry => entry.value?.status === 'waiting');
+  assert.equal(waitingCache.length, 17);
+  assert.ok(waitingCache.every(entry => entry.value.text === ''), 'only approval metadata stays cached');
 });
 
 test('history memoization sees external publication, replacement, deletion and live permission changes', () => {

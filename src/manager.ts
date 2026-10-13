@@ -68,7 +68,8 @@ export class AgentManager {
   private report(file: string): (Report & { truncated: boolean }) | undefined {
     return this.readHistory(file, () => {
       const report = readJson<Report>(file);
-      return report ? { ...report, ...shorten(report.text) } : undefined;
+      // Waiting bodies are loaded only for live questions below, never retained in history.
+      return report ? { ...report, ...(report.status === "waiting" ? shorten(report.text, 0) : shorten(report.text)) } : undefined;
     });
   }
   /** Read projected history without requiring a live or healthy runtime state. */
@@ -411,10 +412,18 @@ export class AgentManager {
       for (const file of files) {
         const reportFile = path.join(folder, file);
         try {
-          const report = this.report(reportFile);
+          let report = this.report(reportFile);
           if (!report || report.parentFile !== this.parentFile) continue;
-          const pending = report.status === "waiting" ? state.questions.find((q) => q.id === report.questionId) : undefined;
+          const questionId = report.questionId;
+          const pending = report.status === "waiting" ? state.questions.find((q) => q.id === questionId) : undefined;
           if (report.status === "waiting" && !pending) continue;
+          if (pending) {
+            const full = readJson<Report>(reportFile);
+            if (!full || full.status !== "waiting" || full.parentFile !== this.parentFile || full.agentId !== state.id ||
+              full.runId !== report.runId || full.notificationId !== report.notificationId || full.questionId !== pending.id || typeof full.text !== "string")
+              throw new Error("Waiting report changed or does not belong to this pending request");
+            report = { ...full, truncated: false };
+          }
           // Carry the live policy, including native human-only restrictions, without rewriting
           // stored reports. Resolved requests were filtered above and must not be re-announced.
           reports.push(pending ? { ...report, request: { method: pending.method, options: pending.options,
