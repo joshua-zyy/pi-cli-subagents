@@ -54,8 +54,9 @@ export function detectClis(): Record<Cli, boolean> {
   return { pi: true, codex: launchable(codexLaunch), claude: launchable(claudeLaunch) };
 }
 
-function run(launch: Launch, args: string[], cwd: string, timeout: number): Promise<string> {
+function run(resolveLaunch: () => Launch, args: string[], cwd: string, timeout: number): Promise<string> {
   return new Promise((resolve, reject) => {
+    const launch = resolveLaunch();
     const child = execFile(launch.command, [...launch.args, ...args], { cwd, timeout, windowsHide: true, maxBuffer: 4 * 1024 * 1024 },
       (error, stdout) => error ? reject(error) : resolve(stdout));
     // Close stdin: a CLI that reads it would otherwise wait for the whole timeout instead of answering.
@@ -70,8 +71,8 @@ function run(launch: Launch, args: string[], cwd: string, timeout: number): Prom
 export async function probeCatalog(options: { pi: Launch; cwd: string; available?: Record<Cli, boolean>; timeout?: number }): Promise<ModelCatalog> {
   const timeout = options.timeout ?? 20_000, available = options.available ?? detectClis();
   const [pi, codex] = await Promise.all([
-    available.pi ? run(options.pi, ["--list-models"], options.cwd, timeout).then(parsePiModels).catch(() => []) : Promise.resolve([]),
-    available.codex ? run(codexLaunch(), ["debug", "models"], options.cwd, timeout).then(parseCodexModels).catch(() => []) : Promise.resolve([]),
+    available.pi ? run(() => options.pi, ["--list-models"], options.cwd, timeout).then(parsePiModels).catch(() => []) : Promise.resolve([]),
+    available.codex ? run(codexLaunch, ["debug", "models"], options.cwd, timeout).then(parseCodexModels).catch(() => []) : Promise.resolve([]),
   ]);
   return { pi, codex };
 }

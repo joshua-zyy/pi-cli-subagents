@@ -1,7 +1,10 @@
 // Local CLI discovery: what is installed, and which models each CLI publishes about itself.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { EMPTY_CATALOG, detectClis, modelEfforts, parseCodexModels, parsePiModels } from '../dist/cli-discovery.js';
+import fs from 'node:fs';
+import childProcess from 'node:child_process';
+import { syncBuiltinESMExports } from 'node:module';
+import { EMPTY_CATALOG, detectClis, modelEfforts, parseCodexModels, parsePiModels, probeCatalog } from '../dist/cli-discovery.js';
 import { tempDir } from './helpers/tmp.mjs';
 
 test('the Pi table and the Codex catalog are read from the CLIs’ own output', () => {
@@ -32,6 +35,29 @@ test('a model publishes its own effort levels, and an unknown model publishes no
   assert.deepEqual(modelEfforts(catalog, 'gpt-6-luna'), ['low', 'high', 'max', 'ultra']);
   assert.equal(modelEfforts(catalog, 'gpt-6-astra'), undefined);
   assert.equal(modelEfforts(EMPTY_CATALOG, undefined), undefined);
+});
+
+test('a cached available CLI whose launcher now fails contributes an empty catalog, not a rejected probe', async t => {
+  const platform = Object.getOwnPropertyDescriptor(process,'platform'), savedPath = process.env.PATH, calls = [];
+  Object.defineProperty(process,'platform',{value:'win32'});
+  process.env.PATH = tempDir('stale-launcher');
+  const missing = t.mock.method(fs,'existsSync',()=>{throw new Error('cached launcher is no longer readable');});
+  const exec = t.mock.method(childProcess,'execFile',(_command,args,_options,callback)=>{
+    calls.push(args); callback(null,'provider  model\nfixture  known\n'); return {stdin:{end(){}}};
+  });
+  syncBuiltinESMExports();
+  try {
+    const catalog = await probeCatalog({pi:{command:process.execPath,args:[]},cwd:process.cwd(),available:{pi:true,codex:true,claude:false}});
+    assert.deepEqual(catalog,{pi:[{provider:'fixture',model:'known'}],codex:[]});
+    assert.deepEqual(calls,[['--list-models']],'never launch a broken CLI or retry with a shell');
+    const checked = missing.mock.callCount();
+    assert.deepEqual(await probeCatalog({pi:{command:process.execPath,args:[]},cwd:process.cwd(),available:{pi:false,codex:false,claude:false}}),EMPTY_CATALOG);
+    assert.equal(missing.mock.callCount(),checked,'unavailable CLIs are not resolved');
+  } finally {
+    Object.defineProperty(process,'platform',platform);
+    if(savedPath === undefined) delete process.env.PATH; else process.env.PATH = savedPath;
+    missing.mock.restore(); exec.mock.restore(); syncBuiltinESMExports();
+  }
 });
 
 test('availability follows PATH instead of a hardcoded list', () => {
