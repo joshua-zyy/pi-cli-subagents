@@ -40,6 +40,15 @@ export const isTerminal = (phase: Phase): boolean => ["completed", "failed", "st
 
 /** Idle has no active run, but still owns processes which can be explicitly released. */
 export const canStop = (phase: Phase): boolean => isActive(phase) || phase === "idle";
+/** UI release requires a known idle owner; active runs remain interruptible, not releasable here. */
+type ReleaseView = Pick<AgentView, "phase"> & Partial<Pick<AgentView, "protocolVersion" | "runtimeId" | "questions">>;
+export const canRelease = (view: ReleaseView): view is ReleaseView & { runtimeId: string } =>
+  view.phase === "idle" && view.protocolVersion === 2 && !!view.runtimeId && view.questions?.length === 0;
+
+/** Query views omit operation receipts; closed v2 ownership is the durable release evidence. */
+export const isReleased = (view: Pick<AgentView, "phase" | "protocolVersion" | "runtimeClosed">): boolean =>
+  view.phase === "closed" && view.protocolVersion === 2 && view.runtimeClosed === true;
+
 export const canResume = (phase: Phase): boolean => ["completed", "failed", "stopped", "closed"].includes(phase);
 
 /** Only resident v2 backends expose current-run interruption; closing is a different operation. */

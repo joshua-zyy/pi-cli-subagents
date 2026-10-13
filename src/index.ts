@@ -4,15 +4,15 @@ import { getAgentDir, getMarkdownTheme, type ExtensionAPI, type ExtensionContext
 import { AgentManager } from "./manager.js";
 import { WorkspaceDecisionRequired, type ResumeOptions } from "./workspace.js";
 import { customType as reportType, deliverReports } from "./notifier.js";
-import { deliverHumanActions, saveHumanAction } from "./human-actions.js";
-import { renderReportMessage } from "./ui/report.js";
+import { humanActionType, deliverHumanActions, saveHumanAction } from "./human-actions.js";
+import { renderReportMessage, renderHumanActionMessage } from "./ui/report.js";
 import { CLI_CHOICES, loadRoles, mergeRoles } from "./roles.js";
 import { detectClis, probeCatalog, type ModelCatalog } from "./cli-discovery.js";
 import { claudeDefaultValues, probeRoleDefaults, type NativeDefaults } from "./role-defaults.js";
 import { addRole, deleteRole, FIELD_LABELS, fieldValue, readScope, roleRows, setField, writeScope, type Scope } from "./role-settings.js";
 import { AgentsPanel, paneRows, type PanelAction } from "./ui/panel.js";
 import { RoleSettingsPanel, SETTINGS_MAX_ROWS, type RoleSettingsAction, type RoleSettingsCursor } from "./ui/role-settings.js";
-import { canMessage, canResume, canSteer, canStop, hasFailure, oneLine, viewStatus } from "./ui/format.js";
+import { canMessage, canResume, canSteer, canRelease, hasFailure, oneLine, viewStatus } from "./ui/format.js";
 import { StatusWidget } from "./ui/status.js";
 import { TranscriptWindow } from "./transcript-window.js";
 import { TranscriptCache, type TranscriptIdentity } from "./ui/transcript-cache.js";
@@ -80,6 +80,7 @@ export default function extension(pi: ExtensionAPI): void {
   // Explicit child marker prevents an auto-discovered copy of this extension from recursively spawning agents.
   if (process.env.PI_CLI_SUBAGENT === "1") return;
   pi.registerMessageRenderer(reportType, renderReportMessage);
+  pi.registerMessageRenderer(humanActionType, renderHumanActionMessage);
   const cli = process.argv[1];
   const launch: Launch = { command: process.execPath, args: [cli] };
   let dismissPanel: (() => void) | undefined;
@@ -556,7 +557,7 @@ ${view(state)}`);
                 outcomes.push(`${oneLine(target.role, 120)} ${target.id}: ${message}`);
               }
               if (epoch !== sessionEpoch) return;
-              ctx.ui.notify(outcomes.join("\n"), uncertain ? "warning" : "info");
+              ctx.ui.notify(uncertain ? outcomes.join("\n") : `Released ${targets.length} idle subagent${targets.length === 1 ? "" : "s"}.`, uncertain ? "warning" : "info");
               continue;
             }
             // Re-read state before acting: the list is a snapshot, not an authorization or lifecycle guarantee.
@@ -564,22 +565,24 @@ ${view(state)}`);
             if (action.kind === "reply") { await replyPrompt(ctx, manager, action.id, action.questionId); continue; }
             if (action.kind === "stop" || action.kind === "interrupt") {
               const release = action.kind === "stop";
-              if (release && !canStop(state.phase)) { ctx.ui.notify(`${state.role} has no releasable runtime (${state.phase}); nothing to stop.`, "info"); continue; }
-              const confirmed = await ctx.ui.confirm(release ? state.phase === "idle" ? "Release idle subagent?" : "Stop subagent?" : "Interrupt the current subagent turn?", release
-                ? `${state.role} ${action.id.slice(0, 8)}: stop active or background work and release processes. Keep the native session, last run outcome and results.`
+              if (action.kind === "stop" && (!canRelease(state) || state.runId !== action.expected.runId || state.runtimeId !== action.expected.runtimeId)) {
+                ctx.ui.notify(`${state.role} is no longer the captured idle runtime; nothing was released.`, "warning"); continue;
+              }
+              const confirmed = await ctx.ui.confirm(release ? "Release idle subagent?" : "Interrupt the current subagent turn?", release
+                ? `${state.role} ${action.id.slice(0, 8)}: release only this idle runtime. Keep the native session, last run outcome and results. Changed or busy targets are refused.`
                 : `${state.role} ${action.id.slice(0, 8)}: end only the current turn, retaining the runtime and native session. This does not undo file changes.`);
               if (!confirmed || epoch !== sessionEpoch) continue;
               let result: AgentView;
-              try { result = release ? await manager.close(action.id) : await manager.interrupt(action.id); }
+              try { result = action.kind === "stop" ? await manager.close(action.id, true, action.expected) : await manager.interrupt(action.id); }
               catch (error) {
                 let observed = state;
-                try { observed = manager.get(action.id); } catch { /* Preserve the pre-request identity. */ }
+                if (!release) try { observed = manager.get(action.id); } catch { /* Preserve the pre-request identity. */ }
                 recordHumanAction(ctx, manager, observed, `${release ? "Release" : "Interrupt"} request unconfirmed: ${(error as Error).message}\nInspect before retrying.`, epoch);
                 throw error;
               }
               recordHumanAction(ctx, manager, result, receiptText(result), epoch);
               if (epoch !== sessionEpoch) return;
-              ctx.ui.notify(receiptText(result), result.receipt?.status === "unconfirmed" ? "warning" : "info");
+              ctx.ui.notify(release && result.receipt?.status === "released" ? `Released ${oneLine(state.role, 120)} ${action.id.slice(0, 8)}.` : receiptText(result), result.receipt?.status === "unconfirmed" ? "warning" : "info");
               continue;
             }
             if (state.phase === "waiting") { ctx.ui.notify("This child has a pending interaction: use r, /agent-reply, or the parent permission tool.", "error"); continue; }

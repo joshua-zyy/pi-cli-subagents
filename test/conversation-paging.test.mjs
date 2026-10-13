@@ -124,7 +124,7 @@ test('paging state keeps the existing keys working', async t => {
   viewer.handleInput('\r'); viewer.handleInput('hi'); viewer.handleInput('\r');
   await until(() => viewer.render(100).join('\n').includes('Input accepted'));
   viewer.handleInput('x');
-  assert.deepEqual(actions, [{ kind: 'stop', id: agent.id }]);
+  assert.deepEqual(actions, [], 'x must not release an active paging session');
 });
 
 test('a page move is not new output and does not clear a pending delivery notice', async t => {

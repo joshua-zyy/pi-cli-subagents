@@ -106,6 +106,46 @@ test('idle batch reports partial failure per captured target without retrying su
   } finally { await h.close(); }
 });
 
+test('single release rejects a busy or replaced snapshot before asking for confirmation', {timeout:5000}, async t=>{
+  for(const changes of [{phase:'running'},{runId:randomUUID()},{runtimeId:randomUUID()}]){
+    const {h}=idleBatch(t,1);let confirms=0,closes=0;
+    t.mock.method(AgentManager.prototype,'get',()=>({...h.before,...changes}));
+    t.mock.method(AgentManager.prototype,'close',async()=>{closes++;throw Error('must not close a replaced snapshot');});
+    h.ctx.ui.confirm=async()=>{confirms++;return true;};
+    try{
+      h.open();h.press('i');h.press('x');await waitUntil('fresh-state refusal',()=>h.notices.some(n=>/captured idle runtime/.test(n.message)),2000);
+      assert.equal(confirms,0);assert.equal(closes,0);assert.equal(h.messages.length,0);
+    }finally{await h.close();}
+  }
+});
+
+test('single idle release carries captured identity through confirmation and keeps refusal evidence on the old run', {timeout:5000}, async t => {
+  const {h,targets}=idleBatch(t,1),target=targets[0],calls=[],captured={...target};
+  h.ctx.ui.confirm=async title=>{assert.match(title,/Release idle/);return true;};
+  t.mock.method(AgentManager.prototype,'close',async(id,onlyIdle,expected)=>{
+    calls.push({id,onlyIdle,expected});throw Error('captured runtime became busy during confirmation');
+  });
+  try{
+    h.open();h.press('i');h.press('x');await waitUntil('single refused release',()=>h.messages.length===1,2000);
+    assert.deepEqual(calls,[{id:target.id,onlyIdle:true,expected:{runId:captured.runId,runtimeId:captured.runtimeId}}]);
+    assert.equal(h.messages[0].message.details.runId,captured.runId);
+    assert.match(h.messages[0].message.content,/unconfirmed.*became busy/s);assert.equal(h.messages[0].options.triggerTurn,false);
+    assert.equal(target.phase,'idle');
+  }finally{await h.close();}
+});
+
+test('successful batch release shows a concise count while preserving full passive action receipts', {timeout:5000}, async t=>{
+  const {h,targets,released}=idleBatch(t,2),calls=[];
+  t.mock.method(AgentManager.prototype,'close',async(id,onlyIdle,expected)=>{
+    calls.push({id,onlyIdle,expected});return released(targets.find(target=>target.id===id));
+  });
+  try{
+    h.open();h.press('c');await waitUntil('batch records',()=>h.messages.length===2,2000);
+    assert.equal(calls.length,2);assert(h.notices.some(notice=>notice.type==='info'&&notice.message==='Released 2 idle subagents.'));
+    assert(h.messages.every(entry=>entry.options.triggerTurn===false&&/Native processes released/.test(entry.message.content)));
+  }finally{await h.close();}
+});
+
 test('parent switch during idle batch stops further releases and retains the in-flight action for its original parent', { timeout: 5000 }, async t => {
   const { h, targets, released } = idleBatch(t, 2), started = Promise.withResolvers(), finish = Promise.withResolvers(), calls = [];
   t.mock.method(AgentManager.prototype, 'close', async id => { calls.push(id); started.resolve(); return finish.promise; });

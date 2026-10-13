@@ -187,7 +187,7 @@ test('status widget registers only in TUI, shows agents and unregisters at shutd
   assert.equal(h.state.listeners.length,0,'no persistent prompt key listener');
 });
 
-test('roster pane resumes the original session, confirms stops, and rejects non-TUI use', { timeout: 30_000 }, async (t) => {
+test('roster history resumes original sessions, releases only idle children, and rejects non-TUI use', { timeout: 30_000 }, async (t) => {
   const h = harness(t);
   h.start();
   const agent = await h.spawn('REMEMBER panel-token');
@@ -200,7 +200,9 @@ test('roster pane resumes the original session, confirms stops, and rejects non-
   h.editorAnswer = 'RECALL';
   const pane = await h.openAgents();
   assert.match(pane.render(), /^╭─+╮$/m, 'the roster is framed like the role editor');
-  assert.match(pane.render(), /Subagents \(1\)/);
+  assert.match(pane.render(), /Subagents \(0\)/);
+  assert.doesNotMatch(pane.render(), new RegExp(agent.id.slice(0,8)));
+  await pane.press('h'); assert.match(pane.render(), /Subagents \(1\)/);
   await pane.press('i'); await pane.press('s');
   await pane.press(keys.escape); await pane.running;
   assert.equal(h.customCalls, 0, 'the roster replaces neither the input box nor the transcript');
@@ -212,19 +214,22 @@ test('roster pane resumes the original session, confirms stops, and rejects non-
   assert.notEqual(resumed.runId, firstRun);
   assert.notEqual(resumed.runtimeId, original.runtimeId, 'native resume starts a new runtime');
 
-  // HOLD is second by start time; stopping an active child needs confirmation.
+  // HOLD is second by start time; x must never release an executing child.
   const holding = await h.spawn('HOLD');
   await waitUntil('running', () => h.manager.get(holding.id).phase === 'running');
   const stop = await h.openAgents();
   await stop.press(keys.down); await stop.press('i'); await stop.press('x');
-  await stop.press(keys.escape); await stop.running;
-  assert.equal(h.confirms.length, 1);
-  assert.match(h.confirms[0].title, /Stop/);
-  assert.equal(h.manager.get(holding.id).phase, 'closed');
-  assert.equal(h.manager.get(holding.id).lastStatus, 'stopped');
-  assert.equal(h.manager.get(agent.id).phase, 'idle', 'only the selected child is stopped');
-  assert.equal(h.manager.get(agent.id).lastStatus, 'completed');
-  assert.equal(fs.existsSync(path.join(h.manager.root, holding.id, 'owner.lock')), false, 'stop confirms runtime release');
+  await stop.press(keys.escape); await stop.press(keys.escape); await stop.running;
+  assert.equal(h.confirms.length, 0);
+  assert.equal(h.manager.get(holding.id).phase, 'running');
+  assert.equal(fs.existsSync(path.join(h.manager.root, holding.id, 'owner.lock')), true);
+  const release = await h.openAgents();
+  await release.press('i'); await release.press('x'); await release.press(keys.escape); await release.running;
+  assert.equal(h.confirms.length, 1); assert.match(h.confirms[0].title, /Release idle/);
+  assert.equal(h.manager.get(agent.id).phase, 'closed'); assert.equal(h.manager.get(agent.id).lastStatus, 'completed');
+  assert.equal(h.manager.get(holding.id).phase, 'running');
+  const current=await h.openAgents(); assert.doesNotMatch(current.render(160),new RegExp(agent.id.slice(0,8)));
+  assert.match(current.render(160),new RegExp(holding.id.slice(0,8))); await current.press(keys.escape); await current.running;
 
   // Non-TUI clients do not open a panel.
   h.mode = 'rpc';
@@ -300,12 +305,15 @@ test('direct human actions are recorded for the parent without interrupting it',
   await waitUntil('decision recorded', () => human().length === 2);
   assert.match(human()[1].message.content, new RegExp(`${asking.id}.*worker\\] Answered pending request permission-1: confirmed`, 's'));
 
-  // Stopping a child changes the plan the parent is coordinating.
+  // End the active turn separately; only then can its idle runtime be released.
+  const interrupt = await h.openAgents(); await interrupt.press('t'); await interrupt.press(keys.escape); await interrupt.running;
+  await waitForIdle(h.manager,holding.id,'stopped'); await waitUntil('interrupt recorded',()=>human().length===3);
+  assert.match(human()[2].message.content,/captured turn has ended/);
   const stop = await h.openAgents();
   await stop.press('i'); await stop.press('x');
   await stop.press(keys.escape); await stop.running;
-  await waitUntil('stop recorded', () => human().length === 3);
-  assert.match(human()[2].message.content, new RegExp(`${holding.id}.*Native processes released`, 's'));
+  await waitUntil('release recorded', () => human().length === 4);
+  assert.match(human()[3].message.content, new RegExp(`${holding.id}.*Native processes released`, 's'));
   assert.equal(h.manager.get(holding.id).phase, 'closed');
   assert.equal(h.manager.get(holding.id).lastStatus, 'stopped');
   assert.equal(fs.existsSync(path.join(h.manager.root, holding.id, 'owner.lock')), false);
@@ -464,7 +472,7 @@ test('roster pane and inline messages cannot bypass managed workspace review or 
   const reviewer = json(await h.invoke('subagent', { action: 'start', role: 'reviewer', task: 'HOLD review', workspace: ws.id }));
   h.editorAnswer = 'CWD';
   const occupied = await h.openAgents();
-  await occupied.press('i'); await occupied.press('s');
+  await occupied.press('h'); await occupied.press('i'); await occupied.press('s');
   await occupied.press(keys.escape); await occupied.running;
   assert.ok(h.notices.some(notice => /occupied/.test(notice.message)));
   assert.equal(h.manager.get(worker.id).runCount, 1);
@@ -473,7 +481,7 @@ test('roster pane and inline messages cannot bypass managed workspace review or 
   fs.writeFileSync(path.join(ws.path, 'base.txt'), 'new\n');
   await h.invoke('subagent', { action: 'workspace_integrate', workspace: ws.id });
   const integrated = await h.openAgents();
-  await integrated.press('i'); await integrated.press('s');
+  await integrated.press('h'); await integrated.press('i'); await integrated.press('s');
   await integrated.press(keys.escape); await integrated.running;
   assert.ok(h.notices.some(notice => /integrated/.test(notice.message)));
   h.state.scripts.push(async viewer => {
@@ -484,7 +492,7 @@ test('roster pane and inline messages cannot bypass managed workspace review or 
     await waitUntil('inline baseline dialog after closing viewer', () => h.state.selections.length >= 2);
   });
   const inline = await h.openAgents();
-  await inline.press(keys.enter);
+  await inline.press('h'); await inline.press(keys.enter);
   await inline.press(keys.escape); await inline.running;
   assert.equal(h.manager.get(worker.id).runCount, 1);
   assert.equal(h.manager.get(worker.id).sessionId, worker.sessionId);
@@ -504,7 +512,7 @@ test('TUI sync requires dirty-state confirmation and inline continuation preserv
   fs.writeFileSync(path.join(repo, 'parent-new.txt'), 'new parent content');
   h.state.selectAnswer = (_title, choices) => choices[1]; h.state.confirmAnswer = false; h.editorAnswer = 'CWD';
   const declined = await h.openAgents();
-  await declined.press('i'); await declined.press('s');
+  await declined.press('h'); await declined.press('i'); await declined.press('s');
   await declined.press(keys.escape); await declined.running;
   assert.match(h.confirms.at(-1).message, /parent-new.txt/);
   assert.equal(h.manager.get(worker.id).runCount, 1);
@@ -517,7 +525,7 @@ test('TUI sync requires dirty-state confirmation and inline continuation preserv
     viewer.handleInput(keys.enter);
   });
   const inline = await h.openAgents();
-  await inline.press(keys.enter);
+  await inline.press('h'); await inline.press(keys.enter);
   await inline.press(keys.escape); await inline.running;
   const resumed = await waitForIdle(h.manager, worker.id);
   assert.equal(resumed.runCount, 2);
@@ -543,7 +551,7 @@ test('TUI refuses parent changes made after the inheritance dialog was displayed
   h.state.selectAnswer = (_title, choices) => choices[1]; h.editorAnswer = 'CWD';
   h.ctx.ui.confirm = async () => { fs.writeFileSync(path.join(repo, 'unconfirmed.txt'), 'arrived during dialog'); return true; };
   const rejected = await h.openAgents();
-  await rejected.press('i'); await rejected.press('s');
+  await rejected.press('h'); await rejected.press('i'); await rejected.press('s');
   await rejected.press(keys.escape); await rejected.running;
   assert.ok(h.notices.some(notice => /confirmed snapshot/.test(notice.message)));
   assert.equal(h.manager.get(worker.id).runCount, 1);

@@ -23,9 +23,23 @@ export const renderReportMessage: MessageRenderer = (message, { expanded, output
   const label = reports.length === 1
     ? `Subagent ${oneLine(reports[0].agentId, 8)} · ${reports[0].status}`
     : reports.length ? `Subagents · ${statuses.join(" · ")}` : "Subagent report · status unavailable";
+  const title = `${theme.fg(color, `${expanded ? "▾" : "▸"} ${icon} ${label}`)}${attention ? theme.fg("warning", " · /agents") : ""}`;
+  return renderCard(message, { expanded, outputPad }, theme, title);
+};
+
+/** Human receipts remain passive and complete; this header never guesses success from their prose. */
+export const renderHumanActionMessage: MessageRenderer = (message, options, theme) => {
+  const details = message.details as { agentId?: string; role?: string } | undefined;
+  const identity = typeof details?.agentId === "string" && typeof details.role === "string"
+    ? ` · ${oneLine(details.role, 40)} ${oneLine(details.agentId, 8)}` : "";
+  return renderCard(message, options, theme, theme.fg("dim", `${options.expanded ? "▾" : "▸"} Human action${identity}`));
+};
+
+function renderCard(message: Parameters<MessageRenderer>[0], { expanded, outputPad }: Parameters<MessageRenderer>[1],
+  theme: Parameters<MessageRenderer>[2], heading: string) {
   const key = keyText("app.tools.expand");
   const hint = key ? `${key} to ${expanded ? "collapse" : "expand"}` : "expand key unbound";
-  const title = `${theme.fg(color, `${expanded ? "▾" : "▸"} ${icon} ${label}`)}${attention ? theme.fg("warning", " · /agents") : ""}${theme.fg("dim", ` · ${hint}`)}`;
+  const title = heading + theme.fg("dim", ` · ${hint}`);
   const card = new Container();
   card.addChild({
     render(width: number): string[] {
@@ -44,4 +58,4 @@ export const renderReportMessage: MessageRenderer = (message, { expanded, output
       getMarkdownTheme(), { color: value => theme.fg("customMessageText", value) }));
   }
   return card;
-};
+}

@@ -82,15 +82,15 @@ test('closing during initial catch-up prevents late content publication and furt
 });
 
 test('loading keeps agent status and actions available without advertising scrollable content', async t => {
-  for (const [key, action] of [['x', { kind: 'stop', id: agent.id }], ['s', { kind: 'message', id: agent.id, resume: false }]]) {
+  for (const [key, action] of [['x', undefined], ['s', { kind: 'message', id: agent.id, resume: false }]]) {
     const h = view(async () => ({ agent, entries: [entry('OLD')], loading: true, revision: 1 }));
     t.after(() => h.viewer.dispose());
     await until(() => h.frames.length > 0);
     assert.match(h.text(), /worker.*Running/);
-    assert.match(h.text(), /x stop/);
+    assert.doesNotMatch(h.text(), /x stop|x release/);
     assert.doesNotMatch(h.text(), /OLD|PgUp|Home\/End|↑↓ scroll/);
     h.viewer.handleInput(key);
-    assert.deepEqual(h.actions, [action]);
+    assert.deepEqual(h.actions, action ? [action] : []);
   }
   const sent = [];
   const h = view(async () => ({ agent, entries: [], loading: true, revision: 1 }), { onSend: async text => { sent.push(text); } });

@@ -33,6 +33,14 @@ test('idle resources remain visible after linger and expose failure and release 
   widget.update(); assert.equal(h.calls.length, 1); widget.dispose();
 });
 
+test('confirmed released runtimes disappear immediately without hiding unconfirmed failures', () => {
+  const released=view({phase:'closed',protocolVersion:2,runtimeClosed:true,updatedAt:11000,lastStatus:'completed'});
+  assert.deepEqual(lines([released]),[]);
+  const unconfirmed={...released,phase:'unreachable',lastStatus:'failed',error:'release uncertainty'};
+  assert.match(lines([unconfirmed]).join('\n'),/Failed|uncertainty/);
+  assert.match(lines([{...released,phase:'running'}]).join('\n'),/Running/);
+});
+
 test('elapsed formatting handles all units and invalid inputs', () => {
   for (const [input, expected] of [[0, '0.0s'], [-500, '0.0s'], [420, '0.4s'], [12345, '12.3s'], [252000, '4m12s'], [3780000, '1h03m'], [NaN, '0.0s']]) assert.equal(formatElapsed(input), expected);
 });

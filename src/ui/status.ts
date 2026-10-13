@@ -1,6 +1,6 @@
 import { truncateToWidth } from "@earendil-works/pi-tui";
 import type { AgentView } from "../types.js";
-import { SPINNER, canStop, formatElapsed, isActive, isTerminal, oneLine, phaseIcon, phaseLabel, rightAlign, shortId, viewElapsed, viewStartedAt, viewStatus, type UiColor, type UiTheme } from "./format.js";
+import { SPINNER, canStop, isReleased, formatElapsed, isActive, isTerminal, oneLine, phaseIcon, phaseLabel, rightAlign, shortId, viewElapsed, viewStartedAt, viewStatus, type UiColor, type UiTheme } from "./format.js";
 
 export const STATUS_KEY = "cli-subagents";
 export const MAX_STATUS_LINES = 10;
@@ -40,7 +40,7 @@ interface Row { head: string; body?: string }
 export function statusLines(agents: AgentView[], options: StatusLinesOptions): string[] {
   const { now, theme, width } = options;
   const lingerMs = options.lingerMs ?? FINISHED_LINGER_MS;
-  const list = Array.isArray(agents) ? agents : [];
+  const list = Array.isArray(agents) ? agents.filter(agent => !isReleased(agent)) : [];
   const waiting = list.filter((agent) => agent.phase === "waiting").sort(byStart);
   const active = list.filter((agent) => isActive(agent.phase) && agent.phase !== "waiting").sort(byStart);
   const idle = list.filter((agent) => agent.phase === "idle").sort(byStart);
@@ -171,7 +171,7 @@ export class StatusWidget {
   }
   private hasActive(): boolean { return this.snapshot.some((agent) => isActive(agent.phase)); }
   private hasContent(now: number): boolean {
-    return this.snapshot.some((agent) => canStop(agent.phase) || now - agent.updatedAt <= this.lingerMs);
+    return this.snapshot.some((agent) => !isReleased(agent) && (canStop(agent.phase) || now - agent.updatedAt <= this.lingerMs));
   }
   private register(): void {
     if (this.registered || this.disposed) return;

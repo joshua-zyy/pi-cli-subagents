@@ -52,6 +52,16 @@ Launcher tests use independent miniature repositories to verify real process bou
 - 未明确配置或动态模型/权限默认值无法离线确定时显示 `default`，不猜订阅默认模型或固定 effort；读取失败显示 `unavailable`。非 Windows 的 Git 子目录/linked worktree 等无法确定 local settings 路径时也不猜。重新打开面板刷新快照；已有 worker 不热更新。
 - 回显中的 `bypassPermissions`、`full-access` 和原生 `never` 审批组合仍保留权限告警。本地 fixture 覆盖来源、父模型、CLI 切换、默认选择定位、同名模型 provider、保存不冻结、重开刷新、关闭/会话切换后的迟到结果；不替代人工 TUI 或真实模型验收。
 
+## /agents 列表与释放
+
+主界面不再安装下方实例快捷选择器，仅保留状态摘要与 `/agents`（Ctrl+Alt+A）。列表先为选中实例保留一行，再计入实际存在的滚动标记；窗口缩放和窄列不能让状态文字挤掉实例身份。
+
+面板及会话查看器的 `x` 仅释放已知 v2 idle owner，且必须没有待处理请求；`c` 批量释放同类目标。确认前复读状态，执行时传入捕获的 runId/runtimeId 并复用 onlyIdle 准入，拒绝变忙或换代的目标，不重试。执行中的 Pi/Codex 可用 `t` 中断当前轮，之后才可释放；不改变父代理工具的主动 stop 契约。
+
+默认隐藏 manager 查询已确认关闭所有权的 v2 实例（closed + runtimeClosed），不依赖仅存在于操作响应的 receipt。列表按 `h` 查看历史，结果、原生会话恢复和文件均保留；unreachable 或旧版未确认状态不会冒充已释放。
+
+人工操作记录默认一行折叠，使用 Pi 当前展开键查看完整正文。批量成功只弹出释放数量，部分失败仍显示各目标诊断；原正文、outbox、去重及 `triggerTurn:false` 保持不变。覆盖列表边界、历史恢复、忙碌/换代拒绝、真实本地 fixture 释放和无模型消息组件；不替代人工 TUI 与真实模型验收。
+
 ## Tier selection rules
 
 1. For everyday changes, run the fast tier and relevant domain files. Changes to shared entry points such as `src/index.ts` or notifications/receipts also need the corresponding local acceptance checks.

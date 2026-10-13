@@ -35,7 +35,7 @@ function card(message) {
 const text = (component, width = 120) => component.render(width).map(stripTerminalSequences).join('\n');
 
 test('report rendering is registered without a session or third-party extension, but never in a Pi child', () => {
-  assert.deepEqual([...registration().keys()], [customType]);
+  assert.deepEqual([...registration().keys()], [customType, 'cli-subagents-human-action']);
   const old = process.env.PI_CLI_SUBAGENT;
   try {
     process.env.PI_CLI_SUBAGENT = '1';
@@ -43,6 +43,23 @@ test('report rendering is registered without a session or third-party extension,
   } finally {
     if (old === undefined) delete process.env.PI_CLI_SUBAGENT;
     else process.env.PI_CLI_SUBAGENT = old;
+  }
+});
+
+test('human actions default to one expandable line without changing evidence or passive delivery', () => {
+  const customType='cli-subagents-human-action',renderer=registration().get(customType);
+  assert.equal(typeof renderer,'function');
+  for(const details of [{actionId:'receipt',agentId:id,runId,role:'worker'},undefined]){
+    const message={role:'custom',customType,timestamp:1,display:true,details,
+      content:'[cli-subagents-human-action] HUMAN_BODY_MARKER\nOperation unconfirmed: do not retry blindly\n'+ 'FULL_RECEIPT\n'.repeat(60)};
+    const before=JSON.stringify(message),llm=convertToLlm([message]),c=new CustomMessageComponent(message,renderer);
+    const compact=text(c,160);assert.equal(compact.split('\n').filter(line=>line.trim()).length,1);
+    assert.match(compact,/Human action/);assert.doesNotMatch(compact,/HUMAN_BODY_MARKER|FULL_RECEIPT|completed|released|success/);
+    if(details)assert.match(compact,/worker.*11111111/);
+    for(const width of [1,4,20,40])assert(c.render(width).every(line=>visibleWidth(line)<=width));
+    c.setExpanded(true);assert.match(text(c),/HUMAN_BODY_MARKER/);assert.match(text(c),/unconfirmed/);assert.match(text(c),/FULL_RECEIPT/);
+    c.setExpanded(false);assert.equal(text(c,160),compact);assert.equal(JSON.stringify(message),before);
+    assert.deepEqual(convertToLlm([message]),llm);
   }
 });
 

@@ -1,11 +1,11 @@
 import { matchesKey, stripTerminalSequences, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import type { AgentView } from "../types.js";
-import { canInterrupt, canMessage, canResume, canStop, formatElapsed, framePane, isActive, oneLine, rightAlign, shortId, viewElapsed, viewStatus, PANE_FRAME_COLS, PANE_FRAME_MIN_WIDTH, PANE_FRAME_ROWS, SPINNER, type UiColor, type UiTheme } from "./format.js";
+import { canInterrupt, canMessage, canResume, canRelease, isReleased, formatElapsed, framePane, isActive, oneLine, rightAlign, shortId, viewElapsed, viewStatus, PANE_FRAME_COLS, PANE_FRAME_MIN_WIDTH, PANE_FRAME_ROWS, SPINNER, type UiColor, type UiTheme } from "./format.js";
 
 export type PanelAction =
   | { kind: "view"; id: string }
   | { kind: "message"; id: string; resume: boolean; message?: string }
-  | { kind: "stop"; id: string }
+  | { kind: "stop"; id: string; expected: { runId: string; runtimeId: string } }
   | { kind: "close-idle"; targets: AgentView[] }
   | { kind: "interrupt"; id: string }
   | { kind: "reply"; id: string; questionId: string };
@@ -43,7 +43,9 @@ const isText = (value: string | undefined): value is string => typeof value === 
  * It returns actions; the command handler performs send/close/reply after the pane closes.
  */
 export class AgentsPanel {
-  private readonly agents: AgentView[];
+  private agents: AgentView[];
+  private readonly allAgents: AgentView[];
+  private showReleased = false;
   private readonly idleTargets: AgentView[];
   private readonly now: number;
   private readonly maxRows: number;
@@ -63,10 +65,10 @@ export class AgentsPanel {
     private readonly done: (action: PanelAction | undefined) => void,
     options: { now?: number; maxRows?: number; rows?: number | (() => number); frameColor?: (text: string) => string } = {},
   ) {
-    this.agents = [...(Array.isArray(agents) ? agents : [])]
+    this.allAgents = [...(Array.isArray(agents) ? agents : [])]
       .sort((a, b) => (a.startedAt ?? a.updatedAt) - (b.startedAt ?? b.updatedAt));
-    this.idleTargets = this.agents.filter(agent => agent.phase === "idle" && agent.protocolVersion === 2
-      && !!agent.runtimeId && agent.questions.length === 0);
+    this.agents = this.allAgents.filter(agent => !isReleased(agent));
+    this.idleTargets = this.agents.filter(canRelease);
     this.now = options.now ?? Date.now();
     this.maxRows = options.maxRows ?? PANEL_MAX_ROWS;
     this.frameColor = options.frameColor;
@@ -97,7 +99,12 @@ export class AgentsPanel {
     if (agent && matchesKey(data, "t") && canInterrupt(agent)) { this.finish({ kind: "interrupt", id: agent.id }); return; }
     if (this.view === "list") {
       if (matchesKey(data, "c") && this.idleTargets.length) { this.finish({ kind: "close-idle", targets: this.idleTargets }); return; }
-      if (matchesKey(data, "up")) this.index = Math.max(0, this.index - 1);
+      if (matchesKey(data, "h")) {
+        this.showReleased = !this.showReleased;
+        this.agents = this.showReleased ? this.allAgents : this.allAgents.filter(agent => !isReleased(agent));
+        this.index = 0;
+      }
+      else if (matchesKey(data, "up")) this.index = Math.max(0, this.index - 1);
       else if (matchesKey(data, "down")) this.index = Math.min(this.agents.length - 1, this.index + 1);
       else if (agent && (matchesKey(data, "return") || matchesKey(data, "v"))) this.finish({ kind: "view", id: agent.id });
       else if (agent && matchesKey(data, "i")) { this.view = "detail"; this.scroll = 0; }
@@ -111,7 +118,7 @@ export class AgentsPanel {
     else if (matchesKey(data, "down")) this.scroll = Math.min(Math.max(0, this.bodyLines - this.pageLines), this.scroll + 1);
     else if (agent && matchesKey(data, "s") && canMessage(agent.phase)) this.finish({ kind: "message", id: agent.id, resume: canResume(agent.phase) });
     else if (agent && matchesKey(data, "v")) this.finish({ kind: "view", id: agent.id });
-    else if (agent && matchesKey(data, "x") && canStop(agent.phase)) this.finish({ kind: "stop", id: agent.id });
+    else if (agent && matchesKey(data, "x") && canRelease(agent)) this.finish({ kind: "stop", id: agent.id, expected: { runId: agent.runId, runtimeId: agent.runtimeId } });
     else if (agent && question && matchesKey(data, "r")) this.finish({ kind: "reply", id: agent.id, questionId: question.id });
     else if (matchesKey(data, "q")) this.finish(undefined);
   }
@@ -159,11 +166,12 @@ export class AgentsPanel {
     const lines = [this.theme.bold(this.theme.fg("accent", `Subagents (${this.agents.length})`))];
     if (!this.agents.length) {
       lines.push(this.theme.fg("dim", "No subagents in this session"));
-      lines.push(this.hint([["esc", "close"]]));
+      lines.push(this.hint(this.allAgents.some(isReleased) ? [["h", "history"], ["esc", "close"]] : [["esc", "close"]]));
       return this.room > 0 ? lines.slice(0, this.room) : lines;
     }
     const selected = Math.min(this.index, this.agents.length - 1);
     const hints: [string, string][] = [["↑↓", "select"], ["enter/v", "conversation"], ["i", "details"], ["esc", "close"]];
+    if (this.allAgents.some(isReleased)) hints.unshift(["h", this.showReleased ? "hide released" : "history"]);
     if (canInterrupt(this.agents[selected])) hints.unshift(["t", "interrupt"]);
     if (this.idleTargets.length) hints.unshift(["c", `release idle (${this.idleTargets.length})`]);
     lines.push(this.hint(hints));
@@ -231,7 +239,7 @@ export class AgentsPanel {
       ? [this.theme.fg("dim", `  ${questions.length} requests pending; r answers them one at a time`)] : [];
     if (question && room > 0 && room < DETAIL_FULL_ROWS) {
       const hints: [string, string][] = [["r", "reply"], ["v", "conversation"], ["esc", "back"], ["q", "close"]];
-      if (canInterrupt(agent)) hints.unshift(["t", "interrupt"], ["x", "stop"]);
+      if (canInterrupt(agent)) hints.unshift(["t", "interrupt"]);
       return [lines[0], this.field("ID", agent.id), this.section("Waiting for a response"),
         ...this.wrapBody(question.title, width, Math.max(1, room - 6)),
         ...queue,
@@ -260,12 +268,9 @@ export class AgentsPanel {
     if (agent.truncated) lines.push(this.theme.fg("dim", "  ... (Result clipped; see the result file for full content)"));
 
     const hint: [string, string][] = [["esc/←", "back"], ["↑↓", "scroll"], ["v", "conversation"]];
-    if (canInterrupt(agent)) hint.unshift(["t", "interrupt"], ["x", "stop"]);
-    if (agent.phase === "idle") hint.unshift(["x", "release"], ["s", "new task"]);
-    else {
-      if (canMessage(agent.phase)) hint.push(["s", canResume(agent.phase) ? "resume" : "message"]);
-      if (canStop(agent.phase) && !canInterrupt(agent)) hint.push(["x", "stop"]);
-    }
+    if (canInterrupt(agent)) hint.unshift(["t", "interrupt"]);
+    if (canRelease(agent)) hint.unshift(["x", "release"]);
+    if (canMessage(agent.phase)) hint.push(["s", canResume(agent.phase) ? "resume" : agent.phase === "idle" ? "new task" : "message"]);
     if (question) hint.push(["r", "reply"]);
     hint.push(["q", "close"]);
     lines.push("", this.hint(hint));

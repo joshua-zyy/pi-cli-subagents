@@ -242,7 +242,7 @@ test('viewer offers t only for v2 Pi/Codex active runs, including while history 
 
 test('viewer leaves Ctrl+C unhandled and preserves k scrolling, composer typing and x release', async t => {
   const actions = [], sent = [];
-  const agent = { ...state, cli: 'pi', protocolVersion: 2 };
+  const agent = { ...state, cli: 'pi', protocolVersion: 2, phase:'idle', runtimeId:'runtime', questions:[] };
   const tui = { terminal: { rows: 16, columns: 80 }, requestRender() {} };
   const viewer = new ConversationViewer(tui, theme, action => actions.push(action), async () => ({ agent,
     entries: Array.from({ length: 30 }, (_, i) => entry(i)), loading: false }), { intervalMs: 1000, onSend: message => { sent.push(message); } });
@@ -252,19 +252,19 @@ test('viewer leaves Ctrl+C unhandled and preserves k scrolling, composer typing 
   viewer.handleInput('\r'); viewer.handleInput('t'); viewer.handleInput('x'); viewer.handleInput('i'); viewer.handleInput('\x03');
   assert.deepEqual(actions, []); viewer.handleInput('\r'); await new Promise(setImmediate);
   assert.deepEqual(sent, ['txi'], 'the composer owns ordinary letters');
-  viewer.handleInput('x'); assert.deepEqual(actions, [{ kind: 'stop', id: agent.id }]);
+  viewer.handleInput('x'); assert.deepEqual(actions, [{ kind: 'stop', id: agent.id, expected:{runId:agent.runId,runtimeId:agent.runtimeId} }]);
 });
 
-test('narrow viewer retains both interrupt and release while preserving idle failure visibility', async () => {
+test('narrow viewer offers interruption for active work and release only for idle owners while retaining failure evidence', async () => {
   for (const phase of ['running', 'waiting', 'idle']) for (const width of [40, 80]) for (const rows of [8, 16]) {
-    const agent = { ...state, cli: 'codex', protocolVersion: 2, phase, lastStatus: 'failed', error: 'failure evidence '.repeat(20) };
+    const agent = { ...state, cli: 'codex', protocolVersion: 2, runtimeId:'runtime', questions:[], phase, lastStatus: 'failed', error: 'failure evidence '.repeat(20) };
     const viewer = new ConversationViewer({ terminal: { rows, columns: width }, requestRender() {} }, theme, () => {},
       async () => ({ agent, entries: [], loading: false, model: 'long-model-name-for-state-visibility', usageComplete: false }), { onSend() {}, intervalMs: 1000 });
     try {
       await new Promise(setImmediate); const frame = viewer.render(width), text = frame.join('\n');
       assert.ok(frame.length <= rows); assert.ok(frame.every(line => visibleWidth(line) <= width && !/[\r\n]/.test(line)));
       if (phase === 'idle') { assert.match(text, /Idle.*Failed/); assert.match(text, /x release/); assert.doesNotMatch(text, /t interrupt/); }
-      else { assert.match(text, /t interrupt/); assert.match(text, /x stop/); }
+      else { assert.match(text, /t interrupt/); assert.doesNotMatch(text, /x stop|x release/); viewer.handleInput('x'); }
     } finally { viewer.dispose(); }
   }
 });

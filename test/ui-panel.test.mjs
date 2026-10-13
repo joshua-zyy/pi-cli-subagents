@@ -18,6 +18,32 @@ function panel(agents, options = {}) {
 }
 const text = rows => rows.join('\n');
 
+test('released instances are hidden by default but remain available in explicit history', () => {
+  const released=view({id:'released',phase:'closed',protocolVersion:2,runtimeClosed:true,text:'RESULT_EVIDENCE',sessionId:'original'});
+  const uncertain=view({id:'uncertain',phase:'closed',receipt:{status:'unconfirmed'}});
+  const p=panel([released,view({id:'active'}),uncertain]);
+  assert.match(text(p.render(160)),/Subagents \(2\)/);assert.doesNotMatch(text(p.render(160)),/worker released/);
+  assert.match(text(p.render(160)),/h history/);p.instance.handleInput('h');
+  assert.match(text(p.render(160)),/worker released/);p.instance.handleInput('i');
+  assert.match(text(p.render(160)),/RESULT_EVIDENCE/);assert.match(text(p.render(160)),/s resume/);
+  p.instance.handleInput(keys.escape);p.instance.handleInput('h');assert.doesNotMatch(text(p.render(160)),/worker released/);
+  const empty=panel([released]);assert.match(text(empty.render(160)),/Subagents \(0\)/);
+  assert.match(text(empty.render(160)),/h history/);empty.instance.handleInput('h');
+  empty.instance.handleInput('i');empty.instance.handleInput('s');
+  assert.deepEqual(empty.actions,[{kind:'message',id:'released',resume:true}]);
+});
+
+test('x releases only a captured idle runtime with no questions, never an executing or unknown runtime', () => {
+  for(const phase of ['starting','running','waiting','stopping','idle','closed','completed','failed','stopped','unreachable'])
+  for(const protocolVersion of [undefined,2]) for(const runtimeId of [undefined,'native-owner']) for(const questions of [[],[{id:'q',title:'Pending permission',method:'confirm'}]]){
+    const agent=view({phase,protocolVersion,runtimeId,questions}),p=panel([agent]);
+    p.instance.handleInput('i');const allowed=phase==='idle'&&protocolVersion===2&&!!runtimeId&&questions.length===0;
+    assert.equal(text(p.render(180)).includes('x release'),allowed,JSON.stringify(agent));
+    assert.doesNotMatch(text(p.render(180)),/x stop/);p.instance.handleInput('x');
+    assert.deepEqual(p.actions,allowed?[{kind:'stop',id:agent.id,expected:{runId:agent.runId,runtimeId}}]:[]);
+  }
+});
+
 test('c captures only eligible idle runtimes even while an active row is selected', () => {
   const eligible = view({ id: 'idle', phase: 'idle', protocolVersion: 2, runtimeId: 'runtime' });
   const agents = [view(), eligible, view({ phase: 'closed', protocolVersion: 2, runtimeId: 'closed' }),
@@ -158,11 +184,11 @@ test('s/x/r/v return the intended action exactly once', () => {
   for (const [phase, key, expected] of [
     ['running', 's', { kind: 'message', id: 'a1', resume: false }],
     ['completed', 's', { kind: 'message', id: 'a1', resume: true }],
-    ['running', 'x', { kind: 'stop', id: 'a1' }],
+    ['idle', 'x', { kind: 'stop', id: 'a1', expected: {runId:'r1',runtimeId:'runtime'} }],
     ['running', 'v', { kind: 'view', id: 'a1' }],
     ['waiting', 'r', { kind: 'reply', id: 'a1', questionId: 'q1' }],
   ]) {
-    const p = panel([view({ phase, questions: [{ id: 'q1', method: 'confirm', title: 'Allow?' }] })]);
+    const p = panel([view({ phase, protocolVersion:2, runtimeId:'runtime', questions: phase === 'waiting' ? [{ id: 'q1', method: 'confirm', title: 'Allow?' }] : [] })]);
     p.instance.handleInput('i'); p.instance.handleInput(key); assert.deepEqual(p.actions, [expected]);
     p.instance.handleInput('x'); p.instance.handleInput(keys.escape); assert.equal(p.actions.length, 1); assert.ok(p.render().length);
   }
@@ -237,7 +263,7 @@ test('interrupt does not reuse i, x or Ctrl+C and stays visible within small pan
   const p = panel([active]);
   p.instance.handleInput('\x03'); assert.deepEqual(p.actions, []);
   p.instance.handleInput('i'); assert.equal(p.instance.mode, 'detail');
-  p.instance.handleInput('x'); assert.deepEqual(p.actions, [{ kind: 'stop', id: active.id }]);
+  p.instance.handleInput('x'); assert.deepEqual(p.actions, [], 'executing work cannot be released by x');
   for (const phase of ['running', 'waiting']) for (const rows of [8, 16, 24]) for (const width of [40, 70]) {
     const small = panel([view({ ...active, phase, error: 'failure evidence', text: 'partial output',
       questions: phase === 'waiting' ? [{ id: 'q', method: 'confirm', title: 'Permission details' }] : [] })], { rows });
@@ -247,7 +273,7 @@ test('interrupt does not reuse i, x or Ctrl+C and stays visible within small pan
     assert.ok(rendered.length <= rows);
     assert.ok(rendered.every(line => visibleWidth(line) <= width && !/[\r\n]/.test(line)));
     assert.match(text(rendered), /t interrupt/);
-    assert.match(text(rendered), /x stop/);
+    assert.doesNotMatch(text(rendered), /x stop|x release/);
     if (phase === 'waiting' && rows >= 16) assert.match(text(rendered), /Permission details/);
   }
 });

@@ -3,10 +3,10 @@ import type { AgentView } from "../types.js";
 import type { PanelAction } from "./panel.js";
 import type { TranscriptEntry, TranscriptPageBoundary, TranscriptSnapshot } from "../transcript.js";
 import { ConversationHistory } from "./conversation-history.js";
-import { canInterrupt, canMessage, canResume, canStop, formatElapsed, formatTokens, hasFailure, isActive, oneLine, rightAlign, shortId, viewElapsed, viewStatus } from "./format.js";
+import { canInterrupt, canMessage, canResume, canRelease, formatElapsed, formatTokens, hasFailure, isActive, oneLine, rightAlign, shortId, viewElapsed, viewStatus } from "./format.js";
 
 export interface ConversationSnapshot extends TranscriptSnapshot {
-  agent: Pick<AgentView, "id" | "role" | "phase" | "runId"> & Partial<Pick<AgentView, "startedAt" | "updatedAt" | "lastStatus" | "error" | "cli" | "protocolVersion">>;
+  agent: Pick<AgentView, "id" | "role" | "phase" | "runId"> & Partial<Pick<AgentView, "startedAt" | "updatedAt" | "lastStatus" | "error" | "cli" | "protocolVersion" | "runtimeId" | "questions">>;
 }
 /** Structural subset of Pi's theme; tests can pass a minimal object. */
 export interface ViewerTheme {
@@ -426,7 +426,7 @@ export class ConversationViewer {
     else if (agent && !this.sending && matchesKey(data, "s") && canMessage(agent.phase)) {
       this.finish({ kind: "message", id: agent.id, resume: canResume(agent.phase) }); return;
     } else if (agent && matchesKey(data, "t") && canInterrupt(agent)) { this.finish({ kind: "interrupt", id: agent.id }); return; }
-    else if (agent && matchesKey(data, "x") && canStop(agent.phase)) { this.finish({ kind: "stop", id: agent.id }); return; }
+    else if (agent && matchesKey(data, "x") && canRelease(agent)) { this.finish({ kind: "stop", id: agent.id, expected: { runId: agent.runId, runtimeId: agent.runtimeId } }); return; }
     if (direction === "newer" && this.follow && (this.pagingInFlight === "older" || this.history.readerWindow?.atEnd === false)) this.requestPage("latest");
     if (this.follow && !wasFollowing && !this.pagingInFlight && !this.pagingQueued && this.history.readerSnapshot) {
       this.adopt(this.history.readerSnapshot);
@@ -510,7 +510,7 @@ export class ConversationViewer {
     if (toolKey && this.snapshot?.entries.some(entry => entry.kind === "tool")) hints.push(`${toolKey} tools`);
     if (agent && this.onSend && !this.sending && canMessage(agent.phase)) hints.push(canResume(agent.phase) ? "Enter resume" : agent.phase === "idle" ? "Enter new task" : "Enter message");
     if (agent && canInterrupt(agent)) hints.push("t interrupt");
-    if (agent && canStop(agent.phase)) hints.push(agent.phase === "idle" ? "x release" : "x stop");
+    if (agent && canRelease(agent)) hints.push("x release");
     hints.push("Esc close");
     // Keep the most useful hints when the width is limited: dismissal and actions first, then scrolling.
     const styled = (items: string[]): string => this.theme.fg("dim", items.join(" · "));
