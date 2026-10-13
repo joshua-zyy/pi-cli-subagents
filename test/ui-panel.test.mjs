@@ -99,6 +99,29 @@ test('arrow navigation clamps selection and keeps it in the visible window', () 
   assert.equal(instance.selection, 2); const rows = render(); assert.match(text(rows), /↑ 1 more/);
   assert.ok(!text(rows).includes('↓ 1 more')); assert.ok(rows.slice(2).some(row => row.includes('›'))); assert.equal(PANEL_MAX_ROWS, 8);
 });
+test('large rosters keep every selected identity visible within the actual row budget through resize', () => {
+  let height=12;
+  const agents=Array.from({length:24},(_,i)=>view({id:`id${String(i).padStart(5,'0')}`,startedAt:i,phase:'idle',lastStatus:'completed',updatedAt:1000}));
+  const p=panel(agents,{rows:()=>height,now:1000000});
+  for(const direction of [keys.down,keys.up])for(let step=0;step<24;step++) {
+    const id=agents[p.instance.selection].id;
+    for(height of [1,2,4,6,8,12])for(const width of [26,40,80,140]) {
+      const lines=p.framed(width);assert(lines.length<=height,`height ${height}: ${lines.length}`);
+      assert(lines.every(line=>visibleWidth(line)<=width&&!/[\r\n]/.test(line)));
+      assert(lines.some(line=>line.includes('›')&&line.includes(id)),`selected ${id} missing at ${height}x${width}: ${text(lines)}`);
+    }
+    p.instance.handleInput(direction);
+  }
+});
+
+test('a list spends spare rows on instances instead of reserving nonexistent scroll indicators', () => {
+  const agents=Array.from({length:20},(_,i)=>view({id:`item${i}`,startedAt:i}));
+  const p=panel(agents,{rows:10});
+  assert.equal(p.render(120).filter(line=>/worker item/.test(line)).length,5,'8 body rows = title + hints + 5 instances + down indicator');
+  for(let i=0;i<19;i++)p.instance.handleInput(keys.down);
+  assert.match(text(p.render(120)),/›.*item19/);
+});
+
 test('i opens details including task, result, log and session; Esc navigates back', () => {
   const { instance, actions, render } = panel([view({ sessionId: 'sid-1', text: 'OK complete', lastActivity: 'tool_execution_end: bash' })]);
   instance.handleInput('i'); assert.equal(instance.mode, 'detail'); const rows = render(); const body = text(rows);

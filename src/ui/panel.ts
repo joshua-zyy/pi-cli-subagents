@@ -1,4 +1,4 @@
-import { matchesKey, stripTerminalSequences, truncateToWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
+import { matchesKey, stripTerminalSequences, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import type { AgentView } from "../types.js";
 import { canInterrupt, canMessage, canResume, canStop, formatElapsed, framePane, isActive, oneLine, rightAlign, shortId, viewElapsed, viewStatus, PANE_FRAME_COLS, PANE_FRAME_MIN_WIDTH, PANE_FRAME_ROWS, SPINNER, type UiColor, type UiTheme } from "./format.js";
 
@@ -118,7 +118,7 @@ export class AgentsPanel {
 
   render(width: number): string[] {
     // The frame takes its columns from the content, so the body is laid out inside it.
-    this.framed = width >= PANE_FRAME_MIN_WIDTH;
+    this.framed = width >= PANE_FRAME_MIN_WIDTH && (this.rows === 0 || this.rows > PANE_FRAME_ROWS);
     const inner = this.framed ? Math.max(1, width - PANE_FRAME_COLS) : width;
     let lines = this.view === "list" ? this.renderList(inner) : this.renderDetail(inner);
     const room = this.room;
@@ -160,25 +160,27 @@ export class AgentsPanel {
     if (!this.agents.length) {
       lines.push(this.theme.fg("dim", "No subagents in this session"));
       lines.push(this.hint([["esc", "close"]]));
-      return lines;
+      return this.room > 0 ? lines.slice(0, this.room) : lines;
     }
     const selected = Math.min(this.index, this.agents.length - 1);
     const hints: [string, string][] = [["↑↓", "select"], ["enter/v", "conversation"], ["i", "details"], ["esc", "close"]];
     if (canInterrupt(this.agents[selected])) hints.unshift(["t", "interrupt"]);
     if (this.idleTargets.length) hints.unshift(["c", `release idle (${this.idleTargets.length})`]);
     lines.push(this.hint(hints));
-    const room = this.room;
-    // Title and hints are fixed; the two "more" indicators give way to agents when the pane is short.
-    const indicators = room === 0 || room - 2 >= 4;
-    const visible = Math.min(this.maxRows, this.agents.length,
-      room > 0 ? Math.max(1, room - 2 - (indicators ? 2 : 0)) : this.maxRows);
-    const start = selected < visible ? 0 : selected - visible + 1;
-    const hiddenAbove = start;
-    if (hiddenAbove > 0 && indicators) lines.push(rightAlign("", this.theme.fg("dim", `↑ ${hiddenAbove} more`), width));
-    for (let index = start; index < start + visible; index++) lines.push(this.agentRow(index, selected, width));
-    const hiddenBelow = this.agents.length - start - visible;
-    if (hiddenBelow > 0 && indicators) lines.push(rightAlign("", this.theme.fg("dim", `↓ ${hiddenBelow} more`), width));
-    return lines;
+    const limit = this.room || this.maxRows + lines.length + 2;
+    // Keep one selectable row before headers, then charge only indicators that actually exist.
+    const header = lines.slice(0, Math.max(0, limit - 1)), budget = limit - header.length;
+    let visible = Math.max(1, Math.min(this.maxRows, this.agents.length, budget));
+    let start = Math.max(0, selected - visible + 1);
+    while (visible > 1 && visible + Number(start > 0) + Number(start + visible < this.agents.length) > budget) {
+      visible--; start = Math.max(0, selected - visible + 1);
+    }
+    let spare = budget - visible;
+    if (start > 0 && spare > 0) { header.push(rightAlign("", this.theme.fg("dim", `↑ ${start} more`), width)); spare--; }
+    for (let index = start; index < start + visible; index++) header.push(this.agentRow(index, selected, width));
+    const below = this.agents.length - start - visible;
+    if (below > 0 && spare > 0) header.push(rightAlign("", this.theme.fg("dim", `↓ ${below} more`), width));
+    return header;
   }
 
   private agentRow(index: number, selected: number, width: number): string {
@@ -191,7 +193,10 @@ export class AgentsPanel {
     const role = current ? this.theme.bold(this.theme.fg("text", agent.role)) : this.theme.fg("muted", agent.role);
     const task = oneLine(agent.task, 80) || "(No task summary)";
     const stats = `${status.label} · ${formatElapsed(viewElapsed(agent, this.now))}`;
-    const left = `  ${cursor} ${this.theme.fg(status.color, icon)} ${role} ${this.theme.fg("dim", shortId(agent.id))}  ${current ? this.theme.fg("text", task) : this.theme.fg("dim", task)}`;
+    const identity = `  ${cursor} ${this.theme.fg(status.color, icon)} ${role} ${this.theme.fg("dim", shortId(agent.id))}`;
+    const left = `${identity}  ${current ? this.theme.fg("text", task) : this.theme.fg("dim", task)}`;
+    // A long idle/outcome label must not crowd out the cursor or the instance's identity.
+    if (width > 0 && visibleWidth(identity) + 2 + visibleWidth(stats) > width) return truncateToWidth(left, width, "");
     return rightAlign(left, current ? this.theme.fg("text", stats) : this.theme.fg("dim", stats), width);
   }
 
