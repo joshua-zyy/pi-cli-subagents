@@ -55,7 +55,7 @@ export const canResume = (phase: Phase): boolean => ["completed", "failed", "sto
 export const canInterrupt = (view: Pick<AgentView, "protocolVersion" | "cli" | "phase">): boolean =>
   view.protocolVersion === 2 && (view.cli === "pi" || view.cli === "codex" || view.cli === "claude") && ["starting", "running", "waiting"].includes(view.phase);
 
-/** Waiting children do not accept messages; their questions must go through /agent-reply. */
+/** Waiting children do not accept messages; answer their requests through subagent_reply or /agents. */
 export const canSteer = (phase: Phase): boolean => phase === "starting" || phase === "running";
 
 /**

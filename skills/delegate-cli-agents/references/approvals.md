@@ -56,7 +56,7 @@ limits (8192 UTF-16 code units per string, 32768 encoded answer characters). Can
 question without explicitly interrupting the turn. Do not replace an answer with `Approve once`,
 change shown input, supply host annotations/timeout fields, or write native permission updates.
 Native policy signals (classifier not approvable, rule-forced asks, matched ask rules) appear in the
-request message as context; they do not require `/agent-reply`. The recognized question card is
+request message as context; they do not require human intervention. The recognized question card is
 the only supported exception to the generic dedicated-dialog refusal. Unknown forms remain refused.
 
 ## Decide
@@ -65,7 +65,7 @@ Inspect the full request and compare it with the user's original authorization. 
 one-action decision yourself using `subagent_reply`; the presence of a permission prompt is not a
 reason to ask the user again. Escalate if context, effects or authorization are unclear, or the user
 explicitly requires their confirmation. Otherwise deny or cancel, or explain the specific missing authorization
-and give `/agent-reply <agentId> <questionId>` when a human decision is needed. Supply a concrete
+and direct the human to `/agents`, select the child, `i` details and `r` reply. The panel also answers non-blocking requests while the child is running. Supply a concrete
 `reason`: every decision is recorded locally with the actor who made it.
 
 Approve only the authorized action. Do not grant blanket, session-wide or permanent permissions, or
@@ -78,7 +78,7 @@ requires an exact native option in `value`; `confirm` uses `confirmed`; `input`/
 `value`. Cancellation is available for all four. Read the complete request and decide within scope;
 there is no special safety-guard button whitelist and no automatic approval. Claude and Codex retain
 their native one-action mappings; Claude's native policy signals are context for your decision, not a block. A request without a stated policy,
-including a legacy record, remains refusal-only for the parent; the human can use `/agent-reply`.
+including a legacy record, remains refusal-only for the parent; the human can answer in `/agents`.
 
 ## Boundaries the parent cannot cross
 

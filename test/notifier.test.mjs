@@ -67,7 +67,7 @@ test('waiting notifications describe native response shapes without guessing aut
   assert.match(content, /You may submit "Allow for this session", "Skip this check", "Continue once", or cancelled/);
   assert.match(content, /not proof.*authoriz/i);
   assert.match(content, /user.*requires.*confirmation/i);
-  assert.match(content, /Question ID: q2 \(confirm\)\. You may only refuse it \(confirmed: false or cancelled\); the human answers it with \/agent-reply agent q2\./);
+  assert.match(content, /Question ID: q2 \(confirm\)\. You may only refuse it \(confirmed: false or cancelled\); the human answers it with \/agents \(select agent, i details, r reply\)\./);
   for(const method of ['input','editor'])assert.match(content,new RegExp(`Question ID: ${method}.*value as response text`));
   assert.ok(content.includes(longRequest), 'the complete decision input must reach the parent, including its middle');
   assert.doesNotMatch(content, /characters omitted|truncated preview/);assert.match(content, /Question ID: q3/);
@@ -97,9 +97,9 @@ test('human-required requests remain visible even when the parent stays silent',
   ], pending = new Set();
   deliverReports(h.manager, h.pi, h.ctx, pending, Date.now(), states);
   assert.equal(h.notifications.length, 1, 'native human-only restrictions must not be mistaken for routine parent review');
-  assert.match(h.notifications[0][0], /\/agent-reply agent q2/);
+  assert.match(h.notifications[0][0], /\/agents.*i details, r reply/);
   assert.equal(h.notifications[0][1], 'warning');
-  assert.match(h.statuses.at(-1)[1], /1 child request needs your decision: \/agent-reply agent q2/);
+  assert.match(h.statuses.at(-1)[1], /1 child request needs your decision: \/agents.*select agent.*r reply/);
   h.entries.push({ type: 'custom_message', ...h.sent[0].message });
   deliverReports(h.manager, h.pi, h.ctx, pending, Date.now(), states);
   assert.equal(h.notifications.length, 1, 'persisted delivery must not prompt the human twice');

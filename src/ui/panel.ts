@@ -129,8 +129,8 @@ export class AgentsPanel {
       else if (matchesKey(data, "escape") || matchesKey(data, "q")) this.finish(undefined);
       return;
     }
-    // Waiting children require /agent-reply; idle starts a new run without native resume.
-    const question = agent?.phase === "waiting" ? agent.questions?.[0] : undefined;
+    // Pending requests can be non-blocking; idle starts a new run without native resume.
+    const question = agent?.questions?.[0];
     if (matchesKey(data, "escape") || matchesKey(data, "left") || matchesKey(data, "h")) this.view = "list";
     else if (matchesKey(data, "up")) this.scroll = Math.max(0, this.scroll - 1);
     else if (matchesKey(data, "down")) this.scroll = Math.min(Math.max(0, this.bodyLines - this.pageLines), this.scroll + 1);
@@ -249,7 +249,7 @@ export class AgentsPanel {
     lines.push("", this.section("Latest activity"));
     lines.push(...this.wrapBody(isText(agent.lastActivity) ? oneLine(agent.lastActivity, 200) : "None", width, 1), "");
 
-    const questions = agent.phase === "waiting" ? agent.questions ?? [] : [];
+    const questions = agent.questions ?? [];
     const question = questions[0];
     // Answering needs no IDs: `r` takes the request on screen, and the next one after that.
     // Only the queue depth is worth stating, because the panel shows one request at a time.

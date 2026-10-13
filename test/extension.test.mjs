@@ -49,7 +49,7 @@ test('extension tools implement → separate review → resume same implementer;
   });
   extension(pi);
   assert.deepEqual([...tools.keys()], ['subagent', 'subagent_query', 'subagent_reply']);
-  assert.ok(commands.has('agent-reply')); assert.ok(commands.has('cli-agents-setting'));
+  assert.deepEqual([...commands.keys()].sort(), ['agents', 'cli-agents-setting']);
   handlers.session_start({ type: 'session_start', reason: 'startup' }, ctx);
   const invoke = async (tool, params) => (await tools.get(tool).execute('id', params, undefined, undefined, ctx)).content[0].text;
   const complete = async id => {

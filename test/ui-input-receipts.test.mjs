@@ -278,7 +278,8 @@ test('human task answers collect custom text locally and submit one logical repl
       h.ctx.hasUI=true;
       h.ctx.ui.select=async(title,options)=>{assert.match(title,/Fast tests/);assert.deepEqual(options,['Unit','Integration','Type something.']);return 'Type something.';};
       h.ctx.ui.input=async()=>value;
-      await h.commands.get('agent-reply').handler(h.before.id+' logical-question',h.ctx);
+      h.open(); h.press('i'); h.press('r');
+      await waitUntil('human answer action', () => h.messages.length === 1, 2000);
       assert.deepEqual(replies,[{id:h.before.id,questionId:'logical-question',answer:value===undefined?{cancelled:true}:{value}}]);
       assert(h.notices.some(n=>n.type==='info'&&/response accepted/.test(n.message)));
       assert.equal(h.messages.filter(m=>m.message.customType==='cli-subagents-human-action').length,1);
@@ -288,8 +289,8 @@ test('human task answers collect custom text locally and submit one logical repl
 
 test('human Codex forms collect fields once, warn about visible sensitive input, and cancel atomically', async t => {
   for (const [value, custom] of [['literal context', false], ['custom context', true], [undefined, false], [undefined, true]]) {
-    const h = harness(t, 'waiting'), replies = [];
-    h.before.questions = [{ id: 'native-form', method: 'form', kind: 'question', parentPolicy: { answers: true }, fields: [
+    const h = harness(t, 'running'), replies = [];
+    h.before.questions = [{ id: 'native-form', method: 'form', kind: 'question', isBlocking: false, parentPolicy: { answers: true }, fields: [
       { id: 'checks', header: 'Tests', question: 'Which checks?', options: [{ label: 'Unit', description: 'Focused checks' }], allowOther: custom, isSecret: false },
       { id: 'context', header: 'Context', question: 'Supply context', options: [], allowOther: true, isSecret: true },
     ] }];
@@ -307,7 +308,8 @@ test('human Codex forms collect fields once, warn about visible sensitive input,
         if (custom && title.includes('Which checks')) return value === undefined ? undefined : 'Custom checks';
         assert.match(title, /sensitive|secret/i); assert.match(title, /visible|not masked/i); return value;
       };
-      await h.commands.get('agent-reply').handler(h.before.id + ' native-form', h.ctx);
+      h.open(); h.press('i'); h.press('r');
+      await waitUntil('non-blocking form action', () => h.messages.length === 1, 2000);
       assert.deepEqual(replies, [{ id: h.before.id, questionId: 'native-form', answer: value === undefined ? { cancelled: true } : { answers: { checks: [custom ? 'Custom checks' : 'Unit'], context: [value] } } }]);
       const action = h.messages.find(m => m.message.customType === 'cli-subagents-human-action'); assert(action);
       if (value) assert(!action.message.content.includes(value), 'the human-action summary need not repeat answer contents');
@@ -342,7 +344,8 @@ test('human multi-select forms toggle choices, preserve previews, allow explicit
         return options.find(value=>/^\d+\. Finish selection\./.test(value));
       };
       h.ctx.ui.input=async()=>{assert(inputs.length);return inputs.shift();};
-      await h.commands.get('agent-reply').handler(h.before.id+' claude-form',h.ctx);
+      h.open(); h.press('i'); h.press('r');
+      await waitUntil('multi-select form action', () => h.messages.length === 1, 2000);
       assert.deepEqual(replies,[{id:h.before.id,questionId:'claude-form',answer:scenario.answer}]);
       assert.equal(steps.length,0);assert.equal(inputs.length,0);
     } finally {reply.mock.restore();await h.close();}
@@ -363,7 +366,8 @@ test('human form display escapes controls while preserving native field IDs and 
       displays.push({title,options});
       return ++menus===3?options.at(-1):options[0];
     };
-    await h.commands.get('agent-reply').handler(h.before.id+' untrusted-form',h.ctx);
+    h.open(); h.press('i'); h.press('r');
+    await waitUntil('escaped form action', () => h.messages.length === 1, 2000);
     assert.equal(menus,3);
     for(const {title,options} of displays) {
       for(const text of [title,...options]) assert.doesNotMatch(text,/[\x00-\x08\x0b-\x1f\x7f-\x9f\u061c\u200e-\u200f\u2028-\u202e\u2066-\u2069]/u);

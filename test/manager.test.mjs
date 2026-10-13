@@ -232,7 +232,7 @@ test('permissions remain waiting until an explicit human reply', { timeout: 20_0
   await waitUntil('question', () => manager.get(start.id).phase === 'waiting');
   assert.equal(manager.get(start.id).questions.length, 1);
   assert.equal(manager.reports()[0].status, 'waiting');
-  await assert.rejects(manager.send(start.id, 'yes'), /agent-reply/);
+  await assert.rejects(manager.send(start.id, 'yes'), /subagent_reply/);
   await manager.reply(start.id, 'permission-1', { confirmed: false });
   assert.equal((await complete(manager, start.id)).text, 'DENY');
   assert.ok(manager.reports().every(r => r.status !== 'waiting'));

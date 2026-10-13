@@ -224,6 +224,17 @@ test('failed instances show errors; waiting instances show sanitized questions',
   assert.ok(!question.includes('/agent-reply'), 'a single request must not ask for its ID');
   assert.ok(!question.includes('requests pending'));
 });
+test('running non-blocking requests remain visible and answerable in compact and full details', () => {
+  for (const rows of [0, 12, 30]) {
+    const question = { id: 'async-task', method: 'form', title: 'Supply task context', isBlocking: false };
+    const p = panel([view({ cli: 'codex', phase: 'running', questions: [question] })], { rows });
+    p.instance.handleInput('i');
+    assert.match(text(p.render(160)), /Supply task context/); assert.match(text(p.render(160)), /r reply/);
+    p.instance.handleInput('r'); p.instance.handleInput('r');
+    assert.deepEqual(p.actions, [{ kind: 'reply', id: 'a1', questionId: 'async-task' }]);
+  }
+});
+
 test('a queue of requests is announced without asking the human for IDs', () => {
   const p = panel([view({ phase: 'waiting', questions: [{ id: 'q1', method: 'confirm', title: 'Allow?' }, { id: 'q2', method: 'confirm', title: 'Allow again?' }] })]);
   p.instance.handleInput('i'); const body = text(p.render());

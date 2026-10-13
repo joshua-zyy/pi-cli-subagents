@@ -290,7 +290,7 @@ ${view(state)}`);
   });
   pi.registerTool({
     name: "subagent_reply", label: "Answer child interaction",
-    description: "Answer a child's current task question or review its permission request within the user's authorization. Read the complete request first; parentPolicy defines supported replies, not authorization or one-action effects. Submit exactly one response matching the request. Task answers provide context, not new authorization.\n\nHandle routine authorized decisions yourself. Never grant session-wide or persistent permissions. Escalate unclear context, effects or authorization, explicit user-confirmation requirements, or requests requiring the human UI; explain the decision needed and use /agent-reply.",
+    description: "Answer a child's current task question or review its permission request within the user's authorization. Read the complete request first; parentPolicy defines supported replies, not authorization or one-action effects. Submit exactly one response matching the request. Task answers provide context, not new authorization.\n\nHandle routine authorized decisions yourself. Never grant session-wide or persistent permissions. Escalate unclear context, effects or authorization, explicit user-confirmation requirements, or requests requiring the human UI; explain the decision needed and use /agents (select the child, i details, r reply).",
     parameters: Type.Object({
       id: Type.String({ description: "Existing instance ID" }),
       questionId: Type.String({ description: "Exact current interaction ID" }),
@@ -317,7 +317,6 @@ ${view(state)}`);
   };
   async function replyPrompt(ctx: ExtensionContext, manager: AgentManager, id: string, questionId: string): Promise<void> {
     const epoch = sessionEpoch;
-    if (!ctx.hasUI) throw new Error("Interaction requires a TUI or an RPC client with dialogs");
     const q: Question | undefined = manager.get(id).questions.find((entry) => entry.id === questionId);
     if (!q) throw new Error("This request has ended or does not belong to this session");
     let answer: { value?: string; answers?: QuestionAnswers; confirmed?: boolean; cancelled?: boolean };
@@ -393,18 +392,6 @@ ${view(state)}`);
     if (epoch === sessionEpoch) ctx.ui.notify(`Human response accepted for subagent ${id}`, "info");
   }
 
-  pi.registerCommand("agent-reply", {
-    description: "Answer a child interaction: /agent-reply <agentId> <questionId>",
-    handler: async (args, ctx) => {
-      const epoch = sessionEpoch;
-      try {
-        const [id, questionId] = args.trim().split(/\s+/);
-        if (!id || !questionId) throw new Error("Usage: /agent-reply <agentId> <questionId>");
-        await replyPrompt(ctx, parentManager(ctx, launch), id, questionId);
-      } catch (error) { if (epoch === sessionEpoch) ctx.ui.notify((error as Error).message, "error"); }
-    },
-  });
-
   async function sendHuman(ctx: ExtensionContext, manager: AgentManager, id: string, message: string, epoch: number, action: string): Promise<AgentView | undefined> {
     let state: AgentView;
     let options: ResumeOptions = {};
@@ -446,7 +433,7 @@ ${view(state)}`);
   };
   async function openAgents(ctx: ExtensionContext): Promise<void> {
       // The roster is a widget above the editor, so it needs Pi's TUI layout and raw input.
-      if (ctx.mode !== "tui") { ctx.ui.notify("The panel requires a TUI; use subagent_query / subagent or /agent-reply instead.", "error"); return; }
+      if (ctx.mode !== "tui") { ctx.ui.notify("The panel requires a TUI; parent tools remain available through subagent_query, subagent and subagent_reply.", "error"); return; }
       // Keep one panel/action loop per extension instance so concurrent commands cannot compete for input.
       if (panelBusy) { ctx.ui.notify("The agent panel is already open or processing an action; wait or close it with Esc.", "warning"); return; }
       panelBusy = true;
@@ -594,7 +581,7 @@ ${view(state)}`);
               ctx.ui.notify(release && result.receipt?.status === "released" ? `Released ${oneLine(state.role, 120)} ${action.id.slice(0, 8)}.` : receiptText(result), result.receipt?.status === "unconfirmed" ? "warning" : "info");
               continue;
             }
-            if (state.phase === "waiting") { ctx.ui.notify("This child has a pending interaction: use r, /agent-reply, or the parent permission tool.", "error"); continue; }
+            if (state.phase === "waiting") { ctx.ui.notify("This child has a pending interaction: use r in its details or subagent_reply; a message is not an answer.", "error"); continue; }
             if (!canMessage(state.phase)) { ctx.ui.notify(`Cannot message this child while ${state.phase}; inspect it before continuing.`, "error"); continue; }
             const steerable = canSteer(state.phase);
             const resuming = canResume(state.phase);

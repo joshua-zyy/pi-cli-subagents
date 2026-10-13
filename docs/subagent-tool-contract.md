@@ -113,6 +113,8 @@ Byte trimming keeps dropped older entries reachable through the next cursor, fol
 
 ## 4. `subagent_reply`: answer a specific request
 
+人工答复仅走 TUI：`/agents` → 选择实例 → `i` 详情 → `r` 答复；删除 `/agent-reply` 命令，不保留别名。面板按待答请求而非 `waiting` 状态提供答复，因此也覆盖仍在 `running` 的 Codex 非阻塞问题。保留 `replyPrompt()`、父代理工具、原请求校验及人工操作回执；历史通知不改写。
+
 Retain the parameters: `id`, `questionId` and `reason` are required; supply exactly one of `confirmed`, `value`, `answers` or `cancelled: true`, matching the request type.
 
 | Request type | Answer |

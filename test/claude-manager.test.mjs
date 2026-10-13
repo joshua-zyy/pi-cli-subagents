@@ -123,8 +123,9 @@ test('Claude public query and parent reply preserve the native task, report fiel
 });
 
 test('Claude native rule-forced questions show the signal to the parent and still accept one complete human form', {timeout:20000}, async t=>{
-  const {m,cwd,parent,done}=setup(t);let multiPrompts=0;
+  const {m,cwd,parent,done}=setup(t);let multiPrompts=0,input;
   const {ctx,commands,notices,messages}=publicApi(parent,cwd,{
+    theme:{fg:(_,text)=>text,bold:text=>text},setWidget(){},onTerminalInput(fn){input=fn;return()=>{input=undefined;};},
     select:async(title,options)=>{
       assert.doesNotMatch(title,/Human response required/);
       if(title.includes('Which checks?'))return options[0];
@@ -135,7 +136,10 @@ test('Claude native rule-forced questions show the signal to the parent and stil
   const child=await m.spawn('claude',role,cwd,'QUESTION_RULE');
   const q=await waitUntil('native rule-forced form',()=>m.get(child.id).questions[0]);
   assert.notEqual(q.humanOnly,true);assert.deepEqual(q.parentPolicy,{answers:true});
-  await commands.get('agent-reply').handler(`${child.id} ${q.id}`,ctx);const result=await done(child.id);
+  ctx.mode='tui'; const pane=commands.get('agents').handler('',ctx); input('i'); input('r');
+  const result=await done(child.id);
+  await waitUntil('human Claude response',()=>notices.some(message=>/Human response accepted/.test(message)));
+  input('\u001b'); await pane;
   assert.deepEqual(JSON.parse(result.text),{'Which checks?':'Read, write','Which outputs?':['Logs'],'What marker?':'HUMAN-CONTEXT','How many items?':'4'});
   assert(notices.some(message=>/Human response accepted/.test(message)));
   assert.equal(messages.filter(message=>message.customType==='cli-subagents-human-action').length,1);

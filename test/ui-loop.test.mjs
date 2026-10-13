@@ -418,21 +418,44 @@ test('Codex choice dialogs retain the command details and cancel without a persi
   const home = path.join(h.state.cwd, 'codex-home'); fs.mkdirSync(home); fs.writeFileSync(path.join(home, 'fixture-home'), '');
   const codexFixture = fileURLToPath(new URL('./fixtures/codex.mjs', import.meta.url));
   const manager = new AgentManager(h.state.parent, { command: process.execPath, args: [fixture] }, { home, launch: { command: process.execPath, args: [codexFixture] } });
-  for (const mode of ['tui', 'rpc']) {
-    h.mode = mode;
-    const child = await manager.spawn('codex-worker', { cli: 'codex', model: 'gpt-6-luna', description: 'fixture', instructions: 'test' }, h.state.cwd, 'APPROVAL_ACCEPT_CANCEL');
-    const q = await waitUntil('Codex choice', () => manager.get(child.id).questions[0]);
-    h.state.selectAnswer = 'Cancel turn';
-    await h.commands.get('agent-reply').handler(`${child.id} ${q.id}`, h.ctx);
-    const dialog = h.state.selections.at(-1);
-    assert.match(dialog.title, /Command: write fixture-only/); assert.match(dialog.title, /Directory:/);
-    assert.match(dialog.title, /Cancel turn ends this turn/); assert.deepEqual(dialog.options, ['Approve once', 'Cancel turn']);
-    const cancelled = await waitForIdle(manager, child.id, 'stopped');
-    assert.equal(processAlive(cancelled.workerPid), true, 'Cancel turn must not close the resident runtime');
-    assert.ok(fs.existsSync(path.join(manager.root, child.id, 'owner.lock')));
-    assert.ok(h.messages.some(e => e.message.customType === 'cli-subagents-human-action' && e.message.content.includes('Cancel turn')));
-  }
+  const child = await manager.spawn('codex-worker', { cli: 'codex', model: 'gpt-6-luna', description: 'fixture', instructions: 'test' }, h.state.cwd, 'APPROVAL_ACCEPT_CANCEL');
+  await waitUntil('Codex choice', () => manager.get(child.id).questions[0]);
+  h.state.selectAnswer = 'Cancel turn';
+  const pane = await h.openAgents(); await pane.press('i'); await pane.press('r');
+  await waitUntil('human Codex decision', () => h.messages.some(e => e.message.customType === 'cli-subagents-human-action'));
+  await pane.press(keys.escape); await pane.running;
+  const dialog = h.state.selections.at(-1);
+  assert.match(dialog.title, /Command: write fixture-only/); assert.match(dialog.title, /Directory:/);
+  assert.match(dialog.title, /Cancel turn ends this turn/); assert.deepEqual(dialog.options, ['Approve once', 'Cancel turn']);
+  const cancelled = await waitForIdle(manager, child.id, 'stopped');
+  assert.equal(processAlive(cancelled.workerPid), true, 'Cancel turn must not close the resident runtime');
+  assert.ok(fs.existsSync(path.join(manager.root, child.id, 'owner.lock')));
+  assert.ok(h.messages.some(e => e.message.customType === 'cli-subagents-human-action' && e.message.content.includes('Cancel turn')));
   assert.equal(h.confirms.length, 0, 'no boolean dialog may hide cancel-vs-decline semantics');
+});
+
+test('agents panel answers a running Codex async question once without starting another turn', { timeout: 20_000 }, async t => {
+  const h = harness(t); h.start();
+  const home = path.join(h.state.cwd, 'codex-home'); fs.mkdirSync(home); fs.writeFileSync(path.join(home, 'fixture-home'), '');
+  const codexFixture = fileURLToPath(new URL('./fixtures/codex.mjs', import.meta.url));
+  const manager = new AgentManager(h.state.parent, { command: process.execPath, args: [fixture] }, { home, launch: { command: process.execPath, args: [codexFixture] } });
+  const child = await manager.spawn('codex-worker', { cli: 'codex', model: 'fixture', description: 'fixture', instructions: 'test' }, h.state.cwd, 'ASYNC_QUESTION_DUPLICATE');
+  const pending = await waitUntil('non-blocking request', () => { const s=manager.get(child.id); return s.questions.length?s:undefined; });
+  assert.equal(pending.phase, 'running'); assert.equal(pending.questions[0].isBlocking, false);
+  h.state.selectAnswer = (_title, options) => options[0]; h.ctx.ui.input = async () => 'Authorized task context';
+  const pane = await h.openAgents(); await pane.press('i'); assert.match(pane.render(), /r reply/);
+  await pane.press('r');
+  const final = await waitForIdle(manager, child.id);
+  await waitUntil('one human reply receipt', () => h.messages.some(e => e.message.customType === 'cli-subagents-human-action'));
+  await pane.press(keys.escape); await pane.running;
+  assert.equal(final.runId, child.runId); assert.equal(final.runtimeId, child.runtimeId); assert.deepEqual(final.session, child.session);
+  assert.equal(final.text, 'Answers to your questions:\n\nWhich check?\nUnit\n\nWhat context is missing?\nAuthorized task context');
+  const requests = fs.readFileSync(path.join(home, 'requests.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  assert.equal(requests.filter(r => r.method === 'turn/start').length, 1); assert.equal(requests.filter(r => r.method === 'turn/steer').length, 1);
+  const audit = fs.readFileSync(path.join(manager.root, child.id, 'runs', child.runId, 'permissions.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  assert.equal(audit.length, 1); assert.equal(audit[0].actor, 'human'); assert.equal(audit[0].questionId, pending.questions[0].id);
+  const actions = h.messages.filter(e => e.message.customType === 'cli-subagents-human-action');
+  assert.equal(actions.length, 1); assert.equal(actions[0].options.triggerTurn, false); assert.deepEqual(final.questions, []);
 });
 
 test('shortcut selects a running child and opens its live conversation directly', { timeout: 15000 }, async t => {

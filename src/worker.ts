@@ -190,7 +190,7 @@ async function run(dir: string, runId: string): Promise<void> {
     } else if (input.type === "send") {
       if (!runOpen) throw new Error("No active run; use start for a new assignment");
       if (!state.accepted) throw new Error("Initial task has not been accepted; resolve any startup interaction first.");
-      if (state.questions.some(q => q.isBlocking !== false)) throw new Error("The child has an unresolved interaction. Use subagent_reply or /agent-reply; a message is not an approval.");
+      if (state.questions.some(q => q.isBlocking !== false)) throw new Error("The child has an unresolved interaction. Use subagent_reply or /agents (i details, r reply); a message is not an approval.");
       if (typeof input.message !== "string" || !input.message.trim() || !["steer", "followUp"].includes(input.mode)) throw new Error("Invalid message or delivery mode");
       const captured = runId;
       await rpc.send(input.message, input.mode);

@@ -35,9 +35,9 @@ function needsHumanApproval(request: Report["request"]): boolean {
 function waitingAnswerLine(report: Report): string {
   const id = report.questionId ?? "inspect the instance with subagent_query";
   const request = report.request;
-  if (!request) return `\nQuestion ID: ${id}; inspect the request with subagent_query before answering, then use subagent_reply or /agent-reply.`;
+  if (!request) return `\nQuestion ID: ${id}; inspect the request with subagent_query before answering, then use subagent_reply or /agents (i details, r reply).`;
   const offered = request.options?.length ? `; offered: ${quoted(request.options)}` : "";
-  const human = `/agent-reply ${report.agentId} ${id}`;
+  const human = `/agents (select ${report.agentId}, i details, r reply)`;
   const header = `\nQuestion ID: ${id} (${request.method}${offered}${request.isBlocking === false ? "; non-blocking, child may continue" : ""}).`;
   if (request.method === "form") return needsHumanApproval(request)
     ? `${header} You may only cancel; the human answers it with ${human}.`
@@ -71,9 +71,9 @@ function surfaceWaitingForHuman(
 ): void {
   const waiting = (states ?? []).filter((state) => state.questions.length);
   const human = waiting.flatMap((state) => state.questions.flatMap((question) =>
-    needsHumanApproval(question) ? [{ id: state.id, questionId: question.id }] : []));
+    needsHumanApproval(question) ? [{ id: state.id }] : []));
   let status: string | undefined;
-  if (human.length) status = `${human.length} child request${human.length === 1 ? " needs" : "s need"} your decision: /agent-reply ${human[0].id} ${human[0].questionId}`;
+  if (human.length) status = `${human.length} child request${human.length === 1 ? " needs" : "s need"} your decision: /agents (select ${human[0].id}, i details, r reply)`;
   else if (waiting.length) {
     const blocked = waiting.filter(state => state.questions.some(question => question.isBlocking !== false)).length;
     status = blocked ? `${blocked} subagent${blocked === 1 ? "" : "s"} waiting for parent review; /agents to inspect or intervene` :
@@ -82,7 +82,7 @@ function surfaceWaitingForHuman(
   ui.setStatus(WAITING_STATUS_KEY, status);
   for (const report of reports) {
     if (report.status !== "waiting" || !needsHumanApproval(report.request)) continue;
-    ui.notify(`Subagent ${report.agentId} is waiting for an answer: /agent-reply ${report.agentId} ${report.questionId ?? "<questionId>"}`, "warning");
+    ui.notify(`Subagent ${report.agentId} has a pending request: /agents (i details, r reply)`, "warning");
   }
 }
 
@@ -127,7 +127,7 @@ export function deliverReports(
       let raw = source.text;
       if (errorPrefix) raw = `${errorPrefix}${raw}`.trim();
       if (!raw) raw = report.status === "waiting"
-        ? "Waiting for a response; inspect it with subagent_query or /agent-reply."
+        ? "Waiting for a response; inspect it with subagent_query or /agents (i details, r reply)."
         : "No text response; inspect with subagent_query or /agents.";
       const clipped = report.status !== "waiting" && raw.length > REPORT_LIMIT;
       const summary = clipped ? `${raw.slice(0, REPORT_HEAD)}\n… ${raw.length - REPORT_LIMIT} characters omitted …\n${raw.slice(-REPORT_TAIL)}\n(truncated preview)` : raw;

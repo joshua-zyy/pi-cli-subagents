@@ -18,18 +18,19 @@ const completed = async (manager, id, timeout) => {
   assert.equal(state.phase, 'idle'); assert.equal(state.lastStatus, 'completed');
   return state;
 };
-test('parent can explicitly review a child request while the human command remains available', {timeout:12000}, async t=>{
+test('parent tools and the human agents panel answer the same original request', {timeout:12000}, async t=>{
   const saved = process.argv[1];process.argv[1] = fixture;
   const cwd = tempDir('approve');
   const parent = path.join(cwd,'parent.jsonl');fs.writeFileSync(parent,'{}\n');
-  const tools = new Map(), commands = new Map(), notices=[];
-  let confirmations=0;
-  const ctx = {cwd, hasUI:true, isProjectTrusted:()=>false,
+  const tools = new Map(), commands = new Map(), notices=[], events=new Map();
+  let confirmations=0, input;
+  const ctx = {cwd, mode:'tui', hasUI:true, isProjectTrusted:()=>false,
     sessionManager:{ getSessionFile:()=>parent, getEntries:()=>[] },
-    ui:{notify:(message)=>notices.push(message),confirm:async()=>{confirmations++;return false;}}};
-  extension({on(){},registerTool(tool){tools.set(tool.name,tool)},registerCommand(name,def){commands.set(name,def)},registerShortcut(){},registerMessageRenderer(){},sendMessage(_message,options){assert.equal(options.triggerTurn,false);}});
+    ui:{theme:{fg:(_,text)=>text,bold:text=>text},setWidget(){},onTerminalInput(fn){input=fn;return()=>{input=undefined;};},
+      notify:(message)=>notices.push(message),confirm:async()=>{confirmations++;return false;}}};
+  extension({on:(name,fn)=>events.set(name,fn),registerTool(tool){tools.set(tool.name,tool)},registerCommand(name,def){commands.set(name,def)},registerShortcut(){},registerMessageRenderer(){},sendMessage(_message,options){assert.equal(options.triggerTurn,false);}});
   const manager = new AgentManager(parent,{command:process.execPath,args:[fixture]});
-  t.after(async()=>{for(const s of manager.list())if(processAlive(s.workerPid))await manager.close(s.id);process.argv[1]=saved;});
+  t.after(async()=>{events.get('session_shutdown')?.();for(const s of manager.list())if(processAlive(s.workerPid))await manager.close(s.id);process.argv[1]=saved;});
   assert.ok(tools.has('subagent_query'));
   assert.ok(tools.has('subagent_reply'));
   assert.equal(tools.has('agent-reply'),false);
@@ -61,8 +62,11 @@ test('parent can explicitly review a child request while the human command remai
   assert.equal(audit[0].decision,'approved');
   const second=JSON.parse((await invoke('subagent',{ action: 'start',role:'worker',task:'WAIT',cwd})).match(/\{.+\}/)[0]);
   await waitUntil('human waiting',()=>manager.get(second.id).phase==='waiting');
-  await commands.get('agent-reply').handler(`${second.id} permission-1`,ctx);
+  const pane=commands.get('agents').handler('',ctx);
+  input('\u001b[B'); input('i'); input('r');
   await completed(manager,second.id);
+  await waitUntil('human panel response',()=>notices.some(message=>message.includes('Human response accepted')));
+  input('\u001b'); await pane;
   assert.equal(confirmations,1);assert.equal(manager.get(second.id).text,'DENY');
   assert.ok(notices.some(message=>message.includes('Human response accepted for subagent')));
 });
