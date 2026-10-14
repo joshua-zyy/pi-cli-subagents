@@ -3,8 +3,9 @@
 Read this before you create, sync or integrate a managed workspace. Tool descriptions cover routine
 calls; [../SKILL.md](../SKILL.md) covers delivery, permissions and recovery.
 
-A managed workspace is a Git worktree owned by this extension. Choose isolation according to the task's
-requirements; passing `cwd` instead uses that directory directly without creating a worktree.
+A managed workspace is a detached Git worktree owned by this extension, created from committed HEAD.
+Choose isolation according to the task's requirements; passing `cwd` instead uses that directory
+directly without creating a worktree.
 
 ## Create
 
