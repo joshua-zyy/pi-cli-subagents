@@ -27,6 +27,20 @@ npm run test:acceptance:local -- extension.test.mjs tool-receipts.test.mjs
 
 Files from other tiers, unknown tiers, arbitrary paths and `real-smoke.mjs` are rejected. Real-model scripts such as `test/real-smoke.mjs` are excluded from these entry points and explicitly reported as **NOT_RUN**. Their existing standalone invocation remains unchanged and still requires explicit user authorization. A local PASS does not establish acceptance of real CLIs, models, OS crashes or the human TUI experience.
 
+## 真实验收证据的只读审计器
+
+`test/acceptance/` 提供一个只读审计器，用于复核真实模型／原生 CLI 轮次的证据：它读取父会话、扩展自身记录、原生日志与文件系统，**不启动模型、CLI 或 RPC，不执行 case 命令，也不改写任何记录**。它不属于任何 tier，也不被 `npm test` 选中。
+
+```bash
+node test/acceptance/audit.mjs .test-output/manual-acceptance/<case>/case.mjs
+```
+
+- `test/acceptance/evidence.mjs` 提供读取器与断言助手（不含顶层 await，case 可安全导入）；`test/acceptance/audit.mjs` 是入口；`test/acceptance/example.case.mjs` 是占位模板，不是真实证据。
+- 每个 case 模块 default-export `{ name, session, check(ev) }`，只描述该轮必须证明的内容。case 模块属于**本地证据描述**，放在被忽略的 `.test-output/manual-acceptance/<case>/`，不提交、不随包分发；只有库与占位模板进入仓库。
+- 证据分两类。不可变证据（父会话、扩展记录、原生日志、Claude/Codex 转录）直接断言；可变产物（效果文件、子 cwd、worktree、Git 状态）经 `ev.effects` 检查，产物已被清理时报告 `unavailable`，**既不判为通过也不判为失败**。PASS 输出同时给出 `effectsChecked` 与 `effectsUnavailable`，避免把"未检查"读成"通过"。
+- 父会话是只追加的：轮次结束后的人工操作会追加自己的记录。不要断言"会话中不存在更晚的行"，而应按行号把该断言限定在本轮通知窗口内。
+- 该审计器取代 2026-10-12 之前每轮手写的 `-audit.mjs`；旧脚本保留在各自 case 目录作为历史记录。首轮以 2026-10-11/10-12 的 8 个真实轮次回放验证，8/8 PASS，其中产物已清理的轮次逐项列出 `unavailable`。回放不构成新的真实模型验收。
+
 ## Environment isolation
 
 Each execution creates a temporary `PI_CODING_AGENT_DIR` and applies it before child-process module imports, preventing the user's worker-role configuration from redirecting a Pi fixture to real Codex/Claude. It also clears the inherited `PI_CLI_SUBAGENT` marker so extension registration does not return early. The real child-agent recursion guard remains intact; tests do not disable it.
