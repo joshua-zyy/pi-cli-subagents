@@ -147,7 +147,7 @@ Following [Paseo’s pinned mapping](https://github.com/getpaseo/paseo/blob/29db
 
 The caller still uses `subagent_reply.answers`; the adapter formats answer text and submits one `turn/steer` with the captured `expectedTurnId`. It never fabricates a JSON-RPC response ID or sends another `turn/start`. Cancellation dismisses the local request without steering or interrupting. An uncertain steer cannot be resubmitted. As a deliberate active-run adaptation, unanswered questions expire on turn completion/interrupt/release, rather than importing Paseo’s session-persistent pending queue and idle follow-up behavior. Answers are context, never authorization.
 
-Async messages remain in activity/history but are excluded from the terminal answer, including legacy no-phase assembly and native history recovery. See [source evidence and verification limits](codex-async-questions.md); a fresh real-model recheck remains separate from local fixtures.
+Async messages remain in activity/history but are excluded from the terminal answer, including legacy no-phase assembly and native history recovery. The source evidence and verification limits are recorded in the project's internal notes, which are not published; a fresh real-model recheck remains separate from local fixtures.
 
 ### Codex MCP prefix approval (0.159.2 contract)
 

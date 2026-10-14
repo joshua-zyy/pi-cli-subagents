@@ -14,6 +14,9 @@ tools/out/
 .npm-cache/
 *.subagents/
 
+# Internal planning and acceptance records (not published)
+docs/internal/
+
 # OS metadata
 .DS_Store
 Thumbs.db
