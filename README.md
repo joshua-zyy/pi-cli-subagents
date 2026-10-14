@@ -13,7 +13,7 @@ managed Git worktrees keep parallel edits out of each other's way.
 
 ## Requirements
 
-- Pi, verified against 0.87.1 and 1.1.0
+- Pi, tested to load and register on 0.87.1, 1.0.1, 1.1.0 and 1.2.0
 - Node.js 22.19.0 or newer
 - For Codex or Claude Code subagents, the matching CLI installed and logged in; Pi subagents need
   nothing extra
