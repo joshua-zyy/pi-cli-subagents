@@ -85,6 +85,22 @@ Pi children can ask the parent a single task question through `subagent_ask_pare
 - **Stopping is not a rollback.** An uncertain outcome is reported as uncertain, and a native session
   is never silently replaced by a new one.
 
+## In the session
+
+The roster under the parent's reply lists every instance with its phase and elapsed time, and
+`Ctrl+Alt+A` opens the same list while the parent is still working:
+
+![The subagent roster under the parent's reply](https://raw.githubusercontent.com/joshua-zyy/pi-cli-subagents/main/docs/assets/subagent-running-ui.png)
+
+`/agents` browses those instances, opens one conversation, and releases idle runtimes:
+
+![The /agents panel](https://raw.githubusercontent.com/joshua-zyy/pi-cli-subagents/main/docs/assets/subagent-panel.png)
+
+A conversation shows the task that was sent and the reply that came back, with the keys available at
+the bottom of the pane:
+
+![One instance's conversation](https://raw.githubusercontent.com/joshua-zyy/pi-cli-subagents/main/docs/assets/subagent-detail.png)
+
 ## Commands and keys
 
 | Entry point | Use |

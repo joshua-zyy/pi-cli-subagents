@@ -74,6 +74,20 @@ Pi 子进程可通过 `subagent_ask_parent` 向主 agent 提出一个任务问�
   不受影响，也不会自动提交或推送。
 - **停止不等于回滚。** 结果不确定时会如实标记为不确定，也不会悄悄用新会话替换原生会话。
 
+## 会话内界面
+
+主 agent 回复下方会列出每个实例的阶段与已用时间，主 agent 仍在工作时可用 `Ctrl+Alt+A` 打开同一列表。
+
+![主 agent 回复下方的实例列表](https://raw.githubusercontent.com/joshua-zyy/pi-cli-subagents/main/docs/assets/subagent-running-ui.png)
+
+`/agents` 可浏览同一批实例、打开某个对话，并释放空闲运行时。
+
+![`/agents` 面板](https://raw.githubusercontent.com/joshua-zyy/pi-cli-subagents/main/docs/assets/subagent-panel.png)
+
+对话视图显示发出的任务与回来的回复，面板底部列出当前可用按键。
+
+![单个实例的对话](https://raw.githubusercontent.com/joshua-zyy/pi-cli-subagents/main/docs/assets/subagent-detail.png)
+
 ## 命令与按键
 
 | 入口 | 用途 |
