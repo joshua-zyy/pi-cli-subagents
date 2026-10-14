@@ -159,6 +159,9 @@ function handle(cmd) {
       { type: 'extension_ui_request', id: 'permission-1', method: 'select', title: 'Select fixture response', options: ['Allow once', 'Deny'] });
     return;
   }
+  // Fixture-only failure injection: the worker (this process's parent) dies mid-startup, so the
+  // parent Pi never receives an accepted run. Reproduces a real crashed worker without a bad build.
+  if (cmd.message === 'CRASH_WORKER') return process.kill(process.ppid, 'SIGKILL');
   // One identical activity label per step, long enough for a caller to sample the state file while
   // the label never changes. 80 records at 200ms keep the step running for ~16s.
   if (cmd.message === 'ACTIVITY_BURST') {

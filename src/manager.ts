@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync, mkdirSync, openSync, closeSync, statSync, realpathSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
@@ -245,8 +245,9 @@ export class AgentManager {
     const initial: StartRequest = { runId, message, createdAt: Math.max(Date.now(), Number.isFinite(priorStart) ? priorStart! + 1 : 0), session };
     writeJson(path.join(runDir, "request.json"), initial);
     const fd = openSync(path.join(runDir, "worker.log"), "a", 0o600);
+    let child: ChildProcess | undefined;
     try {
-      const child = spawn(process.execPath, [workerFile, dir, runId], {
+      child = spawn(process.execPath, [workerFile, dir, runId], {
         detached: true, windowsHide: true, stdio: ["ignore", fd, fd],
       });
       child.on("error", (error) => writeJson(path.join(runDir, "error.json"), { error: error.message }));
@@ -258,15 +259,21 @@ export class AgentManager {
         const failure = readJson<{ error: string }>(path.join(runDir, "error.json"));
         if (failure) throw new Error(failure.error);
         const state = readJson<AgentState>(path.join(dir, "state.json"));
-        if (!state || state.runId !== runId) return undefined;
-        observed = state;
-        const view = this.view(id, state);
-        if (view.phase === "unreachable") throw new Error(view.error);
-        return view.accepted || ["waiting", "failed", "stopped", "completed", "idle", "closed"].includes(view.phase) ? view : undefined;
+        if (state && state.runId === runId) {
+          observed = state;
+          const view = this.view(id, state);
+          if (view.phase === "unreachable") throw new Error(view.error);
+          if (view.accepted || ["waiting", "failed", "stopped", "completed", "idle", "closed"].includes(view.phase)) return view;
+        }
+        // A worker that dies before it acknowledges the run records nothing of its own, so the
+        // exit is the only evidence. Reporting it here replaces the whole startup timeout wait.
+        if (child && (child.exitCode !== null || child.signalCode !== null))
+          throw new Error(`Worker exited (${child.exitCode ?? child.signalCode}) before accepting the task; work may already have run, so inspect ${path.join(runDir, "worker.log")} before retrying`);
+        return undefined;
       }, 45_000);
       return { ...result, receipt: { operation, status: result.accepted ? "accepted" : "unconfirmed", runId, ...(result.runtimeId ? { runtimeId: result.runtimeId } : {}) } };
     } catch (error) {
-      throw this.diagnostic(id, operation, `${(error as Error).message}; records retained at ${dir}`, { runId, runtimeId: observed?.runtimeId });
+      throw this.diagnostic(id, operation, `run ${runId}: ${(error as Error).message}; records retained at ${dir}`, observed);
     }
   }
 

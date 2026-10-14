@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { execFile, execFileSync, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { randomUUID } from 'node:crypto';
@@ -314,3 +314,38 @@ test('identical activity labels are collapsed, and an unchanged step still refre
   assert.equal(settled.text, 'BURST-OK');
 });
 
+test('a worker that dies mid-startup fails the start immediately with the ownership diagnostic', { timeout: 30_000 }, async () => {
+  const cwd = tempDir('manager-crash');
+  const parent = path.join(cwd, 'parent.jsonl'); fs.writeFileSync(parent, '{}\n');
+  const manager = new AgentManager(parent, launch);
+  const startedAt = Date.now();
+  await assert.rejects(manager.spawn('worker', defaultRoles.worker, cwd, 'CRASH_WORKER'), error => {
+    assert.match(error.message, /worker exited and runtime status is uncertain/i);
+    return true;
+  });
+  assert(Date.now() - startedAt < 20_000, 'a dead worker must be reported before the 45s startup timeout');
+  const views = manager.list();
+  assert.equal(views.length, 1);
+  assert.equal(views[0].phase, 'unreachable', 'the retained record must not read as a healthy run');
+});
+
+test('a worker that cannot load its module is reported by its exit instead of the startup timeout', { timeout: 30_000 }, async () => {
+  // A missing dist/worker.js is the real incident: a rebuild had removed it. Copy the build so this
+  // test never mutates the artifacts that another run in this tree may be spawning from.
+  const copy = path.join(tempDir('manager-dist'), 'dist');
+  fs.cpSync(fileURLToPath(new URL('../dist', import.meta.url)), copy, { recursive: true });
+  fs.rmSync(path.join(copy, 'worker.js'));
+  const { AgentManager: CopiedManager } = await import(pathToFileURL(path.join(copy, 'manager.js')).href);
+  const cwd = tempDir('manager-unloadable');
+  const parent = path.join(cwd, 'parent.jsonl'); fs.writeFileSync(parent, '{}\n');
+  const manager = new CopiedManager(parent, launch);
+  const startedAt = Date.now();
+  await assert.rejects(manager.spawn('worker', defaultRoles.worker, cwd, 'HOLD'), error => {
+    assert.match(error.message, /Worker exited \(/);
+    assert.match(error.message, /worker\.log/);
+    return true;
+  });
+  assert(Date.now() - startedAt < 20_000, 'a dead worker must be reported by its exit, not the 45s startup timeout');
+  const [instance] = fs.readdirSync(manager.root);
+  assert.equal(fs.existsSync(path.join(manager.root, instance, 'state.json')), false, 'this failure happens before any state record exists');
+});
