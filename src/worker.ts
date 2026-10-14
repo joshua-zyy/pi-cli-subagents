@@ -9,6 +9,7 @@ import { ClaudeAdapter, ClaudeCapabilityError } from "./claude-adapter.js";
 import { claudeQuestionAnswers } from "./claude-question.js";
 import { nativeSession, type CliAdapter, type AdapterEvent } from "./cli-adapter.js";
 import { readJson, writeJson } from "./storage.js";
+import { pruneRunLogs, LOG_BUDGET_BYTES } from "./log-writer.js";
 import type { AgentSpec, AgentState, Control, ControlResult, OperationReceipt, Question, Report, StartRequest } from "./types.js";
 
 /**
@@ -36,6 +37,10 @@ async function run(dir: string, runId: string): Promise<void> {
       ...("sessionFile" in start.session ? { sessionFile: start.session.sessionFile } : {}) } : {}),
   };
   const save = () => { state.updatedAt = Date.now(); writeJson(path.join(dir, "state.json"), state); };
+  // This runtime writes its stderr to the launch run's file for its whole life.
+  const launchRunId = runId;
+  // A resident runtime writes every run into its own stream; drop the oldest runs' streams first.
+  pruneRunLogs(dir, runId);
   let rpc: CliAdapter | undefined, server: Server | undefined, ending = false, released = false, runOpen = true, runCaptured = false;
   let finalText = "";
   const token = randomBytes(32).toString("hex");
@@ -173,11 +178,14 @@ async function run(dir: string, runId: string): Promise<void> {
     if (input.type === "start") {
       if (!rpc.resident || state.phase !== "idle" || runOpen || state.questions.length) throw new Error("Runtime is not idle; new work was not accepted");
       if (typeof input.message !== "string" || !input.message.trim()) throw new Error("Task must not be empty");
-      const next = randomUUID();
-      const request: StartRequest = { runId: next, message: input.message, createdAt: Math.max(Date.now(), (state.startedAt ?? 0) + 1), session: state.session, logFile: state.logFile };
-      writeJson(path.join(dir, "runs", next, "request.json"), request);
-      runId = next; runDir = path.join(dir, "runs", next); runOpen = true; finalText = ""; clearTimers();
-      state.runId = next; state.startedAt = request.createdAt; state.accepted = false; state.phase = "starting";
+      const next = randomUUID(), nextRunDir = path.join(dir, "runs", next), logFile = path.join(nextRunDir, "events.jsonl");
+      const request: StartRequest = { runId: next, message: input.message, createdAt: Math.max(Date.now(), (state.startedAt ?? 0) + 1), session: state.session, logFile };
+      writeJson(path.join(nextRunDir, "request.json"), request);
+      // Each run writes its own raw stream, so one resident runtime cannot grow a single file.
+      rpc.rotateLog(logFile);
+      pruneRunLogs(dir, next, LOG_BUDGET_BYTES, launchRunId);
+      runId = next; runDir = nextRunDir; runOpen = true; finalText = ""; clearTimers();
+      state.runId = next; state.startedAt = request.createdAt; state.accepted = false; state.phase = "starting"; state.logFile = logFile;
       delete state.error; delete state.resultFile; delete state.lastStatus; delete state.lastActivity;
       save(); endpoint();
       try {

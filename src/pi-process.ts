@@ -1,5 +1,5 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { createWriteStream } from "node:fs";
+import { LogWriter } from "./log-writer.js";
 import { killProcessTree } from "./process-tree.js";
 import type { Launch } from "./types.js";
 
@@ -42,27 +42,29 @@ export class PiProcess {
   private forced = false;
   private closing = false;
   private poisoned?: Error;
+  private readonly log: LogWriter;
+
+  /** Point the runtime's raw stream at another run's log file; the previous file keeps its bytes. */
+  rotateLog(file: string): void { this.log.rotate(file); }
   private interrupting?: Promise<void>;
   private run?: { started: boolean; validating: boolean; inFlightInputs: number; deferredTerminal?: WireRecord; done: Promise<void>; resolve: () => void };
 
   constructor(launch: Launch, args: string[], cwd: string, logFile: string, private readonly onRecord: (record: WireRecord) => void, private readonly timeout = 30_000) {
-    const output = createWriteStream(logFile, { flags: "a", mode: 0o600 });
-    const stderr = createWriteStream(`${logFile}.stderr`, { flags: "a", mode: 0o600 });
-    // The launch is a trusted CLI path, each option is a separate argv element; never invoke a shell.
-    this.child = spawn(launch.command, [...launch.args, ...args], {
-      cwd, env: childEnvironment(), stdio: ["pipe", "pipe", "pipe"], shell: false,
-      windowsHide: true, detached: process.platform !== "win32",
-    });
     const fail = (error: Error) => {
       this.exitError = error;
       for (const entry of this.pending.values()) entry.reject(error);
       this.pending.clear();
     };
-    output.on("error", (error) => { fail(error); void this.kill(); });
-    stderr.on("error", (error) => { fail(error); void this.kill(); });
-    this.child.stderr.pipe(stderr);
+    this.log = new LogWriter(logFile, (error) => { fail(error); void this.kill(); });
+    // The launch is a trusted CLI path, each option is a separate argv element; never invoke a shell.
+    this.child = spawn(launch.command, [...launch.args, ...args], {
+      cwd, env: childEnvironment(), stdio: ["pipe", "pipe", "pipe"], shell: false,
+      windowsHide: true, detached: process.platform !== "win32",
+    });
+    this.child.stderr.pipe(this.log.errorStream);
     this.child.stdout.setEncoding("utf8");
     this.child.stdout.on("data", (chunk: string) => {
+      const output = this.log.stream;
       if (!output.write(chunk)) { this.child.stdout.pause(); output.once("drain", () => this.child.stdout.resume()); }
       this.buffer += chunk;
       let newline;
@@ -87,7 +89,7 @@ export class PiProcess {
     this.closed = new Promise((resolve) => {
       this.child.once("close", (code, signal) => {
         fail(this.exitError ?? new Error(`Child Pi exited (${code ?? signal})`));
-        output.end();
+        this.log.end();
         resolve({ code, signal });
       });
     });

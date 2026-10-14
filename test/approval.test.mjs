@@ -217,9 +217,9 @@ test('owned Pi questions accept parent choices, custom text and cancellation in 
     }
     const native=JSON.parse(fs.readFileSync(state.session.sessionFile,'utf8'));
     assert.equal(native.messages.filter(m=>m.role==='user').length,taskCount,'answering must not submit a replacement task');
-    const events=fs.readFileSync(state.logFile,'utf8').trim().split('\n').map(JSON.parse);
+    const events=manager.eventLogs(id).flatMap(file=>fs.readFileSync(file,'utf8').trim().split('\n').map(JSON.parse));
     assert.equal(events.filter(e=>e.type==='agent_start').length,taskCount,
-      'the continuous runtime log contains one native start per assigned task, not per reply');
+      'each assigned task starts the native agent once, and a reply does not submit a replacement task');
     const audit=fs.readFileSync(path.join(manager.root,id,'runs',runId,'permissions.jsonl'),'utf8').trim().split('\n').map(JSON.parse);
     assert.equal(audit.length,1);assert(audit.every(row=>row.actor==='parent'&&row.runId===runId));
     assert(audit.every(row=>row.kind==='question'&&['answered','cancelled'].includes(row.decision)));

@@ -40,6 +40,7 @@
     "codex-adapter.test.mjs",
     "core.test.mjs",
     "human-actions.test.mjs",
+    "log-writer.test.mjs",
     "pi-adapter.test.mjs",
     "pi-process.test.mjs",
     "process-tree.test.mjs",

@@ -27,6 +27,8 @@ export interface CliAdapter {
   reply(answer: InteractionReply): Promise<void>;
   /** Resolve only after the captured turn cannot continue; uncertainty requires stop/release. */
   interrupt(): Promise<void>;
+  /** Write this runtime's raw stream to another run's log file; the previous file keeps its bytes. */
+  rotateLog(file: string): void;
   end(): Promise<{ exit: Exit; forced: boolean }>;
   stop(): Promise<{ exit: Exit; forced: boolean }>;
 }

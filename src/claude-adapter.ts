@@ -1,5 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { createWriteStream, readdirSync, lstatSync, fstatSync, openSync, readSync, closeSync } from "node:fs";
+import { readdirSync, lstatSync, fstatSync, openSync, readSync, closeSync } from "node:fs";
+import { LogWriter } from "./log-writer.js";
 import { killProcessTree } from "./process-tree.js";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
@@ -123,7 +124,11 @@ export class ClaudeAdapter implements CliAdapter {
   private seenRequests = new Set<string>();
   private background = new Set<string>();
   private capabilities = new Set<string>();
+  private readonly log: LogWriter;
   get pid(): number | undefined { return this.child.pid; }
+
+  /** Point the runtime's raw stream at another run's log file; the previous file keeps its bytes. */
+  rotateLog(file: string): void { this.log.rotate(file); }
 
   constructor(private readonly options: AdapterOptions) {
     const { spec, session } = options;
@@ -132,8 +137,7 @@ export class ClaudeAdapter implements CliAdapter {
     this.session = session?.cli === "claude" ? session : { cli: "claude", sessionId: randomUUID(), claudeHome: spec.claudeHome };
     if (session) inspectClaudeSession(spec, this.session);
     this.timeout = options.requestTimeout ?? 30_000;
-    const output = createWriteStream(options.logFile, { flags: "a", mode: 0o600 });
-    const stderr = createWriteStream(`${options.logFile}.stderr`, { flags: "a", mode: 0o600 });
+    this.log = new LogWriter(options.logFile, error => this.fail(error));
     // Inherit the user's own config-dir resolution; pin it only when this session's recorded home differs.
     const env = claudeEnvironment(spec.claudeHome, childEnvironment());
     // A delegated run submits its own task; never auto-rerun an interrupted task during resume.
@@ -144,10 +148,10 @@ export class ClaudeAdapter implements CliAdapter {
       ...(spec.role.thinking ? ["--effort", spec.role.thinking] : []), ...(spec.role.mode ? ["--permission-mode", spec.role.mode] : [])], {
       cwd: spec.cwd, env, stdio: ["pipe", "pipe", "pipe"], shell: false, windowsHide: true, detached: process.platform !== "win32",
     });
-    output.on("error", error => this.fail(error)); stderr.on("error", error => this.fail(error));
-    this.child.stderr.pipe(stderr);
+    this.child.stderr.pipe(this.log.errorStream);
     this.child.stdout.setEncoding("utf8");
     this.child.stdout.on("data", (chunk: string) => {
+      const output = this.log.stream;
       if (!output.write(chunk)) { this.child.stdout.pause(); output.once("drain", () => this.child.stdout.resume()); }
       this.buffer += chunk;
       let newline: number;
@@ -166,7 +170,7 @@ export class ClaudeAdapter implements CliAdapter {
     this.child.once("error", error => this.fail(error)); this.child.stdin.on("error", error => this.fail(error));
     this.closed = new Promise(resolve => this.child.once("close", (code, signal) => {
       this.rejectPending(this.error ?? new Error(`Claude exited (${code ?? signal})`));
-      output.end(); resolve({ code, signal });
+      this.log.end(); resolve({ code, signal });
     }));
   }
   private rejectPending(error: Error): void {

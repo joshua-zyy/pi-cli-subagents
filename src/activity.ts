@@ -189,7 +189,12 @@ export async function readActivity(request: ActivityRequest): Promise<ActivityPa
     } else snapshot = await window.readPage(files, { signal });
     signal?.throwIfAborted();
     const current = await sourcesOf(files, signal);
-    for (const [i, source] of sources.entries()) if (source.stamp) assertContinues(source.stamp, current[i]?.stamp);
+    // A source that vanished between the two snapshots is pruned history, not a broken cursor.
+    // Only a caller holding a cursor is told its anchor is gone.
+    for (const [i, source] of sources.entries()) {
+      if (!source.stamp || !current[i]?.stamp && !cursor) continue;
+      assertContinues(source.stamp, current[i]?.stamp);
+    }
     if (cursor) await validate(cursor, current, signal);
     // Missing-run placeholders have no trustworthy record position; their coverage notice is retained.
     let malformedProjection = false;

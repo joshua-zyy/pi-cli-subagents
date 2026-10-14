@@ -1,5 +1,5 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { createWriteStream } from "node:fs";
+import { LogWriter } from "./log-writer.js";
 import { killProcessTree } from "./process-tree.js";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
@@ -41,6 +41,10 @@ export class CodexAdapter implements CliAdapter {
   readonly child: ChildProcessWithoutNullStreams;
   readonly closed: Promise<Exit>;
   private pending = new Map<number, { resolve: (value: RecordValue) => void; reject: (error: Error) => void; timer: NodeJS.Timeout }>();
+  private readonly log: LogWriter;
+
+  /** Point the runtime's raw stream at another run's log file; the previous file keeps its bytes. */
+  rotateLog(file: string): void { this.log.rotate(file); }
   private nextId = 0;
   private buffer = "";
   private exitError?: Error;
@@ -72,20 +76,18 @@ export class CodexAdapter implements CliAdapter {
     const { defaultModeQuestions } = options.spec.role;
     if (defaultModeQuestions !== undefined && typeof defaultModeQuestions !== "boolean") throw new Error("Codex defaultModeQuestions must be a boolean");
     this.timeout = options.requestTimeout ?? 30_000;
-    const output = createWriteStream(options.logFile, { flags: "a", mode: 0o600 });
-    const stderr = createWriteStream(`${options.logFile}.stderr`, { flags: "a", mode: 0o600 });
     const questionArgs = defaultModeQuestions === undefined ? [] : ["-c", `features.default_mode_request_user_input=${defaultModeQuestions}`];
+    const fail = (error: Error) => this.fail(error);
+    this.log = new LogWriter(options.logFile, (error) => { fail(error); void this.kill(); });
     this.child = spawn(options.spec.launch.command, [...options.spec.launch.args, ...questionArgs, "app-server", "--listen", "stdio://"], {
       cwd: options.spec.cwd,
       env: { ...childEnvironment(), CODEX_HOME: options.spec.codexHome },
       stdio: ["pipe", "pipe", "pipe"], shell: false, windowsHide: true, detached: process.platform !== "win32",
     });
-    const fail = (error: Error) => this.fail(error);
-    output.on("error", (error) => { fail(error); void this.kill(); });
-    stderr.on("error", (error) => { fail(error); void this.kill(); });
-    this.child.stderr.pipe(stderr);
+    this.child.stderr.pipe(this.log.errorStream);
     this.child.stdout.setEncoding("utf8");
     this.child.stdout.on("data", (chunk: string) => {
+      const output = this.log.stream;
       if (!output.write(chunk)) { this.child.stdout.pause(); output.once("drain", () => this.child.stdout.resume()); }
       this.buffer += chunk;
       if (this.buffer.length > 4 * 1024 * 1024 && !this.buffer.includes("\n")) { fail(new Error("Codex RPC record exceeds 4 MiB")); void this.kill(); return; }
@@ -105,7 +107,7 @@ export class CodexAdapter implements CliAdapter {
     this.child.stdin.on("error", fail);
     this.closed = new Promise(resolve => this.child.once("close", (code, signal) => {
       fail(this.exitError ?? new Error(`Codex app-server exited (${code ?? signal})`));
-      output.end(); resolve({ code, signal });
+      this.log.end(); resolve({ code, signal });
     }));
   }
 

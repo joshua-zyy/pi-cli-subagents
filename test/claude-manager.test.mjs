@@ -89,7 +89,8 @@ test('Claude manager keeps ownership and one worker through busy messages, inter
   await m.send(child.id,'HOLD');await m.send(child.id,'MUST_NOT_RUN','followUp');
   const interrupted=await m.interrupt(child.id);assert.equal(interrupted.receipt.status,'settled');await done(child.id,'stopped');
   await m.send(child.id,'RECALL');const last=await done(child.id);assert.equal(last.text,'alpha');assert.equal(last.runCount,4);
-  for(const key of ['workerPid','cliPid','runtimeId','sessionId','logFile'])assert.equal(last[key],first[key],key);
+  for(const key of ['workerPid','cliPid','runtimeId','sessionId'])assert.equal(last[key],first[key],key);
+  assert.notEqual(last.logFile,first.logFile,'each run writes its own raw stream');
   assert(fs.existsSync(path.join(m.root,child.id,'owner.lock')));assert.equal(JSON.stringify(m.getResult(child.id,first.runId)),old);
   assert.equal(fs.readFileSync(path.join(home,'launches.jsonl'),'utf8').trim().split('\n').length,1);
   assert(!m.reports().some(r=>r.text==='MUST_NOT_RUN'));const closed=await m.close(child.id);assert.equal(closed.receipt.status,'released');

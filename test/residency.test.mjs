@@ -150,9 +150,10 @@ for (const cli of ['pi', 'codex']) test(`${cli} keeps one worker/CLI and distinc
   assert.notEqual(sent.receipt.runId, first.runId);
   const second = await idle(reopened, first.id); noPersistedReceipt(m, first.id);
   assert.equal(second.text, 'alpha'); assert.notEqual(second.runId, first.runId);
-  for (const key of ['workerPid', 'cliPid', 'runtimeId', 'sessionId', 'logFile']) assert.equal(second[key], first[key], key);
+  for (const key of ['workerPid', 'cliPid', 'runtimeId', 'sessionId']) assert.equal(second[key], first[key], key);
+  assert.notEqual(second.logFile, first.logFile, 'each run writes its own raw stream');
   assert.equal(JSON.stringify(m.getResult(first.id, first.runId)), report, 'new assignment must not rewrite the old result');
-  assert.equal(m.eventLogs(first.id).length, 1, 'shared runtime log must not be replayed twice');
+  assert.equal(m.eventLogs(first.id).length, 2, 'each run raw stream is enumerated exactly once');
   assert.equal(m.reports(Date.now() + 60 * 60_000).some(r => r.status === 'stalled'), false);
   const closed = await m.close(first.id); assert.equal(closed.phase, 'closed'); assert.equal(closed.lastStatus, 'completed');
   receipt(closed, 'stop', 'released'); noPersistedReceipt(m, first.id);
@@ -163,7 +164,7 @@ for (const cli of ['pi', 'codex']) test(`${cli} keeps one worker/CLI and distinc
   const continued = await m.send(first.id, 'RECALL'); receipt(continued, 'send', 'accepted');
   const resumed = await idle(m, first.id);
   assert.equal(resumed.sessionId, first.sessionId); assert.notEqual(resumed.runtimeId, first.runtimeId);
-  assert.equal(resumed.text, 'alpha'); assert.equal(m.eventLogs(first.id).length, 2);
+  assert.equal(resumed.text, 'alpha'); assert.equal(m.eventLogs(first.id).length, 3, 'each run raw stream is enumerated exactly once, across a runtime replacement too');
 });
 
 test('v2 rejects legacy control and stale runtime/run identities without stopping new work', { timeout: 20000 }, async t => {

@@ -55,6 +55,9 @@ export class PiAdapter implements CliAdapter {
   // null = independent session UI; undefined = a legacy run without a supplied runId.
   private questions?: Map<string, string | undefined | null>;
   readonly rpc: PiProcess;
+
+  /** Point the runtime's raw stream at another run's log file; the previous file keeps its bytes. */
+  rotateLog(file: string): void { this.rpc.rotateLog(file); }
   readonly closed: Promise<Exit>;
   private assistant?: WireRecord;
   private readonly sessionDir: string;

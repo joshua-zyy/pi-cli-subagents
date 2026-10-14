@@ -180,9 +180,9 @@ test('task history records every assignment an instance handled, with its outcom
   assert.deepEqual(second.history.map(run => run.status), ['completed', 'completed']);
   assert.equal(second.task, 'RECALL second-assignment', 'task stays the current assignment');
   assert.equal(second.history.at(-1).runId, second.runId);
-  assert.equal(second.logFile, first.logFile, 'idle continuation appends to the original runtime log');
-  assert.deepEqual(manager.eventLogs(started.id), [first.logFile],
-    'shared runtime logs must be enumerated once rather than duplicated for each run');
+  assert.notEqual(second.logFile, first.logFile, 'each run writes its own raw stream');
+  assert.deepEqual(manager.eventLogs(started.id), [first.logFile, second.logFile],
+    'every run raw stream is enumerated once, in run order');
 });
 
 test('history keeps the five most recent runs and never invents an outcome', { timeout: 20_000 }, async t => {
@@ -348,4 +348,21 @@ test('a worker that cannot load its module is reported by its exit instead of th
   assert(Date.now() - startedAt < 20_000, 'a dead worker must be reported by its exit, not the 45s startup timeout');
   const [instance] = fs.readdirSync(manager.root);
   assert.equal(fs.existsSync(path.join(manager.root, instance, 'state.json')), false, 'this failure happens before any state record exists');
+});
+
+test('a resident runtime writes each run to its own raw log', { timeout: 30_000 }, async t => {
+  const { cwd, manager } = setup(t);
+  const start = await manager.spawn('worker', defaultRoles.worker, cwd, 'FIRST');
+  const first = await complete(manager, start.id, 'completed');
+  await new Promise(resolve => setTimeout(resolve, 400));
+  const firstLog = path.join(manager.root, start.id, 'runs', first.runId, 'events.jsonl');
+  const before = fs.readFileSync(firstLog, 'utf8');
+  assert.ok(before.includes('"type":"agent_start"'), 'the first run must have written its own raw log');
+  await manager.send(start.id, 'SECOND');
+  const second = await complete(manager, start.id, 'completed');
+  assert.notEqual(second.runId, first.runId);
+  const secondLog = path.join(manager.root, start.id, 'runs', second.runId, 'events.jsonl');
+  assert.ok(fs.statSync(secondLog).size > 0, 'the second run must write its own raw log');
+  assert.equal(fs.readFileSync(firstLog, 'utf8'), before, 'the first run log keeps its bytes');
+  assert.equal(second.logFile, secondLog, 'the instance points at the current run log');
 });

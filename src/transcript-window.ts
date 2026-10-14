@@ -305,6 +305,8 @@ export class TranscriptWindow {
     this.sources = sources;
     const index = lastReadable(sources);
     if (index < 0) { this.notice = "Event log unavailable: the run logs do not exist yet."; return this.snapshot(); }
+    // A pruned run log is unavailable history, not a reason to jump back to the newest page.
+    if (sources.some(item => !item.exists)) this.notice = [this.notice, "Some historical event logs are unavailable."].filter(Boolean).join(" ");
     const live = sources[index];
     if (this.cli !== "pi" && !this.threadId) await this.learnIdentity(live);
     const liveEnd = { source: live.key, offset: live.size };
