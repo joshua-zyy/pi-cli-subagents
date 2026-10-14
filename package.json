@@ -1,19 +1,31 @@
 {
   "name": "pi-cli-subagents",
   "version": "0.1.0",
-  "private": true,
-  "description": "Local, reusable Pi CLI subagents with independent process lifetimes",
+  "description": "Delegate work from a Pi session to persistent Pi, Codex CLI and Claude Code subagents",
+  "license": "MIT",
+  "author": "joshua-zyy",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/joshua-zyy/pi-cli-subagents.git"
+  },
   "type": "module",
   "engines": {
     "node": ">=22.19.0"
   },
   "keywords": [
-    "pi-package"
+    "pi-package",
+    "pi-extension",
+    "subagents",
+    "codex",
+    "claude-code"
   ],
   "files": [
     "dist",
     "skills",
-    "README.md"
+    "README.md",
+    "README.zh-CN.md",
+    "LICENSE",
+    "NOTICE"
   ],
   "pi": {
     "extensions": [
