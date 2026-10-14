@@ -1,6 +1,6 @@
 # pi-cli-subagents
 
-[简体中文](README.zh-CN.md)
+[简体中文](https://github.com/joshua-zyy/pi-cli-subagents/blob/main/docs/README.zh-CN.md)
 
 ![pi-cli-subagents](https://raw.githubusercontent.com/joshua-zyy/pi-cli-subagents/main/docs/assets/readme-banner-v3.png)
 

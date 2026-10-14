@@ -1,6 +1,6 @@
 {
   "name": "pi-cli-subagents",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Delegate work from a Pi session to persistent Pi, Codex CLI and Claude Code subagents",
   "license": "MIT",
   "author": "joshua-zyy",
@@ -23,7 +23,6 @@
     "dist",
     "skills",
     "README.md",
-    "README.zh-CN.md",
     "LICENSE",
     "NOTICE"
   ],
