@@ -159,6 +159,16 @@ function handle(cmd) {
       { type: 'extension_ui_request', id: 'permission-1', method: 'select', title: 'Select fixture response', options: ['Allow once', 'Deny'] });
     return;
   }
+  // One identical activity label per step, long enough for a caller to sample the state file while
+  // the label never changes. 80 records at 200ms keep the step running for ~16s.
+  if (cmd.message === 'ACTIVITY_BURST') {
+    let sent = 0;
+    const timer = setInterval(() => {
+      emit({ type: 'tool_execution_start', toolCallId: `burst-${sent}`, toolName: 'bash', args: { step: sent } });
+      if (++sent >= 80) { clearInterval(timer); finish('BURST-OK'); }
+    }, 200);
+    return;
+  }
   if (cmd.message === 'FAIL') return finish('', 'error');
   if (cmd.message === 'CRASH') return process.exit(2);
   if (cmd.message.startsWith('REMEMBER ')) { session.token = cmd.message.slice(9); save(); return finish('OK'); }

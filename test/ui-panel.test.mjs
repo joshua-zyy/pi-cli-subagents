@@ -205,10 +205,10 @@ test('a list spends spare rows on instances instead of reserving nonexistent scr
 });
 
 test('i opens details including task, result, log and session; Esc navigates back', () => {
-  const { instance, actions, render } = panel([view({ sessionId: 'sid-1', text: 'OK complete', lastActivity: 'tool_execution_end: bash' })]);
+  const { instance, actions, render } = panel([view({ sessionId: 'sid-1', text: 'OK complete', lastActivity: 'Running a command' })]);
   instance.handleInput('i'); assert.equal(instance.mode, 'detail'); const rows = render(); const body = text(rows);
   assert.match(rows[0], /^Subagent worker · Running$/);
-  for (const fragment of ['ID a1', 'Directory D:/work', 'Elapsed 10.0s', 'Session sid-1', 'Log events.jsonl', 'Task', 'Implement widget', 'Latest activity', 'tool_execution_end: bash', 'Result', 'OK complete', 's message', 'v conversation']) assert.ok(body.includes(fragment), `Missing ${fragment}`);
+  for (const fragment of ['ID a1', 'Directory D:/work', 'Elapsed 10.0s', 'Session sid-1', 'Log events.jsonl', 'Task', 'Implement widget', 'Latest activity', 'Running a command', 'Result', 'OK complete', 's message', 'v conversation']) assert.ok(body.includes(fragment), `Missing ${fragment}`);
   instance.handleInput(keys.escape); assert.equal(instance.mode, 'list');
   instance.handleInput(keys.escape); assert.deepEqual(actions, [undefined]); assert.equal(instance.mode, 'list');
 });

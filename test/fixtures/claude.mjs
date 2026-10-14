@@ -65,6 +65,29 @@ const questionInput = {
     { question: 'How many items?', header: 'Count', kind: 'number', options: [], multiSelect: false, min: 1, max: 10, step: 1, defaultValue: 2, unit: 'items' },
   ],
 };
+// Native stream-json shapes captured from a real 2.1.283 run: thinking/text/tool_use block
+// starts and their deltas, a long-running tool heartbeat, completed assistant messages, and the
+// tool_result fed back as a user record.
+function streamLabels() {
+  const toolId = randomUUID();
+  const frame = event => emit({ type: 'stream_event', session_id: sessionId, parent_tool_use_id: null, event, uuid: randomUUID() });
+  const assistant = content => emit({ type: 'assistant', session_id: sessionId, parent_tool_use_id: null,
+    message: { id: randomUUID(), role: 'assistant', content } });
+  frame({ type: 'content_block_start', index: 0, content_block: { type: 'thinking' } });
+  frame({ type: 'content_block_delta', index: 0, delta: { type: 'thinking_delta', thinking: 'fixture' } });
+  frame({ type: 'content_block_stop', index: 0 });
+  frame({ type: 'content_block_start', index: 1, content_block: { type: 'text' } });
+  frame({ type: 'content_block_delta', index: 1, delta: { type: 'text_delta', text: 'fixture' } });
+  frame({ type: 'content_block_stop', index: 1 });
+  assistant([{ type: 'text', text: 'fixture reply' }]);
+  frame({ type: 'content_block_start', index: 2, content_block: { type: 'tool_use', id: toolId, name: 'Write' } });
+  emit({ type: 'tool_progress', session_id: sessionId, parent_tool_use_id: null, tool_use_id: toolId, tool_name: 'Write', elapsed_time_seconds: 30, heartbeat: true });
+  assistant([{ type: 'tool_use', id: toolId, name: 'Write', input: { file_path: 'work.txt' } }]);
+  emit({ type: 'user', session_id: sessionId, parent_tool_use_id: null, message: { role: 'user', content: [
+    { type: 'tool_result', tool_use_id: toolId, content: 'fixture result' },
+  ] } });
+  finish('STREAM_LABELS');
+}
 const questionRequests = new Map(), questionResults = [];
 function askQuestion(extra = {}, input = structuredClone(questionInput)) {
   const toolId = randomUUID();
@@ -115,6 +138,7 @@ for await (const line of readline.createInterface({ input: process.stdin })) {
     system('session_state_changed', { state: 'running' });
     emit({ ...record, session_id: sessionId, isReplay: true });
     if (task === 'HOLD') continue;
+    if (task === 'STREAM_LABELS') { streamLabels(); continue; }
     if (task === 'FAIL') { finish('model failed', { is_error: true, terminal_reason: 'api_error' }); continue; }
     if (task === 'QUEUE_NONEMPTY') { finish('MORE TO DO', { queued_turn_count: 1 }); continue; }
     if (task === 'FOREIGN_RESULT') emit({ type: 'result', subtype: 'success', is_error: false, session_id: sessionId, user_message_uuid: randomUUID(), result: 'FOREIGN', queued_turn_count: 0 });

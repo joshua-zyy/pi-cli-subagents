@@ -181,6 +181,13 @@ function execute(message) {
     return finish('TRANSCRIPT-OK');
   }
   if (message === 'COMMENTARY') {
+    // Real turns open a reasoning item, then the message item, before the deltas arrive.
+    notify('item/started', { threadId: thread.id, turnId: turn.id,
+      item: { type: 'reasoning', id: 'reason-1', summary: [], content: [] } });
+    notify('item/completed', { threadId: thread.id, turnId: turn.id,
+      item: { type: 'reasoning', id: 'reason-1', summary: [], content: [] } });
+    notify('item/started', { threadId: thread.id, turnId: turn.id,
+      item: { type: 'agentMessage', id: 'progress', text: '', phase: 'commentary' } });
     notify('item/agentMessage/delta', { threadId: thread.id, turnId: turn.id, itemId: 'progress', delta: 'Working...' });
     notify('item/completed', { threadId: thread.id, turnId: turn.id, item: { type: 'agentMessage', id: 'progress', text: 'Working...', phase: 'commentary' } });
     return finish('FINAL');

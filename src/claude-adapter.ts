@@ -14,6 +14,32 @@ import { claudeQuestionAnswers, readClaudeQuestionFields } from "./claude-questi
 type Json = Record<string, any>;
 const object = (value: unknown): value is Json => value !== null && typeof value === "object" && !Array.isArray(value);
 const uuid = /^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/;
+/**
+ * The status line shows what the child is doing, and a step label never uses the raw stream-json
+ * record type (only the refusal detail below names a native method on purpose). A record that can
+ * name a step is labelled; deltas and block stops cannot, so they add nothing. A record that only
+ * repeats the step already on screen is still emitted: the worker needs it to keep state.json fresh.
+ */
+function claudeActivity(record: Json): string | undefined {
+  if (record.type === "stream_event") {
+    if (record.event?.type !== "content_block_start") return undefined;
+    const block = record.event.content_block;
+    if (block?.type === "thinking") return "Thinking";
+    if (block?.type === "text") return "Writing a reply";
+    return block?.type === "tool_use" && typeof block.name === "string" ? `Using ${block.name}` : undefined;
+  }
+  if (record.type === "tool_progress") return typeof record.tool_name === "string" ? `Using ${record.tool_name}` : "Using a tool";
+  if (record.type === "assistant") {
+    const content = record.message?.content;
+    const tool = Array.isArray(content) ? content.find((part) => part?.type === "tool_use" && typeof part.name === "string") : undefined;
+    return tool ? `Using ${tool.name}` : "Writing a reply";
+  }
+  if (record.type === "user") {
+    const content = record.message?.content;
+    return Array.isArray(content) && content.some((part) => part?.type === "tool_result") ? "Reading tool results" : undefined;
+  }
+  return undefined;
+}
 type ClaudeSession = Extract<NativeSession, { cli: "claude" }>;
 /** A known pre-dispatch refusal, not an uncertain native operation. */
 export class ClaudeCapabilityError extends Error {}
@@ -224,7 +250,10 @@ export class ClaudeAdapter implements CliAdapter {
       for (const id of ids) if (this.messages.has(id)) { this.pendingMessages.delete(id); this.completedMessages.add(id); this.mark(`input:${id}`); }
       this.clearApprovals(); this.tools.clear(); this.result = record; this.maybeSettle();
     }
-    if (!this.settled && this.activeMessage && ["assistant", "stream_event", "tool_progress", "user"].includes(record.type)) this.emit({ type: "activity", detail: record.type });
+    if (!this.settled && this.activeMessage) {
+      const detail = claudeActivity(record);
+      if (detail) this.emit({ type: "activity", detail });
+    }
   }
   private maybeSettle(): void {
     // Local stream-json may omit session_state_changed entirely. The matching result is

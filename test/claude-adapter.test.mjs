@@ -396,3 +396,13 @@ test('Claude early unscoped approval is denied without aborting startup; malform
     assert(!events.some(e=>e.type==='settled' && e.status==='completed')); await c.stop();
   }
 });
+
+test('Claude activity describes the current step instead of the raw stream-json record type', async t => {
+  const { client } = setup(t); const { c, events } = client();
+  await c.ready(); await c.start('STREAM_LABELS', 'labels');
+  assert.equal((await terminal(events)).text, 'STREAM_LABELS');
+  const labels = events.filter(e => e.type === 'activity').map(e => e.detail);
+  // Two deltas and two block stops add nothing: only a step start is a label.
+  assert.deepEqual(labels, ['Thinking', 'Writing a reply', 'Writing a reply', 'Using Write', 'Using Write', 'Using Write', 'Reading tool results']);
+  await c.end();
+});

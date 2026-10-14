@@ -759,3 +759,14 @@ test('Codex approval response without server resolution cannot be submitted a se
   assert.equal(requests().filter(r => !r.method && r.id === 17).length, 1);
   await c.stop();
 });
+
+test('Codex activity names the step instead of the raw item method', async t => {
+  const { client } = setup(t); const { c, events } = client(); await c.ready();
+  await c.start('TRANSCRIPT', 'one'); await runSettled(events, 'one');
+  await c.start('COMMENTARY', 'two'); await runSettled(events, 'two');
+  const labels = events.filter(e => e.type === 'activity').map(e => e.detail);
+  assert(!labels.some(label => label.includes('/')), `raw native method leaked: ${JSON.stringify(labels)}`);
+  for (const expected of ['Turn started', 'Thinking', 'Reading the task', 'Running a command', 'Writing a reply'])
+    assert(labels.includes(expected), `${expected} missing from ${JSON.stringify(labels)}`);
+  await c.end();
+});

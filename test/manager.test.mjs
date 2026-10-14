@@ -292,3 +292,25 @@ test('racing resumes cannot start two CLI owners for the same session', { timeou
   const lock = readJson(path.join(manager.root, start.id, 'owner.lock'));
   assert.equal(lock.pid, state.workerPid);
 });
+
+test('identical activity labels are collapsed, and an unchanged step still refreshes the state file', { timeout: 60_000 }, async t => {
+  const { cwd, manager } = setup(t);
+  const start = await manager.spawn('worker', defaultRoles.worker, cwd, 'ACTIVITY_BURST');
+  const statePath = path.join(manager.root, start.id, 'state.json');
+  await waitUntil('first burst activity', () => manager.get(start.id).lastActivity === 'Using bash', 10_000);
+  const seen = new Set();
+  const deadline = Date.now() + 9_000;
+  while (Date.now() < deadline) {
+    seen.add(fs.readFileSync(statePath, 'utf8'));
+    await new Promise(resolve => setTimeout(resolve, 150));
+  }
+  assert.equal(manager.get(start.id).phase, 'running', 'the burst must still be emitting while the file is sampled');
+  assert(seen.size <= 4, `an unchanged label must not be written per record: ${seen.size} distinct state files in 9s`);
+  assert(seen.size >= 2, 'an unchanged step must still refresh the state file, or a healthy child on one long step is reported as stalled');
+  const settled = await waitUntil('burst completion', () => {
+    const state = manager.get(start.id);
+    return ['idle', 'closed'].includes(state.phase) ? state : undefined;
+  }, 30_000);
+  assert.equal(settled.text, 'BURST-OK');
+});
+

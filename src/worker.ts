@@ -11,6 +11,15 @@ import { nativeSession, type CliAdapter, type AdapterEvent } from "./cli-adapter
 import { readJson, writeJson } from "./storage.js";
 import type { AgentSpec, AgentState, Control, ControlResult, OperationReceipt, Question, Report, StartRequest } from "./types.js";
 
+/**
+ * A step label repeats while its step lasts: repeated block starts for one tool, tool_progress
+ * heartbeats, and Codex's started/completed pairs all name the step already on screen. Only a
+ * change is durable, but state.json also carries the liveness timestamp the parent reads to decide
+ * an instance stalled (15 minutes), so an unchanged label still refreshes the file this often:
+ * far below that window, far above the cadence of the records that repeat one label.
+ */
+const ACTIVITY_REFRESH_MS = 5_000;
+
 async function run(dir: string, runId: string): Promise<void> {
   let runDir = path.join(dir, "runs", runId);
   const runtimeId = randomUUID();
@@ -122,8 +131,10 @@ async function run(dir: string, runId: string): Promise<void> {
   function event(record: AdapterEvent): void {
     if (ending || (record.runId !== undefined && record.runId !== runId)) return;
     if (record.type === "activity") {
+      const label = state.lastActivity, phase = state.phase;
       state.lastActivity = record.detail;
-      refreshPhase(); save();
+      refreshPhase();
+      if (state.lastActivity !== label || state.phase !== phase || Date.now() - state.updatedAt >= ACTIVITY_REFRESH_MS) save();
     }
     if (record.type === "question") {
       const question: Question = record.question;

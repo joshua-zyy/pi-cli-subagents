@@ -192,3 +192,11 @@ test('Pi ambiguous interrupt poisons the runtime until resource release, even af
     assert.equal((await c.stop()).exit.code, 0);
   }
 });
+
+test('Pi activity names the tool instead of the raw native event type', async t => {
+  const { c, events } = setup(t); await c.ready();
+  await c.start('STREAM', 'one'); await settled(events, 'one');
+  const labels = events.filter(e => e.type === 'activity').map(e => e.detail);
+  assert.deepEqual(labels, ['Starting', 'Using read', 'Finished read']);
+  await c.stop();
+});

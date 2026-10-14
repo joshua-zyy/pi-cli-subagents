@@ -16,6 +16,20 @@ type RecordValue = Record<string, any>;
 const object = (value: unknown): value is RecordValue => value !== null && typeof value === "object" && !Array.isArray(value);
 const textInput = (text: string) => [{ type: "text", text }];
 const requestKey = (id: string | number): string => `${typeof id}:${id}`;
+/** Human wording for the current step; a step label never uses the raw app-server method name. */
+function codexActivity(item: unknown): string {
+  if (!object(item)) return "Working";
+  if (item.type === "reasoning") return "Thinking";
+  if (item.type === "commandExecution") return "Running a command";
+  if (item.type === "fileChange") return "Editing files";
+  if (item.type === "mcpToolCall") {
+    const tool = typeof item.tool === "string" ? item.tool.trim() : "";
+    return tool ? `Calling ${tool}` : "Calling a tool";
+  }
+  if (item.type === "agentMessage") return "Writing a reply";
+  if (item.type === "userMessage") return "Reading the task";
+  return "Working";
+}
 // Async message questions have no RPC request ID; their answer is captured-turn text.
 type Approval = { id: string; rpcId?: string | number; threadId: string; turnId: string;
   attempted: boolean; allowed?: Set<string>; fields?: QuestionField[];
@@ -159,7 +173,7 @@ export class CodexAdapter implements CliAdapter {
       return;
     }
     if (record.method === "turn/started" && params.threadId === this.thread?.threadId && params.turn?.id === this.activeTurn && this.activeTurn) {
-      this.emit({ type: "activity", detail: "turn/started" });
+      this.emit({ type: "activity", detail: "Turn started" });
     }
     if (params.threadId !== this.thread?.threadId || !this.activeTurn || params.turnId !== this.activeTurn && params.turn?.id !== this.activeTurn) return;
     if ((record.method === "item/started" || record.method === "item/completed" && params.item?.type === "mcpToolCall") &&
@@ -211,7 +225,7 @@ export class CodexAdapter implements CliAdapter {
         this.emit({ type: "settled", status, text: result, ...(status === "failed" ? { error: String(turn.error?.message ?? `Codex turn status: ${turn.status}`) } : {}) });
       }).catch(error => this.emit({ type: "settled", status: "failed", text: "", error: (error as Error).message }, run));
     } else if (record.method === "item/started" || record.method === "item/completed") {
-      this.emit({ type: "activity", detail: record.method });
+      this.emit({ type: "activity", detail: codexActivity(params.item) });
     }
   }
 

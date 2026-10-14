@@ -8,6 +8,15 @@ import { ASK_PARENT_TOOL, parentQuestionDialog, readParentQuestion, type ParentQ
 import type { AdapterEvent, AdapterOptions, CliAdapter, InteractionReply } from "./cli-adapter.js";
 import type { Delivery, NativeSession, Question, SessionHandle } from "./types.js";
 
+/** Human wording for the current step; a step label never uses the raw Pi event type. */
+function piActivity(type: string, toolName: unknown): string {
+  const tool = typeof toolName === "string" && toolName.trim() ? toolName : undefined;
+  if (type === "agent_start") return "Starting";
+  if (type === "tool_execution_start") return tool ? `Using ${tool}` : "Using a tool";
+  if (type === "tool_execution_end") return tool ? `Finished ${tool}` : "Finished a tool";
+  return "Working";
+}
+
 /** Read only the original header: opening a SessionManager can migrate or repair the file. */
 export async function inspectPiSession(session: SessionHandle): Promise<void> {
   const file = await open(session.sessionFile, "r");
@@ -119,7 +128,7 @@ export class PiAdapter implements CliAdapter {
     }
     if (this.active !== false && record.type === "message_end" && typeof record.message === "object" && record.message?.role === "assistant") this.assistant = record.message;
     if (record.type === "agent_start" || record.type === "tool_execution_start" || record.type === "tool_execution_end")
-      this.emit({ type: "activity", detail: record.type === "agent_start" ? "agent_start" : `${record.type}: ${record.toolName}` }, this.active === false ? null : this.runId);
+      this.emit({ type: "activity", detail: piActivity(record.type, record.toolName) }, this.active === false ? null : this.runId);
     if (record.type === "extension_ui_request" && ["select", "confirm", "input", "editor"].includes(String(record.method))) {
       if ((record.method === "select" || record.method === "input") && typeof record.id === "string" && record.message === undefined && record.prefill === undefined) {
         for (const [callId, active] of this.parentCalls) {
