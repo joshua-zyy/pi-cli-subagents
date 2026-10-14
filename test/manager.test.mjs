@@ -350,6 +350,29 @@ test('a worker that cannot load its module is reported by its exit instead of th
   assert.equal(fs.existsSync(path.join(manager.root, instance, 'state.json')), false, 'this failure happens before any state record exists');
 });
 
+test('a resumed worker that dies before accepting the new run is reported by its exit', { timeout: 30_000 }, async () => {
+  const copy = path.join(tempDir('manager-dist'), 'dist');
+  fs.cpSync(fileURLToPath(new URL('../dist', import.meta.url)), copy, { recursive: true });
+  fs.rmSync(path.join(copy, 'worker.js'));
+  const { AgentManager: CopiedManager } = await import(pathToFileURL(path.join(copy, 'manager.js')).href);
+  const cwd = tempDir('manager-resume');
+  const parent = path.join(cwd, 'parent.jsonl'); fs.writeFileSync(parent, '{}\n');
+  const manager = new AgentManager(parent, launch);
+  const start = await manager.spawn('worker', defaultRoles.worker, cwd, 'DONE');
+  const previous = await release(manager, start.id);
+  const copied = new CopiedManager(parent, launch);
+  const startedAt = Date.now();
+  await assert.rejects(copied.send(start.id, 'HOLD'), error => {
+    assert.match(error.message, /Worker exited \(/);
+    // The body must name the run that failed to start, not the retained previous run.
+    const attempted = error.message.match(/run ([0-9a-f-]{36}): Worker exited/);
+    assert.ok(attempted, error.message);
+    assert.notEqual(attempted[1], previous.runId, error.message);
+    return true;
+  });
+  assert(Date.now() - startedAt < 20_000, 'a dead worker must be reported by its exit, not the 45s startup timeout');
+});
+
 test('a resident runtime writes each run to its own raw log', { timeout: 30_000 }, async t => {
   const { cwd, manager } = setup(t);
   const start = await manager.spawn('worker', defaultRoles.worker, cwd, 'FIRST');
