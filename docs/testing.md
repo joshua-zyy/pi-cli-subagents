@@ -2,7 +2,7 @@
 
 ## Entry points and boundaries
 
-The existing Node test infrastructure is unchanged. `scripts/test.mjs` selects local tests, isolates the environment before imports, and runs tests serially. The counts and costs below are the baseline from the introduction of test tiers (`bf85d3e`): the existing 45 files and 385 tests were retained, with 5 launcher tests added, for a total of 390. Later regression tests do not rewrite historical measurements; use actual execution output for current counts.
+The existing Node test infrastructure is unchanged. `scripts/test.mjs` selects local tests, isolates the environment before imports, and runs tests serially. The counts and costs below are the baseline from the introduction of test tiers (`b45f3a6`): the existing 45 files and 385 tests were retained, with 5 launcher tests added, for a total of 390. Later regression tests do not rewrite historical measurements; use actual execution output for current counts.
 
 | Entry point | Files / tests | Scope |
 |---|---:|---|
@@ -96,7 +96,7 @@ Claude 驻留验收复用原 adapter/manager/workspace 替身：同 worker/CLI �
 
 ## Cost measurements
 
-These measurements were collected in one run per entry point on 2026-10-08 at `8b958b6` (Windows / Node 22.21.0); each entry point includes one build. All passed with skipped=0; real CLI/model acceptance was NOT_RUN throughout. The counts are the current suite, which is larger than the historical `bf85d3e` baseline in the tables above.
+These measurements were collected in one run per entry point on 2026-10-08 at `685b6c3` (Windows / Node 22.21.0); each entry point includes one build. All passed with skipped=0; real CLI/model acceptance was NOT_RUN throughout. The counts are the current suite, which is larger than the historical `bf85d3e` baseline in the tables above.
 
 | Entry point | Passed / total | Wall time including build | Node runner time |
 |---|---:|---:|---:|
