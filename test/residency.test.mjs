@@ -334,6 +334,7 @@ for (const [mode, message] of [['steer', 'B done'], ['followUp', 'HOLD B']]) tes
   if (message === 'HOLD B') {
     assert.equal(native().fixtureActive, true, 'native B really started, it was not just a receipt');
     assert.equal(during.phase, 'running', JSON.stringify({ host: during.phase, nativeActive: native().fixtureActive, publishedText: during.text }));
+    assert.equal(during.accepted, true, 'an accepted in-flight turn is what the stop tool must refuse');
     assert.throws(() => m.getResult(first.id, first.runId), /No final result/, 'A must not be published before the admitted input finishes');
     receipt(await m.interrupt(first.id), 'interrupt', 'settled');
   }

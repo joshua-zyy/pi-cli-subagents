@@ -200,7 +200,7 @@ export default function extension(pi: ExtensionAPI): void {
 
   const registerSubagent = (catalog: string): void => pi.registerTool({
     name: "subagent", label: "CLI subagent",
-    description: `Start or continue a persistent CLI subagent. send keeps the same native session: idle starts a new run; closed resumes the original session. interrupt ends the captured run without releasing its runtime; Claude also cancels that run's queued inputs. stop releases active or idle processes while retaining sessions, history and results. Answer pending interactions with subagent_reply.\n\nworkspace_create/workspace_integrate manage detached Git worktrees of the parent repository or of the repository at cwd; read the delegate-cli-agents workspaces reference before either. Inherit ALL uncommitted parent changes only with explicit authorization.\n\nGive the goal, necessary context, authorized scope and acceptance criteria; a new instance has not seen this conversation. Let the child choose its approach unless required behavior constrains it.\n\nReports return automatically. Do not sleep or poll for completion; continue independent work or end this turn. Receipts do not prove execution or success. Inspect uncertain outcomes before retrying; do not bypass refusals with replacement instances or edited records.\n\n${catalog}`,
+    description: `Start or continue a persistent CLI subagent. send keeps the same native session: idle starts a new run; closed resumes the original session. interrupt ends the captured run without releasing its runtime; Claude also cancels that run's queued inputs. stop releases a runtime that has no accepted turn in flight; while a turn is in flight it refuses, because releasing would discard that turn — interrupt it first. Sessions, history and results are retained. Answer pending interactions with subagent_reply.\n\nworkspace_create/workspace_integrate manage detached Git worktrees of the parent repository or of the repository at cwd; read the delegate-cli-agents workspaces reference before either. Inherit ALL uncommitted parent changes only with explicit authorization.\n\nGive the goal, necessary context, authorized scope and acceptance criteria; a new instance has not seen this conversation. Let the child choose its approach unless required behavior constrains it.\n\nReports return automatically. Do not sleep or poll for completion; continue independent work or end this turn. Receipts do not prove execution or success. Inspect uncertain outcomes before retrying; do not bypass refusals with replacement instances or edited records.\n\n${catalog}`,
     parameters: Type.Object({
       action: Type.Union([Type.Literal("start"), Type.Literal("send"), Type.Literal("interrupt"), Type.Literal("stop"), Type.Literal("workspace_create"), Type.Literal("workspace_integrate")], { description: "interrupt requires native captured-turn confirmation; unsupported capabilities reject. send to a stopping instance waits for release before attempting original-session resume; uncertain release rejects." }),
       role: Type.Optional(Type.String({ description: "start only, required: configured role name" })),
@@ -246,6 +246,14 @@ ${receiptText(state)}`;
       if (args.action !== "stop" && args.action !== "interrupt") throw new Error("Unknown subagent action; use start, send, interrupt, stop, workspace_create or workspace_integrate");
       checkFields(args, ["action", "id"]);
       const manager = parentManager(ctx, launch);
+      if (args.action === "stop") {
+        // Releasing the runtime of an accepted, in-flight turn ends that turn as "Parent requested
+        // shutdown" and keeps none of its output. Interrupt is the operation that ends one turn, so
+        // refuse here rather than discard work the model did not mean to cancel.
+        const observed = manager.get(args.id!);
+        if (observed.accepted && ["starting", "running", "waiting"].includes(observed.phase))
+          throw new Error(`A turn is in flight (${observed.phase}); stop releases processes without ending it, which would discard that turn. Interrupt first, then stop.`);
+      }
       const state = args.action === "interrupt" ? await manager.interrupt(args.id!) : await manager.close(args.id!);
       return content(`${receiptText(state)}
 ${view(state)}`);

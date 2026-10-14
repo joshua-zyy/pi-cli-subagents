@@ -79,6 +79,7 @@ test('the reply tool exposes one structured answer map without changing the pare
 
 test('the stop and workspace actions retain the existing runtime operation and target', async t => {
   const { tools, invoke } = harness(), calls = [];
+  t.mock.method(AgentManager.prototype, 'get', () => ({ id: 'original', phase: 'idle', accepted: false, protocolVersion: 2, runtimeId: 'runtime', questions: [] }));
   t.mock.method(AgentManager.prototype, 'close', async id => { calls.push(['stop', id]); return { id, phase: 'stopped' }; });
   t.mock.method(WorkspaceStore.prototype, 'create', async (cwd, args) => { calls.push(['create', cwd, args]); return { id: 'workspace' }; });
   t.mock.method(WorkspaceStore.prototype, 'integrate', async id => { calls.push(['integrate', id]); return { workspace: id, status: 'applied' }; });
@@ -96,6 +97,24 @@ test('the stop and workspace actions retain the existing runtime operation and t
     ['create', path.resolve(process.cwd(), 'other-repository'), { includeUncommitted: undefined }],
     ['integrate', 'workspace'],
   ]);
+});
+
+test('stop refuses an accepted turn in flight instead of discarding it', async t => {
+  const { invoke } = harness(), calls = [];
+  let observed = { id: 'busy', phase: 'running', accepted: true, protocolVersion: 2, runtimeId: 'runtime', questions: [] };
+  t.mock.method(AgentManager.prototype, 'get', () => observed);
+  t.mock.method(AgentManager.prototype, 'close', async id => { calls.push(['stop', id]); return { id, phase: 'stopped' }; });
+  for (const phase of ['running', 'waiting']) {
+    observed = { ...observed, phase };
+    await assert.rejects(invoke('subagent', { action: 'stop', id: 'busy' }), /Interrupt first, then stop/);
+  }
+  // A runtime that never accepted a task (a startup dialog) and one still submitting keep the
+  // release: interrupt cannot end a turn the CLI has not received.
+  for (const phase of ['waiting', 'starting']) {
+    observed = { ...observed, phase, accepted: false };
+    await invoke('subagent', { action: 'stop', id: 'busy' });
+  }
+  assert.deepEqual(calls, [['stop', 'busy'], ['stop', 'busy']], 'a refused stop never reaches the runtime');
 });
 
 test('activity tool forwards the exact query and cancellation signal without adding an envelope', async t => {

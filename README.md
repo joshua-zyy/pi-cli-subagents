@@ -72,9 +72,10 @@ Pi children can ask the parent a single task question through `subagent_ask_pare
 - **A receipt is not execution.** `accepted` means the native CLI acknowledged the input. It does not
   mean the model read it or the work succeeded. Read the report and the files before claiming success.
 - **Sessions persist, processes need not.** An instance keeps its native session, history and results,
-  and `send` continues the same conversation. `stop` releases processes without deleting that history.
-  Whether a backend stays resident between turns is reported per instance rather than promised
-  uniformly.
+  and `send` continues the same conversation. `stop` releases processes without deleting that history,
+  and refuses while a turn it already accepted is still in flight: releasing that runtime would
+  discard the turn, so `interrupt` it first. Whether a backend stays resident between turns is
+  reported per instance rather than promised uniformly.
 - **Answers are not permissions.** A reply supplies task context, or reviews one request. It never
   grants a session-wide or persistent permission.
 - **Worktrees isolate; they are not a sandbox.** `workspace_create` makes a detached worktree from

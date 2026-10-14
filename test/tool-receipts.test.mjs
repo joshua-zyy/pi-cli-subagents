@@ -140,10 +140,15 @@ test('public input and release receipts preserve actual operation evidence rathe
   const { cwd, invoke } = setup(t);
   const base = { id:randomUUID(), runId:randomUUID(), runtimeId:randomUUID(), protocolVersion:2,
     role:'worker', cli:'pi', cwd, workerPid:0, updatedAt:1, questions:[], logFile:'fixture', phase:'running', accepted:true };
+  // The stop tool refuses an accepted turn in flight, so that row's runtime has none: the tool
+  // reads this view before it dispatches, and a busy one would be refused rather than receipted.
+  const releasable = { ...base, phase:'idle', accepted:false };
   for (const [method, operation, status] of [['spawn','start','accepted'],['spawn','start','unconfirmed'],
     ['send','send','accepted'],['send','send','queued'],['send','send','unconfirmed'],['close','stop','released']]) {
+    const observed = method === 'close' ? releasable : base;
     const receipt = { operation, status, runId:base.runId, runtimeId:base.runtimeId };
-    const mock = t.mock.method(AgentManager.prototype, method, async () => ({ ...base, phase:method === 'close'?'closed':'running', receipt }));
+    const mock = t.mock.method(AgentManager.prototype, method, async () => ({ ...observed, phase:method === 'close'?'closed':'running', receipt }));
+    const view = t.mock.method(AgentManager.prototype, 'get', () => observed);
     try {
       const args = operation === 'start' ? {action:operation,role:'worker',task:'fixture'} : {action:operation,id:base.id,...(operation === 'send'?{message:'fixture'}:{})};
       const text = (await invoke('subagent',args)).content[0].text;
@@ -151,7 +156,7 @@ test('public input and release receipts preserve actual operation evidence rathe
       assert.doesNotMatch(text,/model has (read|executed)|task succeeded/i);
       if(status === 'unconfirmed') assert.match(text,/unconfirmed|not confirmed/i);
       if(status === 'queued') assert.match(text,/queued/i);
-    } finally { mock.mock.restore(); }
+    } finally { view.mock.restore(); mock.mock.restore(); }
   }
 });
 
