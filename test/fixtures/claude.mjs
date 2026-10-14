@@ -67,7 +67,8 @@ const questionInput = {
 };
 // Native stream-json shapes captured from a real 2.1.283 run: thinking/text/tool_use block
 // starts and their deltas, a long-running tool heartbeat, completed assistant messages, and the
-// tool_result fed back as a user record.
+// tool_result fed back as a user record. The redacted_thinking and server_tool_use blocks below are
+// the unverified shapes this fixture uses to pin the fallback for a block the build cannot name.
 function streamLabels() {
   const toolId = randomUUID();
   const frame = event => emit({ type: 'stream_event', session_id: sessionId, parent_tool_use_id: null, event, uuid: randomUUID() });
@@ -76,13 +77,17 @@ function streamLabels() {
   frame({ type: 'content_block_start', index: 0, content_block: { type: 'thinking' } });
   frame({ type: 'content_block_delta', index: 0, delta: { type: 'thinking_delta', thinking: 'fixture' } });
   frame({ type: 'content_block_stop', index: 0 });
-  frame({ type: 'content_block_start', index: 1, content_block: { type: 'text' } });
-  frame({ type: 'content_block_delta', index: 1, delta: { type: 'text_delta', text: 'fixture' } });
+  frame({ type: 'content_block_start', index: 1, content_block: { type: 'redacted_thinking' } });
   frame({ type: 'content_block_stop', index: 1 });
+  frame({ type: 'content_block_start', index: 2, content_block: { type: 'text' } });
+  frame({ type: 'content_block_delta', index: 2, delta: { type: 'text_delta', text: 'fixture' } });
+  frame({ type: 'content_block_stop', index: 2 });
   assistant([{ type: 'text', text: 'fixture reply' }]);
-  frame({ type: 'content_block_start', index: 2, content_block: { type: 'tool_use', id: toolId, name: 'Write' } });
+  frame({ type: 'content_block_start', index: 3, content_block: { type: 'tool_use', id: toolId, name: 'Write' } });
   emit({ type: 'tool_progress', session_id: sessionId, parent_tool_use_id: null, tool_use_id: toolId, tool_name: 'Write', elapsed_time_seconds: 30, heartbeat: true });
   assistant([{ type: 'tool_use', id: toolId, name: 'Write', input: { file_path: 'work.txt' } }]);
+  frame({ type: 'content_block_start', index: 4, content_block: { type: 'server_tool_use', id: 'srv-1', name: 'web_search' } });
+  frame({ type: 'content_block_stop', index: 4 });
   emit({ type: 'user', session_id: sessionId, parent_tool_use_id: null, message: { role: 'user', content: [
     { type: 'tool_result', tool_use_id: toolId, content: 'fixture result' },
   ] } });

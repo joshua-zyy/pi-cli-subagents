@@ -24,9 +24,12 @@ function claudeActivity(record: Json): string | undefined {
   if (record.type === "stream_event") {
     if (record.event?.type !== "content_block_start") return undefined;
     const block = record.event.content_block;
-    if (block?.type === "thinking") return "Thinking";
+    if (block?.type === "thinking" || block?.type === "redacted_thinking") return "Thinking";
     if (block?.type === "text") return "Writing a reply";
-    return block?.type === "tool_use" && typeof block.name === "string" ? `Using ${block.name}` : undefined;
+    if (block?.type === "tool_use" && typeof block.name === "string") return `Using ${block.name}`;
+    // A block type this build cannot name still starts a step: it must stay visible, and its
+    // records keep the state file's liveness timestamp fresh while the step lasts.
+    return typeof block?.type === "string" ? "Working" : undefined;
   }
   if (record.type === "tool_progress") return typeof record.tool_name === "string" ? `Using ${record.tool_name}` : "Using a tool";
   if (record.type === "assistant") {
