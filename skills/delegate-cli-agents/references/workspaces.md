@@ -5,7 +5,12 @@ calls; [../SKILL.md](../SKILL.md) covers delivery, permissions and recovery.
 
 A managed workspace is a detached Git worktree owned by this extension, created from committed HEAD.
 Choose isolation according to the task's requirements; passing `cwd` instead uses that directory
-directly without creating a worktree.
+directly without creating a worktree. `workspace_create` takes the repository from its own `cwd`
+(default: the parent's directory, and a relative path resolves against it), so a task on another
+local repository can give each writer its own worktree; integration and uncommitted-change
+inheritance then refer to that repository. The extension does not verify that the user authorized
+work in that repository, so confirm it before creating a workspace outside the parent's project, and
+never point `cwd` at an existing managed worktree.
 
 ## Create
 

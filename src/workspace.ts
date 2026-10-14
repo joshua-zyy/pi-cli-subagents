@@ -184,6 +184,8 @@ export class WorkspaceStore {
   async create(cwd: string, options: SnapshotOptions = {}): Promise<WorkspaceView> {
     const reason = options.includeUncommitted?.reason;
     if (options.includeUncommitted !== undefined && !reason?.trim()) throw new Error("Inheriting uncommitted changes requires an explicit authorization reason");
+    // A cwd inside a managed worktree would make this workspace's integration write into that one.
+    this.assertShared(cwd);
     return this.parentOperation("create", async () => {
       cwd = realpathSync(cwd);
       const repo = realpathSync((await git(cwd, ["rev-parse", "--show-toplevel"])).toString().trim());

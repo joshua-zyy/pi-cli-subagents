@@ -12,6 +12,8 @@ export const customType = "cli-subagents-report";
 const REPORT_HEAD = 2000;
 const REPORT_TAIL = 3600;
 const REPORT_LIMIT = REPORT_HEAD + REPORT_TAIL;
+/** One result read can return this many characters; the tool's limit must accept the hint. */
+const RESULT_READ_LIMIT = 12_000;
 const WAITING_STATUS_KEY = "subagent-waiting";
 
 /** A request may offer many values, so the rendered list stays bounded. */
@@ -134,7 +136,7 @@ export function deliverReports(
       // Result offsets address source.text, not the notification's optional error prefix.
       const offset = Math.max(0, REPORT_HEAD - errorPrefix.length);
       const length = raw.length - REPORT_TAIL - errorPrefix.length - offset;
-      const resultHint = final && clipped ? `\nRead result: subagent_query(${JSON.stringify({ action: "result", id: report.agentId, runId: report.runId, offset, limit: Math.max(1, Math.min(REPORT_LIMIT, length)) })})` : "";
+      const resultHint = final && clipped ? `\nRead result: subagent_query(${JSON.stringify({ action: "result", id: report.agentId, runId: report.runId, offset, limit: Math.max(1, Math.min(RESULT_READ_LIMIT, length)) })})` : "";
       const replyHint = report.status === "waiting" ? waitingAnswerLine(report) : "";
       return [{ report, content: `[Subagent ${report.agentId} · ${report.status}]\n${summary}${resultHint}${replyHint}` }];
     } catch (error) {

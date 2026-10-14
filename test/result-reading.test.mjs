@@ -94,11 +94,12 @@ test('manager → notification preserves the true tail and advertises an exact r
   const link = content.match(/Read result: subagent_query\((\{[^\n]+\})\)/);
   assert.ok(link, 'a clipped completion provides a machine-readable result locator');
   const params = JSON.parse(link[1]);
-  assert.deepEqual(params, { action: 'result', id: a.id, runId: a.runId, offset: 2000, limit: 5600 });
+  const omitted = longText.length - 5600, read = Math.min(12000, omitted);
+  assert.deepEqual(params, { action: 'result', id: a.id, runId: a.runId, offset: 2000, limit: read });
   const page = await h.invoke(params);
   assert.equal(page.runId, a.runId);
   assert.equal(page.totalLength, longText.length);
-  assert.equal(page.text, longText.slice(2000, 7600));
+  assert.equal(page.text, longText.slice(2000, 2000 + read));
 });
 
 test('only clipped results request a read, starting at the omitted text rather than the displayed tail', async () => {
@@ -118,11 +119,11 @@ test('only clipped results request a read, starting at the omitted text rather t
     const params = JSON.parse(link[1]), start = Math.max(0, 2000 - prefix.length);
     const end = Math.max(start, raw.length - 3600 - prefix.length);
     assert.equal(params.offset, start);
-    assert.equal(params.limit, Math.max(1, Math.min(5600, end - start)));
+    assert.equal(params.limit, Math.max(1, Math.min(12000, end - start)));
     const page = await h.invoke(params);
     assert.equal(page.text, text.slice(start, start + params.limit));
     if (error) assert.equal(page.error, error, 'an omitted error is available even when the text is empty');
-    if (end - start <= 5600) assert.equal(page.text.slice(0, end - start), text.slice(start, end));
+    if (end - start <= 12000) assert.equal(page.text.slice(0, end - start), text.slice(start, end));
   }
 });
 
@@ -206,7 +207,7 @@ test('result paging validates combinations and bounds at the tool boundary', asy
   for (const offset of [-1, 0.5, NaN, Infinity, 6]) {
     await assert.rejects(h.invoke({ action: 'result', id: a.id, runId: a.runId, offset }), /offset/);
   }
-  for (const limit of [-1, 0, 0.5, NaN, Infinity, 6001]) {
+  for (const limit of [-1, 0, 0.5, NaN, Infinity, 12001]) {
     await assert.rejects(h.invoke({ action: 'result', id: a.id, runId: a.runId, limit }), /limit/);
   }
 });

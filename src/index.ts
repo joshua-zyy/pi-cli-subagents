@@ -1,4 +1,5 @@
 import { Type } from "@earendil-works/pi-ai";
+import path from "node:path";
 import { Key, matchesKey } from "@earendil-works/pi-tui";
 import { getAgentDir, getMarkdownTheme, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { AgentManager } from "./manager.js";
@@ -199,12 +200,12 @@ export default function extension(pi: ExtensionAPI): void {
 
   const registerSubagent = (catalog: string): void => pi.registerTool({
     name: "subagent", label: "CLI subagent",
-    description: `Start or continue a persistent CLI subagent. send keeps the same native session: idle starts a new run; closed resumes the original session. interrupt ends the captured run without releasing its runtime; Claude also cancels that run's queued inputs. stop releases active or idle processes while retaining sessions, history and results. Answer pending interactions with subagent_reply.\n\nworkspace_create/workspace_integrate manage detached Git worktrees; read the delegate-cli-agents workspaces reference before either. Inherit ALL uncommitted parent changes only with explicit authorization.\n\nGive the goal, necessary context, authorized scope and acceptance criteria; a new instance has not seen this conversation. Let the child choose its approach unless required behavior constrains it.\n\nReports return automatically. Do not sleep or poll for completion; continue independent work or end this turn. Receipts do not prove execution or success. Inspect uncertain outcomes before retrying; do not bypass refusals with replacement instances or edited records.\n\n${catalog}`,
+    description: `Start or continue a persistent CLI subagent. send keeps the same native session: idle starts a new run; closed resumes the original session. interrupt ends the captured run without releasing its runtime; Claude also cancels that run's queued inputs. stop releases active or idle processes while retaining sessions, history and results. Answer pending interactions with subagent_reply.\n\nworkspace_create/workspace_integrate manage detached Git worktrees of the parent repository or of the repository at cwd; read the delegate-cli-agents workspaces reference before either. Inherit ALL uncommitted parent changes only with explicit authorization.\n\nGive the goal, necessary context, authorized scope and acceptance criteria; a new instance has not seen this conversation. Let the child choose its approach unless required behavior constrains it.\n\nReports return automatically. Do not sleep or poll for completion; continue independent work or end this turn. Receipts do not prove execution or success. Inspect uncertain outcomes before retrying; do not bypass refusals with replacement instances or edited records.\n\n${catalog}`,
     parameters: Type.Object({
       action: Type.Union([Type.Literal("start"), Type.Literal("send"), Type.Literal("interrupt"), Type.Literal("stop"), Type.Literal("workspace_create"), Type.Literal("workspace_integrate")], { description: "interrupt requires native captured-turn confirmation; unsupported capabilities reject. send to a stopping instance waits for release before attempting original-session resume; uncertain release rejects." }),
       role: Type.Optional(Type.String({ description: "start only, required: configured role name" })),
       task: Type.Optional(Type.String({ description: "start only, required: task and authorized scope" })),
-      cwd: Type.Optional(Type.String({ description: "start only: defaults to parent cwd; mutually exclusive with workspace" })),
+      cwd: Type.Optional(Type.String({ description: "start/workspace_create: absolute, or relative to the parent cwd; start: mutually exclusive with workspace" })),
       workspace: Type.Optional(Type.String({ description: "start/workspace_integrate: managed workspace ID; required for workspace_integrate; start excludes cwd" })),
       id: Type.Optional(Type.String({ description: "send/interrupt/stop only, required: existing instance ID" })),
       message: Type.Optional(Type.String({ description: "send only, required: follow-up goal, new context and changed constraints; repeat the full task only when needed" })),
@@ -214,8 +215,8 @@ export default function extension(pi: ExtensionAPI): void {
     }, { additionalProperties: false }),
     async execute(_id, args, _signal, _update, ctx) {
       if (args.action === "workspace_create") {
-        checkFields(args, ["action"], ["includeUncommitted"]);
-        return content(JSON.stringify(await parentManager(ctx, launch).workspaces.create(ctx.cwd, { includeUncommitted: args.includeUncommitted })));
+        checkFields(args, ["action"], ["cwd", "includeUncommitted"]);
+        return content(JSON.stringify(await parentManager(ctx, launch).workspaces.create(path.resolve(ctx.cwd, args.cwd ?? ctx.cwd), { includeUncommitted: args.includeUncommitted })));
       }
       if (args.action === "workspace_integrate") {
         checkFields(args, ["action", "workspace"]);
@@ -227,7 +228,7 @@ export default function extension(pi: ExtensionAPI): void {
         const roles = loadRoles(getAgentDir(), ctx.cwd, ctx.isProjectTrusted());
         if (!Object.hasOwn(roles, args.role!)) throw new Error(`Unknown role: ${args.role}; available: ${Object.keys(roles).join(", ")}`);
         const resolved = roles[args.role!];
-        const state = await parentManager(ctx, launch).spawn(args.role!, inheritParentModel(resolved, ctx), args.cwd ?? ctx.cwd, args.task!, args.workspace);
+        const state = await parentManager(ctx, launch).spawn(args.role!, inheritParentModel(resolved, ctx), path.resolve(ctx.cwd, args.cwd ?? ctx.cwd), args.task!, args.workspace);
         const result = `Subagent ${state.phase}: ${view(state)}
 ${receiptText(state)}`;
         if (hasFailure(state)) throw new Error(`${result}\nInspect the instance before retrying; work may already have run.`);
@@ -259,7 +260,7 @@ ${view(state)}`);
       id: Type.Optional(Type.String({ description: "get/result/activity only, required: instance ID" })),
       runId: Type.Optional(Type.String({ description: "result only, required: original run ID" })),
       offset: Type.Optional(Type.Integer({ minimum: 0, description: "result only: UTF-16 offset, default 0" })),
-      limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 6000, description: "result: UTF-16 characters, default/max 6000; activity: entries, default 20/max 100" })),
+      limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 12000, description: "result: UTF-16 characters, default/max 12000 (one full report); activity: entries, default 20/max 100" })),
       cursor: Type.Optional(Type.String({ minLength: 1, description: "activity only: opaque next-older-page cursor from the previous response; do not edit" })),
       maxBytes: Type.Optional(Type.Integer({ minimum: 4096, maximum: 65536, description: "activity only: total JSON UTF-8 byte budget, default 16384" })),
     }, { additionalProperties: false }),
@@ -271,9 +272,9 @@ ${view(state)}`);
       }
       if (args.action === "result") {
         checkFields(args, ["action", "id", "runId"], ["offset", "limit"]);
-        const offset = args.offset ?? 0, limit = args.limit ?? 6000;
+        const offset = args.offset ?? 0, limit = args.limit ?? 12000;
         if (!Number.isSafeInteger(offset) || offset < 0) throw new Error("Result offset must be a non-negative integer");
-        if (!Number.isSafeInteger(limit) || limit < 1 || limit > 6000) throw new Error("Result limit must be an integer from 1 to 6000");
+        if (!Number.isSafeInteger(limit) || limit < 1 || limit > 12000) throw new Error("Result limit must be an integer from 1 to 12000");
         const report = parentManager(ctx, launch).getResult(args.id!, args.runId!);
         if (offset > report.text.length) throw new Error("Result offset exceeds totalLength");
         const end = Math.min(report.text.length, offset + limit);

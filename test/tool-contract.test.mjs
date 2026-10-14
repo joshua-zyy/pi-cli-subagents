@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import path from 'node:path';
 import { validateToolArguments } from '@earendil-works/pi-ai';
 import extension from '../dist/index.js';
 import { AgentManager } from '../dist/manager.js';
@@ -42,15 +43,27 @@ test('action validation refuses missing, irrelevant and unknown fields before ru
     ['subagent_query', { action: 'result', id: 'old', runId: 'run', maxBytes: 4096 }, /maxBytes/],
     ['subagent_query', { action: 'other' }, /action/],
     ['subagent', { action: 'workspace_create', workspace: 'old' }, /workspace/],
-    ['subagent', { action: 'workspace_create', cwd: 'other' }, /cwd/],
     ['subagent', { action: 'workspace_create', id: 'old' }, /id/],
     ['subagent', { action: 'workspace_create', options: {} }, /options/],
     ['subagent', { action: 'workspace_integrate' }, /workspace/],
+    ['subagent', { action: 'workspace_integrate', workspace: 'old', cwd: 'other' }, /cwd/],
     ['subagent', { action: 'workspace_integrate', workspace: 'old', includeUncommitted: { reason: 'not applicable' } }, /includeUncommitted/],
     ['subagent', { action: 'create' }, /action/],
     ['subagent', { action: 'integrate', workspace: 'old' }, /action/],
     ['subagent_reply', { id: 'old', questionId: 'q', reason: 'reason', confirmed: true, actor: 'human' }, /actor/],
   ]) await assert.rejects(invoke(tool, args), pattern, JSON.stringify({tool, args}));
+});
+
+test('the result limit accepts one full report and refuses more', async () => {
+  const { invoke, tools } = harness();
+  const query = tools.get('subagent_query');
+  for (const limit of [12001, 0]) await assert.rejects(invoke('subagent_query', { action: 'result', id: 'missing', runId: 'missing-run', limit }), /12000/);
+  // The host validates the schema before execute, so the maximum must match the runtime bound.
+  assert.throws(() => validateToolArguments(query, { id: 'call', name: 'subagent_query', arguments: { action: 'result', id: 'x', runId: 'y', limit: 12001 } }));
+  assert.equal(validateToolArguments(query, { id: 'call', name: 'subagent_query', arguments: { action: 'result', id: 'x', runId: 'y', limit: 12000 } }).limit, 12000);
+  const error = await invoke('subagent_query', { action: 'result', id: 'missing', runId: 'missing-run', limit: 12000 }).then(() => undefined, reason => reason);
+  assert.ok(error, 'a missing instance must still fail');
+  assert.doesNotMatch(error.message, /12000/, 'an accepted limit must not be the failure');
 });
 
 test('the reply tool exposes one structured answer map without changing the parent actor', async t => {
@@ -71,6 +84,7 @@ test('the stop and workspace actions retain the existing runtime operation and t
   t.mock.method(WorkspaceStore.prototype, 'integrate', async id => { calls.push(['integrate', id]); return { workspace: id, status: 'applied' }; });
   await invoke('subagent', { action: 'stop', id: 'original' });
   for (const args of [{ action: 'workspace_create', includeUncommitted: { reason: 'explicit authorization' } },
+    { action: 'workspace_create', cwd: 'other-repository' },
     { action: 'workspace_integrate', workspace: 'workspace' }]) {
     const parsed = validateToolArguments(tools.get('subagent'), { id: 'workspace', name: 'subagent', arguments: args });
     assert.deepEqual(parsed, args);
@@ -79,6 +93,7 @@ test('the stop and workspace actions retain the existing runtime operation and t
   assert.deepEqual(calls, [
     ['stop', 'original'],
     ['create', process.cwd(), { includeUncommitted: { reason: 'explicit authorization' } }],
+    ['create', path.resolve(process.cwd(), 'other-repository'), { includeUncommitted: undefined }],
     ['integrate', 'workspace'],
   ]);
 });
