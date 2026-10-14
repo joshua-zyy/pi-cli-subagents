@@ -96,7 +96,7 @@ Claude 驻留验收复用原 adapter/manager/workspace 替身：同 worker/CLI �
 
 ## Cost measurements
 
-These measurements were collected in one run per entry point on 2026-10-08 at `685b6c3` (Windows / Node 22.21.0); each entry point includes one build. All passed with skipped=0; real CLI/model acceptance was NOT_RUN throughout. The counts are the current suite, which is larger than the historical `bf85d3e` baseline in the tables above.
+These measurements were collected in one run per entry point on 2026-10-08 at `685b6c3` (Windows / Node 22.21.0); each entry point includes one build. All passed with skipped=0; real CLI/model acceptance was NOT_RUN throughout. The counts are the current suite, which is larger than the historical `b45f3a6` baseline in the tables above.
 
 | Entry point | Passed / total | Wall time including build | Node runner time |
 |---|---:|---:|---:|
