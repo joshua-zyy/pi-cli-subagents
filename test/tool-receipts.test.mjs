@@ -190,6 +190,9 @@ test('a released instance keeps an undelivered report deliverable exactly once',
   const notificationId = `${started.runId}-result`;
   const report = manager.reports().find(r => r.notificationId === notificationId);
   assert.ok(report, 'release must not drop the completed report');
+  const page = JSON.parse((await invoke('subagent_query', { action: 'result', id: started.id, runId: started.runId })).content[0].text);
+  assert.equal(page.agentId, started.id); assert.equal(page.runId, started.runId);
+  assert.equal(page.text, 'RELEASE ME'); assert.equal(page.nextOffset, null);
   const entries = [], sent = [];
   const ctx = { sessionManager: { getEntries: () => entries }, ui: { notify() {}, setStatus() {} } };
   const pi = { sendMessage: (message, options) => sent.push({ message, options }) };

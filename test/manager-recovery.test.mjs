@@ -4,11 +4,26 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
+import { execFileSync } from 'node:child_process';
 import { AgentManager } from '../dist/manager.js';
-import { readJson, writeJson, waitUntil } from '../dist/storage.js';
+import { processAlive, readJson, writeJson, waitUntil } from '../dist/storage.js';
 import { deliverReports } from '../dist/notifier.js';
 import { tempDir } from './helpers/tmp.mjs';
 const launch = { command: process.execPath, args: [fileURLToPath(new URL('./fixtures/pi.mjs', import.meta.url))] };
+// Same PID-and-instance identity check as manager.test.mjs; a reused PID is not this worker.
+function originalProcessAlive(pid, instanceDirectory) {
+  if (!processAlive(pid)) return false;
+  let commandLine;
+  if (process.platform === 'win32') {
+    commandLine = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
+      `(Get-CimInstance Win32_Process -Filter "ProcessId = ${pid}").CommandLine`], { encoding: 'utf8', windowsHide: true, timeout: 10_000 });
+  } else {
+    try { commandLine = execFileSync('ps', ['-p', String(pid), '-o', 'args='], { encoding: 'utf8' }); }
+    catch (error) { if (error.status === 1) return false; throw error; }
+  }
+  const normalize = text => text.replace(/\\/g, '/').toLowerCase();
+  return normalize(commandLine).includes(normalize(instanceDirectory));
+}
 const released = async (m, id) => {
   const result = await waitUntil('run result before release', () => {
     const s = m.get(id);
@@ -79,6 +94,7 @@ test('terminal records with a stale ownership lock are not reclaimed or resumed'
   const { cwd, m } = setup(t);
   const first = await m.spawn('worker', { description: 'test', instructions: 'test' }, cwd, 'DONE'); await released(m, first.id);
   const lock = path.join(m.root, first.id, 'owner.lock');
+  await waitUntil('original released worker exit', () => !originalProcessAlive(first.workerPid, path.dirname(lock)), 5000);
   try {
     for (const owner of [{ pid: 2147483647, runId: first.runId }, null, {}, { pid: process.pid, runId: randomUUID() }]) {
       writeJson(lock, owner);

@@ -122,18 +122,22 @@ test('a release receipt omits the report body while an interrupt keeps it', asyn
   const state = { id: 'original', runId: 'run', phase: 'idle', accepted: false, protocolVersion: 2, runtimeId: 'runtime',
     questions: [], text: 'FULL REPORT BODY', truncated: false, history: [{ runId: 'run', status: 'completed' }], updatedAt: 2 };
   t.mock.method(AgentManager.prototype, 'get', () => state);
-  t.mock.method(AgentManager.prototype, 'close', async () => ({ ...state, phase: 'closed',
-    receipt: { operation: 'stop', status: 'released', runId: 'run', runtimeId: 'runtime' } }));
+  let outcome = { ...state, phase: 'closed',
+    receipt: { operation: 'stop', status: 'released', runId: 'run', runtimeId: 'runtime' } };
+  t.mock.method(AgentManager.prototype, 'close', async () => outcome);
   t.mock.method(AgentManager.prototype, 'interrupt', async () => ({ ...state,
     receipt: { operation: 'interrupt', status: 'settled', runId: 'run', runtimeId: 'runtime' } }));
   const parse = text => JSON.parse(text.slice(text.indexOf('{'), text.lastIndexOf('}') + 1));
-  const released = parse((await invoke('subagent', { action: 'stop', id: 'original' })).content[0].text);
-  assert.equal(released.receipt.status, 'released');
-  assert.equal(released.runId, 'run');
-  assert.deepEqual(released.history, [{ runId: 'run', status: 'completed' }]);
-  // The report body is retained on disk and in queries; repeating it in the receipt added no proof.
-  assert.equal(Object.hasOwn(released, 'text'), false);
-  assert.equal(Object.hasOwn(released, 'truncated'), false);
+  for (const status of ['released', 'unconfirmed']) {
+    outcome = { ...outcome, phase: status === 'released' ? 'closed' : 'unreachable',
+      error: status === 'unconfirmed' ? 'Release acknowledgement missing' : undefined,
+      receipt: { ...outcome.receipt, status } };
+    const response = (await invoke('subagent', { action: 'stop', id: 'original' })).content[0].text;
+    const shown = parse(response);
+    const { text, truncated, accepted, ...metadata } = outcome;
+    assert.deepEqual(shown, JSON.parse(JSON.stringify(metadata)), 'only report text and its flag are omitted');
+    if (status === 'unconfirmed') assert.match(response, /confirmation is unconfirmed/);
+  }
   const interrupted = parse((await invoke('subagent', { action: 'interrupt', id: 'original' })).content[0].text);
   assert.equal(interrupted.receipt.status, 'settled');
   assert.equal(interrupted.text, 'FULL REPORT BODY');
