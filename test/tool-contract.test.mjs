@@ -117,6 +117,29 @@ test('stop refuses an accepted turn in flight instead of discarding it', async t
   assert.deepEqual(calls, [['stop', 'busy'], ['stop', 'busy']], 'a refused stop never reaches the runtime');
 });
 
+test('a release receipt omits the report body while an interrupt keeps it', async t => {
+  const { invoke } = harness();
+  const state = { id: 'original', runId: 'run', phase: 'idle', accepted: false, protocolVersion: 2, runtimeId: 'runtime',
+    questions: [], text: 'FULL REPORT BODY', truncated: false, history: [{ runId: 'run', status: 'completed' }], updatedAt: 2 };
+  t.mock.method(AgentManager.prototype, 'get', () => state);
+  t.mock.method(AgentManager.prototype, 'close', async () => ({ ...state, phase: 'closed',
+    receipt: { operation: 'stop', status: 'released', runId: 'run', runtimeId: 'runtime' } }));
+  t.mock.method(AgentManager.prototype, 'interrupt', async () => ({ ...state,
+    receipt: { operation: 'interrupt', status: 'settled', runId: 'run', runtimeId: 'runtime' } }));
+  const parse = text => JSON.parse(text.slice(text.indexOf('{'), text.lastIndexOf('}') + 1));
+  const released = parse((await invoke('subagent', { action: 'stop', id: 'original' })).content[0].text);
+  assert.equal(released.receipt.status, 'released');
+  assert.equal(released.runId, 'run');
+  assert.deepEqual(released.history, [{ runId: 'run', status: 'completed' }]);
+  // The report body is retained on disk and in queries; repeating it in the receipt added no proof.
+  assert.equal(Object.hasOwn(released, 'text'), false);
+  assert.equal(Object.hasOwn(released, 'truncated'), false);
+  const interrupted = parse((await invoke('subagent', { action: 'interrupt', id: 'original' })).content[0].text);
+  assert.equal(interrupted.receipt.status, 'settled');
+  assert.equal(interrupted.text, 'FULL REPORT BODY');
+  assert.equal(interrupted.truncated, false);
+});
+
 test('activity tool forwards the exact query and cancellation signal without adding an envelope', async t => {
   const {tools,ctx}=harness(),controller=new AbortController(),expected={id:'a',entries:[],hasMore:false};
   const args={action:'activity',id:'a',cursor:'opaque',limit:3,maxBytes:4096};

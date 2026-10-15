@@ -329,3 +329,20 @@ test('corruption between enumeration and full-result reading cannot poison healt
   assert.deepEqual(h.sent[1].message.details.ids, [`${a.runId}-result`]);
   assert.ok(h.sent[1].message.content.includes(evidence), 'repair recovers the original full result, not its cached head');
 });
+
+test('a release receipt keeps the run report readable by identity', async t => {
+  const h = harness(), a = h.add('Released run report');
+  // The real read still resolves the persisted record; only release itself is stubbed to this fixture.
+  const get = h.manager.get.bind(h.manager);
+  t.mock.method(AgentManager.prototype, 'get', id => get(id));
+  t.mock.method(AgentManager.prototype, 'close', async () => ({ ...get(a.id), phase: 'closed',
+    receipt: { operation: 'stop', status: 'released', runId: a.runId, runtimeId: 'runtime' } }));
+  const text = (await h.tools.get('subagent').execute('release', { action: 'stop', id: a.id }, undefined, undefined, h.ctx)).content[0].text;
+  const receipt = JSON.parse(text.slice(text.indexOf('{'), text.lastIndexOf('}') + 1));
+  assert.equal(receipt.receipt.status, 'released');
+  assert.equal(Object.hasOwn(receipt, 'text'), false, 'a release receipt must not repeat the report');
+  const page = await h.invoke({ action: 'result', id: a.id, runId: a.runId });
+  assert.equal(page.text, 'Released run report');
+  assert.equal(page.totalLength, 'Released run report'.length);
+  assert.equal(page.nextOffset, null);
+});

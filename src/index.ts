@@ -56,7 +56,7 @@ function checkFields(args: Record<string, unknown>, required: string[], optional
   }
 }
 
-const view = (state: AgentView): string => JSON.stringify(visible(state));
+const view = (state: AgentView, includeText = true): string => JSON.stringify(visible(state, includeText));
 const content = (text: string) => ({ content: [{ type: "text" as const, text }], details: undefined });
 const REPORT_GUIDANCE = "Completion and interaction reports return to this parent session automatically. Do not sleep or poll for completion; continue independent work or end this turn to await a report. Do not duplicate the child's assignment. Receiving a report is not verification; read any truncated result with subagent_query result before assessing its claims.";
 /**
@@ -255,8 +255,10 @@ ${receiptText(state)}`;
           throw new Error(`A turn is in flight (${observed.phase}); stop releases processes without ending it, which would discard that turn. Interrupt first, then stop.`);
       }
       const state = args.action === "interrupt" ? await manager.interrupt(args.id!) : await manager.close(args.id!);
+      // A release receipt proves the released runtime; the retained report is read by identity
+      // through subagent_query, so repeating its body here only spends parent context.
       return content(`${receiptText(state)}
-${view(state)}`);
+${view(state, args.action === "interrupt")}`);
     },
   });
   registerSubagent("Role catalog loads at session start.");

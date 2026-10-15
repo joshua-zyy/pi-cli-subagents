@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { getAgentDir } from '@earendil-works/pi-coding-agent';
 import extension from '../dist/index.js';
 import { AgentManager } from '../dist/manager.js';
+import { deliverReports } from '../dist/notifier.js';
 import { readJson, writeJson, waitUntil } from '../dist/storage.js';
 import { tempDir } from './helpers/tmp.mjs';
 
@@ -175,4 +176,31 @@ test('public interrupt ends the captured turn without release, and query has no 
   const closed = stateFrom((await invoke('subagent',{action:'stop',id:initial.id})).content[0].text);
   assert.equal(closed.receipt.status,'released'); assert.equal(closed.phase,'closed');
   assert.equal(manager.getResult(initial.id,initial.runId).status,'stopped');
+});
+
+test('a released instance keeps an undelivered report deliverable exactly once', { timeout: 20000 }, async t => {
+  const { manager, invoke, released } = setup(t);
+  const started = stateFrom((await invoke('subagent', { action: 'start', role: 'worker', task: 'RELEASE ME' })).content[0].text);
+  const closed = await released(started.id);
+  assert.equal(closed.phase, 'closed'); assert.equal(closed.lastStatus, 'completed');
+  const receipt = stateFrom((await invoke('subagent', { action: 'stop', id: started.id })).content[0].text);
+  assert.equal(receipt.receipt.status, 'released');
+  assert.equal(receipt.phase, 'closed');
+  assert.equal(Object.hasOwn(receipt, 'text'), false, 'a release receipt must not repeat the report body');
+  const notificationId = `${started.runId}-result`;
+  const report = manager.reports().find(r => r.notificationId === notificationId);
+  assert.ok(report, 'release must not drop the completed report');
+  const entries = [], sent = [];
+  const ctx = { sessionManager: { getEntries: () => entries }, ui: { notify() {}, setStatus() {} } };
+  const pi = { sendMessage: (message, options) => sent.push({ message, options }) };
+  const pending = new Set(), now = report.time + 2100;
+  deliverReports(manager, pi, ctx, pending, now);
+  assert.equal(sent.length, 1, 'a released instance still delivers its undelivered report');
+  assert.deepEqual(sent[0].message.details.ids, [notificationId]);
+  assert.match(sent[0].message.content, /RELEASE ME/);
+  deliverReports(manager, pi, ctx, pending, now + 800);
+  assert.equal(sent.length, 1, 'a queued notification must not be repeated while it is pending');
+  entries.push({ type: 'custom_message', customType: 'cli-subagents-report', details: { ids: [notificationId] } });
+  deliverReports(manager, pi, ctx, new Set(), now + 1600);
+  assert.equal(sent.length, 1, 'the persisted receipt must prevent a replay after release');
 });
