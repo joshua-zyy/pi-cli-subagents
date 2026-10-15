@@ -99,7 +99,7 @@ The example role name does not require the extension to provide that built-in ro
 
 Keep the workspace inventory in `list` so reusable workspaces and their occupation can be discovered without a separate workspace-list tool. `get` may include necessary information about the instance's associated workspace; do not add cross-parent-session scanning.
 
-The result action retains the current pagination contract: offset defaults to 0; limit defaults to and cannot exceed 6000 UTF-16 code units. Return `agentId`, `runId`, `status`, `time`, `error`, `offset`, `totalLength`, `nextOffset` and `text`. Keep id/runId fixed and follow nextOffset until null.
+The result action retains the current pagination contract: offset defaults to 0; limit defaults to and cannot exceed 12000 UTF-16 code units. Return `agentId`, `runId`, `status`, `time`, `error`, `offset`, `totalLength`, `nextOffset` and `text`. Keep id/runId fixed and follow nextOffset until null.
 
 Reject missing, corrupt, cross-instance or cross-parent-session results. A missing original report cannot be replaced with the current latest result. Reading must not start, wake or stop an instance, or approve an operation. Neither a result preview nor terminal state proves acceptance of the business outcome.
 
