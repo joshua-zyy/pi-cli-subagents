@@ -1,5 +1,7 @@
 # Local Test Tiers and Verification Costs
 
+问题、尝试过的方法、对应分支、失败证据和当前结论统一维护在 [插件迭代记录](iteration-log.md)；本页保留测试入口、分层与验证边界。
+
 ## Entry points and boundaries
 
 The existing Node test infrastructure is unchanged. `scripts/test.mjs` selects local tests, isolates the environment before imports, and runs tests serially. The counts and costs below are the baseline from the introduction of test tiers (`b45f3a6`): the existing 45 files and 385 tests were retained, with 5 launcher tests added, for a total of 390. Later regression tests do not rewrite historical measurements; use actual execution output for current counts.
