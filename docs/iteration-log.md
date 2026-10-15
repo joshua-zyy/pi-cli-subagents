@@ -16,8 +16,8 @@
 
 | 编号    | 问题 / 判断                                | 当前结论                  | 下一步                        |
 | ----- | -------------------------------------- | --------------------- | -------------------------- |
-| I-001 | stop 回执重复报告正文，增加父上下文                   | 验证中：真实捕获验证正文归零；分支尚未合并 | 吸收 I-002 修正，重跑最终本地门槛后决定合并  |
-| I-002 | 终态 stale-lock 测试过早伪造锁，偶发报 ECONNREFUSED | 已验证并合并；只修测试前置条件       | 在 I-001 集成回归中复验，不改产品生命周期   |
+| I-001 | stop 回执重复报告正文，增加父上下文                   | 已验证并合并：最终 689/689，真实捕获与 main 检查通过 | 后两轮继续观察，不扩大改动  |
+| I-002 | 终态 stale-lock 测试过早伪造锁，偶发报 ECONNREFUSED | 已验证并合并；只修测试前置条件       | I-001 集成复验通过；保留原安全断言   |
 | I-003 | “完整通知仍无条件诱导 result 补读”的旧候选             | 已排除（未实施）：现有代码早已修复     | 不重复实现；仅有当前版本的新反例才重开        |
 | I-004 | Claude stop 夹具一次 15 秒超时                | 证据不足：定点与后续全量绿，根因未证明   | 若再现，捕获确切 PID、阶段与回收时序，勿先加超时 |
 
@@ -27,10 +27,11 @@
 
 | 方法                                                                                            | 分支 / 提交                                     | 验证与反例                                                                                       | 结论                           |
 | --------------------------------------------------------------------------------------------- | ------------------------------------------- | ------------------------------------------------------------------------------------------- | ---------------------------- |
-| 用既有 visible 的 includeText 开关投影 stop，其他入口不变                                                    | `fix/stop-receipt-without-report`；`480110a` | tests-first 原实现命中 stop 正文断言；第 4 轮 3 次自然 stop 均无 text/truncated；3 实例 4 run 报告保留、各一次通知、释放身份完整 | 验证中；功能目标已观测，最终合并门尚未通过        |
-| 用 mock close 的 fast/result-reading 用例证明释放后仍可读                                                 | 同分支，原包含于 `480110a`；删除调整未提交                  | mock 不能证明真实释放后的保留，投影断言又与 tool-contract 重复                                                   | 已排除：证明层级不足；已删除重复用例，不以删用例掩盖失败 |
-| 将保留断言放进真实 close 的 acceptance-local，用公开 result 核对身份和原文；fast 同时核对 unconfirmed/error 与 interrupt | 同分支，测试调整未提交                                 | 定点 fast 24/24、tool-receipts 6/6；最终 689 用例集先有 1 cancelled（I-004），再有 1 fail（I-002），其余 688 通过  | 验证中；先处理可复现阻塞，不重复抽签式跑全量       |
-| 修正文档 result 上限 6000→12000                                                                     | 同分支；`74b1d6e`，独立 docs 提交                    | 与已有 src/index.ts 默认及最大 limit 对照；不是新增分页行为                                                    | 验证中；随分支交付，不当成产品性能改善          |
+| 用既有 visible 的 includeText 开关投影 stop，其他入口不变                                                    | `fix/stop-receipt-without-report`；`480110a` → `54ed9f4`，已合本地 main | tests-first 原实现命中 stop 正文断言；第 4 轮 3 次自然 stop 均无 text/truncated；3 实例 4 run 报告保留、各一次通知、释放身份完整 | 已验证并合并；功能及边界通过        |
+| 用 mock close 的 fast/result-reading 用例证明释放后仍可读                                                 | 同分支，原包含于 `480110a`；于 `54ed9f4` 删除                  | mock 不能证明真实释放后的保留，投影断言又与 tool-contract 重复                                                   | 已排除：证明层级不足；已删除重复用例，不以删用例掩盖失败 |
+| 将保留断言放进真实 close 的 acceptance-local，用公开 result 核对身份和原文；fast 同时核对 unconfirmed/error 与 interrupt | 同分支；`54ed9f4`                                 | 定点 fast 24/24、tool-receipts 6/6；最终 689 用例集先有 1 cancelled（I-004），再有 1 fail（I-002），其余 688 通过  | 旧失败保留；最终门结果见下一行       |
+| 吸收 I-002 后对最终提交树重新验收 | 同分支；`54ed9f4`，集成 `58e6143` 与文档 `7a9b44b` 后合本地 main | 完整本地 689/689（无 fail/cancelled）、typecheck/diff 通过；独立快照 accept；暂存树核对后提交；main 重建与受测分支构建一致，定点 24/24 + 6/6 | 已验证并合并；没有用后续绿覆盖上两次失败 |
+| 修正文档 result 上限 6000→12000                                                                     | 同分支；`74b1d6e`，独立 docs 提交                    | 与已有 src/index.ts 默认及最大 limit 对照；不是新增分页行为                                                    | 已随分支合并；不是产品性能改善          |
 
 **停止条件**：若正文省略破坏调用方必需行为、未投递报告丢失、身份/错误被隐藏或 interrupt 行为改变，停止合并并回到 oracle；不得扩大为自动释放、消息传输原语或更多开关。
 
@@ -56,7 +57,7 @@
 
 ### I-004：一次 Claude stop 超时不作根因修复声明
 
-I-001 最终 689 集的一次运行中，`claude-adapter.test.mjs` 的 “Claude bounds stop even when the native interrupt never acknowledges” 15,000ms 超时，记录耗时 18,210ms，附近有 taskkill exit 1。原 main 与分支整文件各 26/26；后续 test-only 全量 687/687。没有单独修复分支，也没有扩大超时、删断言或修改 adapter。
+I-001 最终 689 集的一次运行中，`claude-adapter.test.mjs` 的 “Claude bounds stop even when the native interrupt never acknowledges” 15,000ms 超时，记录耗时 18,210ms，附近有 taskkill exit 1。原 main 与分支整文件各 26/26；后续 test-only 全量 687/687、I-001 集成全量 689/689。没有单独修复分支，也没有扩大超时、删断言或修改 adapter。
 
 结论为**证据不足**。后续绿只说明该次未复现，不证明环境归因或已修复。若再次发生，先固定原测试进程身份并区分 native interrupt、强制回收和 cleanup 阶段，再讨论方案。
 
@@ -72,11 +73,11 @@ start accepted 只证明输入已接收，不保证模型成功；idle 描述 ru
 
 ## 证据索引与复验
 
-仓库内可复验合同：[tool-contract](../test/tool-contract.test.mjs)、[tool-receipts](../test/tool-receipts.test.mjs)、[manager-recovery](../test/manager-recovery.test.mjs)、[manager](../test/manager.test.mjs)。分支中的新增测试在分支合并前未必已存在于 main，必须连同上面的提交或工作树状态判断。
+仓库内可复验合同：[tool-contract](../test/tool-contract.test.mjs)、[tool-receipts](../test/tool-receipts.test.mjs)、[manager-recovery](../test/manager-recovery.test.mjs)、[manager](../test/manager.test.mjs)。I-001 新增测试已随 `54ed9f4` 合入本地 main；历史失败须按当时的基线和测试版本判断，不以当前绿倒推旧版本已通过。
 
 本轮本机证据不随包分发，也不依赖其永远存在：
 
-- 插件仓库 `.test-output/auto-iteration/batch-01/`：`product.case.mjs`、`round4b-audit.json`、`base-stale-lock-injected.log`、`testfix-red.log`、`testfix-injected-green.log`、`testfix-natural-{1..5}.log`、`testfix-acceptance-local.log`、`testfix-full.log`、`testfix-exit-codes.json` 及独立评审快照。
+- 插件仓库 `.test-output/auto-iteration/batch-01/`：`product.case.mjs`、`round4b-audit.json`、`base-stale-lock-injected.log`、`testfix-red.log`、`testfix-injected-green.log`、`testfix-natural-{1..5}.log`、`testfix-acceptance-local.log`、`testfix-full.log`、`testfix-exit-codes.json`、`stop-integrated-full.log`、`stop-integrated-exit-codes.json`、`main-stop-fast.log`、`main-stop-receipts.log` 及独立评审快照。
 - 测试宿主 `D:/AI/piTest/cli-sub-test/.pi/test-runs/`：各轮 controller 状态、事件和监督报告；父会话 `.subagents` 保存 spec、request、原生流、permissions 和报告。只按身份读取必要字段，不将凭证或完整私有转录写入本文件。
 
 复用 [既有只读审计器](testing.md#真实验收证据的只读审计器)，不新造测试框架。证据已清理时写 unavailable；结论变化追加新方法/新验证行，保留旧失败及当时的基线。下一次迭代先查本记录，再选能区分原因的反例，不从已排除方法重新抽签。
