@@ -20,7 +20,7 @@
 | I-002 | 终态 stale-lock 测试过早伪造锁，偶发报 ECONNREFUSED | 已验证并合并；只修测试前置条件       | I-001 集成复验通过；保留原安全断言   |
 | I-003 | “完整通知仍无条件诱导 result 补读”的旧候选             | 已排除（未实施）：现有代码早已修复     | 不重复实现；仅有当前版本的新反例才重开        |
 | I-004 | Claude stop 夹具一次 15 秒超时                | 证据不足：定点与后续全量绿，根因未证明   | 若再现，捕获确切 PID、阶段与回收时序，勿先加超时 |
-| I-005 | 监督预算退出截断通知观测窗口 | 证据不足：严格 FAIL 保留，不归因为插件丢报告 | oracle 同意收窄第 6 轮；本批不扩产品范围 |
+| I-005 | 监督预算退出截断通知观测窗口 | 证据不足：严格 FAIL 保留，不归因为插件丢报告 | 第 6 轮自然审计通过；不倒推第 5 轮 PASS |
 
 ### I-001：释放回执不重复报告
 
@@ -82,8 +82,21 @@ I-001 最终 689 集的一次运行中，`claude-adapter.test.mjs` 的 “Claude
 | 原第 4 轮 `20261015-181958-round4` | 父接口两次 402，0 子派发，中止                                                                               | 不计完整协作轮；Quota service unavailable 不等于余额不足或插件故障    |
 | 第 4 轮 `20261015-184940-round4b` | 父 CLI 覆盖为 opencode-go/deepseek-v4.1-flash；Codex 配额失败后父自然转 Pi；只读产品审计 PASS，9 项可变效果可查、0 unavailable | I-001 的辅助真实复测；不比较跨模型任务质量、sleep 或端到端时延；审批链覆盖见前 3 轮 |
 | 第 5 轮 `20261015-122826Z-round5` | 20 分钟预算中断；reviewer 自然完成/通知/释放，explore 由监督 interrupt/close；保护文件与源码克隆不变 | 严格全轮审计 FAIL，监督 stopped 报告的父通知窗口被退出截断；仅 1 次自然 stop 无正文，详见 I-005 |
+| 第 6 轮 `20261015-122826Z-round6` | TaskOutput 决策表，两 Pi 角色，8 分钟部分报告为预设条件；5.23 分钟自然收尾；审计 PASS，9 项可查、0 unavailable | 2 次自然 stop 无正文；2 结果各一次通知、原报告保留、身份完整；0 查询/截断/审批/普通问答，不新增相应覆盖 |
 
 start accepted 只证明输入已接收，不保证模型成功；idle 描述 runtime，不是 run 成功，须看 lastStatus/report。任务摘要被截短不证明实际消息被截断。上述摩擦反馈尚不构成需要新增自动释放、自动切模型或传递补丁工具的证据。禁止用配置/模型变化掩盖产品缺陷，也不把模型未调用问答工具读成插件不支持。
+
+## 批次 01 结论（第 4b / 5 / 6 轮）
+
+本批停止于第 6 轮，不自动扩批、不推送或发布。严格审计结果为 **PASS / FAIL / PASS**；第 5 轮为预算中断后的窗口截断，不宣称三轮全绿，不复活旧任务补造通过。
+
+7 个实例共 8 run，最终全部释放；6 次父自然 stop 均无 text/truncated（其中 5 份最新报告非空），正文重复为 0，元数据回执仍保留。共 7 个结果通知 ID 进入父持久会话；另 1 个监督生成的空正文 stopped 报告未在父退出前投递，其严格 FAIL 见 I-005。监督 stop 不计入 6 次自然观察。
+
+I-001 已合本地 main：`480110a` 实现、`74b1d6e` 文档事实修正，经 `54ed9f4` 集成验证。I-002 为独立 test-only `58e6143`，不是产品生命周期修复。最终完整本地测试 689/689，无 fail/cancelled，typecheck/diff 通过；main 重建产物与受测分支一致，合并后定点 24/24 + 6/6。首次文档记录为 `7a9b44b`，后续状态变化保留在 Git 历史，不抹去失败。
+
+未增加普通问答、被截断通知补读或 Codex 原生审批覆盖；本批没有截断补读样本，审批链记录见前 3 轮。第 5 轮有 1 个子接口流错误后继续活动；不据恢复推定根因修复。第 6 轮缩小了任务范围，因此耗时变化、父等待行为与外部文档质量均不作为插件改善指标。可见父/子命令共扫描 390 条，GitHub 写入/推送/发布候选为 0，不对不可见操作作绝对保证。
+
+不新增进一步的元数据压缩、自动切模型、自动释放或补丁传输功能：本批缺少字段冗余或功能缺失的反例。若未来出现**非空持久结果在存活/重开父中仍不投递**，或纯自然轮次违反通知不变量，应先查该功能问题；当前预算截断不满足这个条件。
 
 ## 证据索引与复验
 
@@ -91,7 +104,9 @@ start accepted 只证明输入已接收，不保证模型成功；idle 描述 ru
 
 本轮本机证据不随包分发，也不依赖其永远存在：
 
-- 插件仓库 `.test-output/auto-iteration/batch-01/`：`product.case.mjs`、`round4b-audit.json`、`base-stale-lock-injected.log`、`testfix-red.log`、`testfix-injected-green.log`、`testfix-natural-{1..5}.log`、`testfix-acceptance-local.log`、`testfix-full.log`、`testfix-exit-codes.json`、`stop-integrated-full.log`、`stop-integrated-exit-codes.json`、`main-stop-fast.log`、`main-stop-receipts.log` 及独立评审快照。
+- 插件仓库 `.test-output/auto-iteration/batch-01/`：`product.case.mjs`、`round4b-audit.json`、`base-stale-lock-injected.log`、`testfix-red.log`、`testfix-injected-green.log`、`testfix-natural-{1..5}.log`、`testfix-acceptance-local.log`、`testfix-full.log`、`testfix-exit-codes.json`、`stop-integrated-full.log`、`stop-integrated-exit-codes.json`、`main-stop-fast.log`、`main-stop-receipts.log`、`round5-audit.json`（FAIL）、`round5-post-close-replay.json`（纯离线准备）、`round6-audit.json`、`batch-observations.json` 及独立评审快照。
 - 测试宿主 `D:/AI/piTest/cli-sub-test/.pi/test-runs/`：各轮 controller 状态、事件和监督报告；父会话 `.subagents` 保存 spec、request、原生流、permissions 和报告。只按身份读取必要字段，不将凭证或完整私有转录写入本文件。
+
+真实审计的保护文件检查限定于执行时刻和当时基线；例如第 4b 轮审计后，main dist 已经授权合并重建，不将之后的构建变化误作该轮写入。原审计输出与时间必须保留。
 
 复用 [既有只读审计器](testing.md#真实验收证据的只读审计器)，不新造测试框架。证据已清理时写 unavailable；结论变化追加新方法/新验证行，保留旧失败及当时的基线。下一次迭代先查本记录，再选能区分原因的反例，不从已排除方法重新抽签。
