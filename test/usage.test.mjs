@@ -8,6 +8,7 @@ import extension from '../dist/index.js';
 import { AgentManager } from '../dist/manager.js';
 import { WorkspaceStore } from '../dist/workspace.js';
 import { projectUsage } from '../dist/usage.js';
+import { CHUNK_BYTES } from '../dist/transcript.js';
 import { TranscriptWindow } from '../dist/transcript-window.js';
 import { tempDir } from './helpers/tmp.mjs';
 
@@ -410,7 +411,7 @@ test('a same-size rewrite during the read cannot mix two file versions into a to
     handle.read = async (...input) => {
       const result = await read(...input);
       // Replace the log after the first parser chunk, before the second chunk is opened.
-      if (!rewritten && input[2] === 512 * 1024 && input[3] === 0) { fs.writeFileSync(file, fresh); rewritten = true; }
+      if (!rewritten && input[2] === CHUNK_BYTES && input[3] === 0) { fs.writeFileSync(file, fresh); rewritten = true; }
       return result;
     };
     return handle;
@@ -448,7 +449,7 @@ test('a same-size rewrite is caught even when the filesystem reports unchanged t
     const read = handle.read.bind(handle);
     handle.read = async (...input) => {
       const result = await read(...input);
-      if (!rewritten && input[2] === 512 * 1024 && input[3] === 0) { fs.writeFileSync(file, version(70)); rewritten = true; }
+      if (!rewritten && input[2] === CHUNK_BYTES && input[3] === 0) { fs.writeFileSync(file, version(70)); rewritten = true; }
       return result;
     };
     return handle;
@@ -503,7 +504,7 @@ test('a rewrite confined to the middle is caught even with identical ends and fr
     const read = handle.read.bind(handle);
     handle.read = async (...input) => {
       const result = await read(...input);
-      if (!rewritten && input[2] === 512 * 1024 && input[3] === 0) { fs.writeFileSync(file, fresh); rewritten = true; }
+      if (!rewritten && input[2] === CHUNK_BYTES && input[3] === 0) { fs.writeFileSync(file, fresh); rewritten = true; }
       return result;
     };
     return handle;

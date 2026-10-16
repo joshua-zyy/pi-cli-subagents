@@ -87,7 +87,7 @@ export interface TranscriptUsage { input: number; output: number; cacheRead: num
   /** True when some counted message never reported one of the four counters, so this total is smaller than the real one. */
   countersIncomplete?: boolean }
 
-const CHUNK_BYTES = 512 * 1024;
+export const CHUNK_BYTES = 512 * 1024;
 const MAX_RECORD = 4 * 1024 * 1024;
 const MAX_ENTRIES = 300;
 const MAX_TEXT = 24_000;
