@@ -228,3 +228,25 @@ test('session replacement closes the old settings pane and subsequent normal clo
   assert.equal(h.listeners.length,0); assert.equal(h.widgets.at(-1).content,undefined);
   assert.deepEqual(h.notices,[]);
 });
+
+test('switching scope returns to the top of the list instead of reopening the edited role', {timeout:5000}, async t => {
+  const h = harness(t);
+  // The panel lists the merged union of both scopes, so a role defined in both stays listed either way.
+  fs.writeFileSync(h.files[0], JSON.stringify({explore:{description:'Personal explore',instructions:'Personal instructions'}}));
+  fs.writeFileSync(h.files[1], JSON.stringify({explore:{description:'Project explore',instructions:'Project instructions'}}));
+  const editors = []; h.ctx.ui.editor = async (title,value) => {editors.push({title,value});return 'Edited description';};
+  const opening = h.open(), rendered = () => opening.widget.component.render(160).join('\n');
+  h.press('\r'); await turn();                                   // open the first role
+  assert.match(rendered(), /explore — project/);
+  h.press('\x1b[B'); h.press('\r'); await turn();                // its description field
+  assert.deepEqual(editors.map(entry => entry.title), ['Description for explore']);
+  assert.match(rendered(), /explore — project • unsaved/, 'a kept cursor reopens the edited role and field');
+  h.press('\x1b'); await turn();                                 // back to the list; Tab is only wired there
+  h.press('\t'); await turn();                                   // switch to the personal scope
+  assert.match(rendered(), /Subagent roles — personal/, 'a scope switch must start the other scope from the top of the list');
+  assert.doesNotMatch(rendered(), /explore — /, 'the cursor must not carry the edited role into the other scope');
+  h.press('\x1b'); await turn();                                 // the dirty draft asks before it is discarded
+  await opening.running;
+  assert.equal(h.confirms.length, 1);
+  assert.equal(h.listeners.length, 0);
+});

@@ -730,3 +730,52 @@ test('changing a value reopens that role and field instead of the top of the lis
   await press(keys.escape); await press(keys.escape);
   await running;
 });
+
+test('a refused batch release keeps the roster open and releases nothing', { timeout: 35_000 }, async (t) => {
+  const h = harness(t); h.start();
+  const a = await h.spawn('first result'), first = await waitForIdle(h.manager, a.id);
+  const b = await h.spawn('second result'), second = await waitForIdle(h.manager, b.id);
+  const pane = await h.openAgents();
+  const listeners = h.state.listeners.length, notices = h.notices.length;
+  h.state.confirmAnswer = false;
+  await pane.press('c');
+  await waitUntil('the idle batch confirmation', () => h.state.confirms.length === 1, 5_000);
+  await new Promise((resolve) => setTimeout(resolve, 50));   // the refusal's next step is a short tick chain, not a race with the pane
+  assert.equal(h.state.listeners.length, listeners, 'a refused batch must leave the roster owning the keyboard');
+  const released = h.manager.get(a.id);
+  assert.equal(released.phase, 'idle');
+  assert.equal(released.runId, first.runId); assert.equal(released.runtimeId, first.runtimeId);
+  assert.equal(h.manager.get(b.id).runId, second.runId);
+  assert.equal(h.messages.filter((entry) => entry.message.customType === 'cli-subagents-human-action').length, 0,
+    'a refused batch records no human action');
+  assert.equal(h.notices.length, notices);
+  await pane.press(keys.escape); await pane.running;
+  assert.equal(h.state.listeners.length, 0);
+});
+
+test('a session change during a roster message stops the command without a delivery receipt', { timeout: 30_000 }, async (t) => {
+  const h = harness(t); h.start();
+  const agent = await h.spawn('HOLD roster message');
+  await waitUntil('a running roster target', () => h.manager.get(agent.id).phase === 'running', 10_000);
+  const originalSend = AgentManager.prototype.send;
+  let sends = 0;
+  AgentManager.prototype.send = async function (...args) {
+    const result = await originalSend.apply(this, args);
+    if (++sends === 1) {   // the parent switched sessions while this input request was in flight
+      const savedPath = process.env.PATH; process.env.PATH = '';
+      try { h.handlers.session_start({ type: 'session_start', reason: 'resume' }, h.ctx); }
+      finally { if (savedPath === undefined) delete process.env.PATH; else process.env.PATH = savedPath; }
+    }
+    return result;
+  };
+  try {
+    h.editorAnswer = 'steer the running child';
+    const pane = await h.openAgents();
+    const notices = h.notices.length;
+    await pane.press('i'); await pane.press('s');
+    await pane.running;
+    assert.equal(sends, 1, 'the message must have been in flight when the session changed');
+    assert.equal(h.state.listeners.length, 0, 'the command must stop instead of showing the roster again');
+    assert.equal(h.notices.length, notices, 'a send stopped by a session change must not report a delivery receipt');
+  } finally { AgentManager.prototype.send = originalSend; }
+});
