@@ -325,6 +325,142 @@ test('an unreadable log also degrades to unknown rather than failing the query',
   assert.equal(got.text, 'preview');
 });
 
+test('a pi gap before the first usable message keeps the later total unknown', async t => {
+  const { invoke } = harness();
+  const dir = tempDir('usage-pi-gap'); t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const file = path.join(dir, 'events.jsonl');
+  const message = usage => JSON.stringify({ type: 'message_end', message: { role: 'assistant', content: 'done', provider: 'p', model: 'm', usage } });
+  fs.writeFileSync(file, [message({ cost: { total: 0.2 } }), message({ input: 10, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 11 })].join('\n') + '\n');
+  t.mock.method(AgentManager.prototype, 'get', () => ({ ...claudeState, cli: 'pi', session: undefined }));
+  t.mock.method(AgentManager.prototype, 'eventLogs', () => [file]);
+  t.mock.method(WorkspaceStore.prototype, 'list', async () => []);
+  const got = await get(invoke);
+  assert.equal(got.usageComplete, false, 'a later complete message cannot erase an earlier gap');
+  assert.equal(Object.hasOwn(got, 'usage'), false);
+});
+
+test('a codex snapshot with a null counter is unknown, not a zero', async t => {
+  const { invoke } = harness();
+  const dir = tempDir('usage-codex-null'); t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const file = path.join(dir, 'events.jsonl');
+  const snapshot = total => ({ method: 'thread/tokenUsage/updated', params: { threadId: 'thread', tokenUsage: { total } } });
+  fs.writeFileSync(file, [snapshot({ inputTokens: null, cachedInputTokens: 0, cacheWriteInputTokens: 0, outputTokens: 2 })].map(JSON.stringify).join('\n') + '\n');
+  t.mock.method(AgentManager.prototype, 'get', () => ({ ...claudeState, cli: 'codex', session: { cli: 'codex', threadId: 'thread', sessionId: 's', codexHome: '/fixture' } }));
+  t.mock.method(AgentManager.prototype, 'eventLogs', () => [file]);
+  t.mock.method(WorkspaceStore.prototype, 'list', async () => []);
+  const got = await get(invoke);
+  assert.equal(got.usageComplete, false, 'null must not be read as a native zero');
+  assert.equal(Object.hasOwn(got, 'usage'), false);
+  // A later readable snapshot is a real cumulative state again, so completeness can be re-established.
+  fs.writeFileSync(file, [snapshot({ inputTokens: null, cachedInputTokens: 0, cacheWriteInputTokens: 0, outputTokens: 2 }),
+    snapshot({ inputTokens: 100, cachedInputTokens: 40, cacheWriteInputTokens: 5, outputTokens: 7 })].map(JSON.stringify).join('\n') + '\n');
+  const recovered = await get(invoke);
+  assert.equal(recovered.usageComplete, true);
+  assert.deepEqual(recovered.usage, { input: 55, output: 7, cacheRead: 40, cacheWrite: 5, scope: 'session' });
+});
+
+test('cancelling a query stops the read loop instead of only rejecting afterwards', async t => {
+  const { tools, ctx } = harness();
+  const dir = tempDir('usage-cancel-reads'); t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const file = path.join(dir, 'events.jsonl');
+  const message = text => ({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text }], usage: { input: 10, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 11 } } });
+  fs.writeFileSync(file, [message('x'.repeat(300000)), message('y'.repeat(300000))].map(JSON.stringify).join('\n') + '\n');
+  t.mock.method(AgentManager.prototype, 'get', () => ({ ...claudeState, cli: 'pi', session: undefined }));
+  t.mock.method(AgentManager.prototype, 'eventLogs', () => [file]);
+  t.mock.method(WorkspaceStore.prototype, 'list', async () => []);
+  let enter, release;
+  const entered = new Promise(resolve => { enter = resolve; });
+  const gate = new Promise(resolve => { release = resolve; });
+  const originalOpen = fsPromises.open;
+  let reads = 0;
+  fsPromises.open = async (...args) => {
+    const handle = await originalOpen(...args);
+    const read = handle.read.bind(handle);
+    handle.read = async (...input) => { reads++; if (reads === 1) { enter(); await gate; } return read(...input); };
+    return handle;
+  };
+  syncBuiltinESMExports();
+  t.after(() => { fsPromises.open = originalOpen; syncBuiltinESMExports(); });
+  const controller = new AbortController();
+  const rejected = assert.rejects(tools.get('subagent_query').execute('cancelled', { action: 'get', id: 'a' }, controller.signal, undefined, ctx), /abort/i);
+  await entered;
+  controller.abort();
+  release();
+  await rejected;
+  assert.equal(reads, 1, 'no further content read may start after cancellation');
+});
+
+test('a same-size rewrite during the read cannot mix two file versions into a total', async t => {
+  const { invoke } = harness();
+  const dir = tempDir('usage-rewrite'); t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const file = path.join(dir, 'events.jsonl');
+  const version = input => JSON.stringify({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: 'x'.repeat(300000) }], usage: { input, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: input + 1 } } }) + '\n'
+    + JSON.stringify({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: 'y'.repeat(300000) }], usage: { input, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: input + 1 } } }) + '\n';
+  const old = version(10), fresh = version(70);
+  assert.equal(Buffer.byteLength(old), Buffer.byteLength(fresh));
+  fs.writeFileSync(file, old);
+  t.mock.method(AgentManager.prototype, 'get', () => ({ ...claudeState, cli: 'pi', session: undefined }));
+  t.mock.method(AgentManager.prototype, 'eventLogs', () => [file]);
+  t.mock.method(WorkspaceStore.prototype, 'list', async () => []);
+  const originalOpen = fsPromises.open;
+  let rewritten = false;
+  fsPromises.open = async (...args) => {
+    const handle = await originalOpen(...args);
+    const read = handle.read.bind(handle);
+    handle.read = async (...input) => {
+      const result = await read(...input);
+      // Replace the log after the first parser chunk, before the second chunk is opened.
+      if (!rewritten && input[2] === 512 * 1024 && input[3] === 0) { fs.writeFileSync(file, fresh); rewritten = true; }
+      return result;
+    };
+    return handle;
+  };
+  syncBuiltinESMExports();
+  t.after(() => { fsPromises.open = originalOpen; syncBuiltinESMExports(); });
+  const got = await get(invoke);
+  assert.equal(rewritten, true, 'the rewrite must actually happen during the read');
+  assert.equal(got.usageComplete, false, 'two file versions must not be added into one claimed total');
+  assert.equal(Object.hasOwn(got, 'usage'), false);
+});
+
+test('a same-size rewrite is caught even when the filesystem reports unchanged times', async t => {
+  const { invoke } = harness();
+  const dir = tempDir('usage-rewrite-times'); t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const file = path.join(dir, 'events.jsonl');
+  const version = input => JSON.stringify({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: 'x'.repeat(300000) }], usage: { input, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: input + 1 } } }) + '\n'
+    + JSON.stringify({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: 'y'.repeat(300000) }], usage: { input, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: input + 1 } } }) + '\n';
+  fs.writeFileSync(file, version(10));
+  t.mock.method(AgentManager.prototype, 'get', () => ({ ...claudeState, cli: 'pi', session: undefined }));
+  t.mock.method(AgentManager.prototype, 'eventLogs', () => [file]);
+  t.mock.method(WorkspaceStore.prototype, 'list', async () => []);
+  // Windows keeps last-write times coarse; freeze them so only real content evidence can decide.
+  const realStat = fs.statSync;
+  const mockedStat = t.mock.method(fs, 'statSync', (target, ...rest) => {
+    const stat = realStat(target, ...rest);
+    return { size: stat.size, ino: stat.ino, dev: stat.dev, mtimeMs: 0, ctimeMs: 0, isFile: () => stat.isFile() };
+  });
+  syncBuiltinESMExports();
+  t.after(() => { mockedStat.mock.restore(); syncBuiltinESMExports(); });
+  const originalOpen = fsPromises.open;
+  let rewritten = false;
+  fsPromises.open = async (...args) => {
+    const handle = await originalOpen(...args);
+    const read = handle.read.bind(handle);
+    handle.read = async (...input) => {
+      const result = await read(...input);
+      if (!rewritten && input[2] === 512 * 1024 && input[3] === 0) { fs.writeFileSync(file, version(70)); rewritten = true; }
+      return result;
+    };
+    return handle;
+  };
+  syncBuiltinESMExports();
+  t.after(() => { fsPromises.open = originalOpen; syncBuiltinESMExports(); });
+  const got = await get(invoke);
+  assert.equal(rewritten, true, 'the rewrite must actually happen during the read');
+  assert.equal(got.usageComplete, false, 'unchanged timestamps must not hide a rewritten log');
+  assert.equal(Object.hasOwn(got, 'usage'), false);
+});
+
 test('repeated gets follow appended and replaced logs instead of a stale cached window', async t => {
   const { invoke } = harness();
   const dir = tempDir('usage-refresh'); t.after(() => fs.rmSync(dir, { recursive: true, force: true }));

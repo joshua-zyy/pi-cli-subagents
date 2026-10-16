@@ -143,6 +143,8 @@ export class TranscriptReader {
   private unavailableHistory = false;
   private error?: string;
   private usage?: TranscriptUsage;
+  /** Sticky: once any counted message left a counter unreported, no later message may clear that gap. */
+  private usageGap = false;
   private provider?: string;
   private model?: string;
 
@@ -490,7 +492,7 @@ export class TranscriptReader {
     this.entries.clear(); this.spans.clear(); this.assistant = undefined; this.user = undefined;
     this.boundaryReached = false;
     this.blocks.clear(); this.calls.clear(); this.clipped = false; this.malformed = false; this.unavailableHistory = false; this.error = undefined;
-    this.usage = undefined; this.provider = undefined; this.model = undefined;
+    this.usage = undefined; this.usageGap = false; this.provider = undefined; this.model = undefined;
     this.rangeFrom = undefined; this.rangeTo = undefined; this.tailContinues = false; this.currentContinues = false; this.inRecord = false;
   }
   private snapshot(loading: boolean): TranscriptSnapshot {
@@ -615,10 +617,11 @@ export class TranscriptReader {
     const reported = keys.map(value);
     const context = value("totalTokens");
     const counted = reported.some(entry => entry !== undefined);
+    // A message that carries usage but leaves a counter unreported keeps the lifetime total unknown
+    // for good; a later complete message cannot make that earlier gap disappear.
+    if (reported.some(entry => entry === undefined)) this.usageGap = true;
     const total = this.usage ?? zeroUsage();
-    // One message that leaves a counter unknown keeps the whole lifetime total marked incomplete: the
-    // running sum must never look complete while a message it counted contributed only part of itself.
-    if (reported.some(entry => entry === undefined)) total.countersIncomplete = true;
+    if (this.usageGap) total.countersIncomplete = true;
     if (!counted && context === undefined) {
       // A usage record carrying no counter at all still leaves this message's counters unknown.
       if (this.usage !== undefined) this.usage = total;
@@ -650,10 +653,15 @@ export class TranscriptReader {
     const item = object(p.item);
     if (record.method === "thread/tokenUsage/updated") {
       const total = object(p.tokenUsage)?.total;
-      const input = Number(total?.inputTokens), cached = Number(total?.cachedInputTokens), write = Number(total?.cacheWriteInputTokens ?? 0), output = Number(total?.outputTokens);
+      const count = (value: unknown): number | undefined =>
+        typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
+      const input = count(total?.inputTokens), cached = count(total?.cachedInputTokens), output = count(total?.outputTokens);
+      // A missing cache-write counter is the documented default; anything else must be a real number,
+      // so `null` never becomes a fabricated native zero.
+      const write = total?.cacheWriteInputTokens === undefined ? 0 : count(total.cacheWriteInputTokens);
       // A later snapshot that cannot be read leaves the thread total unknown: never keep an older
       // snapshot published as if it were the current one.
-      if (!object(total) || ![input, cached, write, output].every(entry => Number.isSafeInteger(entry) && entry >= 0)) {
+      if (!object(total) || input === undefined || cached === undefined || output === undefined || write === undefined) {
         this.usage = undefined;
         return;
       }
