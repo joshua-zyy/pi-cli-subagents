@@ -561,6 +561,8 @@ ${view(state, args.action === "interrupt")}`);
   /** The roster uses the same slot, so both panes sit above the editor instead of over it. */
   const AGENTS_PANEL_KEY = "cli-subagents-agents";
   type PaneWidget = { terminal: { rows: number }; requestRender(): void };
+  /** What one roster action still owes the command loop: another iteration, or nothing after a session change. */
+  type PanelStep = "next" | "stop";
   /** Discovered once per session and shared by every panel, so the pickers are ready when it opens. */
   let catalog: ModelCatalog | undefined;
   let catalogProbe: Promise<void> | undefined;
@@ -569,6 +571,120 @@ ${view(state, args.action === "interrupt")}`);
     cliAvailability ??= detectClis();
     catalogProbe ??= probeCatalog({ pi: launch, cwd, available: cliAvailability }).then((found) => { catalog = found; });
   };
+  /**
+   * Show one instance's conversation in the overlay and return the action it produced, so a message
+   * typed inside the viewer is handled by the same loop as a panel action. The overlay owns the
+   * keyboard while it is open, which the roster's input listener has to know.
+   */
+  async function showConversation(ctx: ExtensionContext, manager: AgentManager, epoch: number, id: string,
+    setOverlay: (active: boolean) => void): Promise<PanelAction | undefined> {
+    const selected = manager.get(id);
+    // One paged window per instance: reuse it while this process has it, never scan history unprompted.
+    const identity: TranscriptIdentity = { parentFile: manager.parentFile, agentId: id, cli: selected.cli ?? "pi",
+      ...(selected.session?.cli === "codex" ? { nativeId: selected.session.threadId } : selected.session?.cli === "claude" ? { nativeId: selected.session.sessionId } : {}) };
+    const lease = await transcriptCache.acquire(identity, manager.eventLogs(id),
+      () => new TranscriptWindow(identity.cli, identity.nativeId));
+    let viewer: ConversationViewer | undefined;
+    try {
+      return await ctx.ui.custom<PanelAction | undefined>((tui, theme, keybindings, done) => {
+        setOverlay(true);
+        dismissPanel = () => { viewer?.dispose(); done(undefined); };
+        const files = () => manager.eventLogs(id);
+        viewer = new ConversationViewer(tui, theme, done, async () => ({
+          agent: manager.get(id), ...await lease.window.open(files()),
+        }), { keybindings, markdownTheme: getMarkdownTheme(),
+          paging: { older: async (boundary) => ({ agent: manager.get(id), ...await lease.window.pageUp(files(), boundary) }),
+            newer: async (boundary) => ({ agent: manager.get(id), ...await lease.window.pageDown(files(), boundary) }),
+            latest: async () => ({ agent: manager.get(id), ...await lease.window.toTail(files()) }) },
+          onSend: async (message) => {
+            try {
+              const sent = await sendAndRecord(ctx, manager, id, message, epoch, "Requested input");
+              return sent;
+            }
+            catch (error) {
+              if (error instanceof WorkspaceDecisionRequired) return { kind: "message", id, resume: true, message };
+              throw error;
+            }
+          },
+          // Match Pi's input box: its border follows the main session's thinking level.
+          frameColor: (text) => ctx.ui.theme.getThinkingBorderColor(ctx.thinkingLevel ?? "off")(text) });
+        return viewer;
+      }, { overlay: true, overlayOptions: { width: "96%", maxHeight: "100%", margin: 1 } });
+    } finally { setOverlay(false); viewer?.dispose(); lease.release(); dismissPanel = undefined; }
+  }
+
+  /** Release every captured idle target the roster selected once, reporting one outcome per target. */
+  async function releaseIdleTargets(ctx: ExtensionContext, manager: AgentManager, epoch: number, targets: AgentView[]): Promise<PanelStep> {
+    if (!targets.length) return "next";
+    const confirmed = await ctx.ui.confirm("Release idle subagent processes?", targets
+      .map(target => `${oneLine(target.role, 120)} ${target.id} (run ${target.runId})`).join("\n")
+      + "\n\nRelease only these captured idle runtimes. This can stop background work; sessions, files and completed results are retained. Changed or busy targets are refused, not retried.");
+    if (!confirmed || epoch !== sessionEpoch) return "next";
+    const outcomes: string[] = [];
+    let uncertain = false;
+    for (const target of targets) {
+      if (epoch !== sessionEpoch) return "stop";
+      let result = target, message: string;
+      try {
+        result = await manager.close(target.id, true, { runId: target.runId, runtimeId: target.runtimeId! });
+        message = receiptText(result);
+        if (result.receipt?.status !== "released") uncertain = true;
+      } catch (error) {
+        uncertain = true;
+        message = `Idle release request unconfirmed: ${(error as Error).message}\nInspect before retrying.`;
+      }
+      // Use the captured target on refusal, not a later run from a fresh list.
+      recordHumanAction(ctx, manager, result, `Batch idle release: ${message}`, epoch);
+      outcomes.push(`${oneLine(target.role, 120)} ${target.id}: ${message}`);
+    }
+    if (epoch !== sessionEpoch) return "stop";
+    ctx.ui.notify(uncertain ? outcomes.join("\n") : `Released ${targets.length} idle subagent${targets.length === 1 ? "" : "s"}.`, uncertain ? "warning" : "info");
+    return "next";
+  }
+
+  /** Interrupt one captured turn or release one captured idle runtime, after confirming that exact target. */
+  async function interruptOrRelease(ctx: ExtensionContext, manager: AgentManager, epoch: number,
+    action: Extract<PanelAction, { kind: "stop" | "interrupt" }>, state: AgentView): Promise<PanelStep> {
+    const release = action.kind === "stop";
+    if (action.kind === "stop" && (!canRelease(state) || state.runId !== action.expected.runId || state.runtimeId !== action.expected.runtimeId)) {
+      ctx.ui.notify(`${state.role} is no longer the captured idle runtime; nothing was released.`, "warning"); return "next";
+    }
+    const confirmed = await ctx.ui.confirm(release ? "Release idle subagent?" : "Interrupt the current subagent turn?", release
+      ? `${state.role} ${action.id.slice(0, 8)}: release only this idle runtime. Keep the native session, last run outcome and results. Changed or busy targets are refused.`
+      : `${state.role} ${action.id.slice(0, 8)}: end only the current turn, retaining the runtime and native session. This does not undo file changes.`);
+    if (!confirmed || epoch !== sessionEpoch) return "next";
+    let result: AgentView;
+    try { result = action.kind === "stop" ? await manager.close(action.id, true, action.expected) : await manager.interrupt(action.id); }
+    catch (error) {
+      let observed = state;
+      if (!release) try { observed = manager.get(action.id); } catch { /* Preserve the pre-request identity. */ }
+      recordHumanAction(ctx, manager, observed, `${release ? "Release" : "Interrupt"} request unconfirmed: ${(error as Error).message}\nInspect before retrying.`, epoch);
+      throw error;
+    }
+    recordHumanAction(ctx, manager, result, receiptText(result), epoch);
+    if (epoch !== sessionEpoch) return "stop";
+    ctx.ui.notify(release && result.receipt?.status === "released" ? `Released ${oneLine(state.role, 120)} ${action.id.slice(0, 8)}.` : receiptText(result), result.receipt?.status === "unconfirmed" ? "warning" : "info");
+    return "next";
+  }
+
+  /** Send one roster message, or start/resume the instance's run once its phase allows that. */
+  async function messageFromRoster(ctx: ExtensionContext, manager: AgentManager, epoch: number,
+    action: Extract<PanelAction, { kind: "message" }>, state: AgentView): Promise<PanelStep> {
+    if (state.phase === "waiting") { ctx.ui.notify("This child has a pending interaction: use r in its details or subagent_reply; a message is not an answer.", "error"); return "next"; }
+    if (!canMessage(state.phase)) { ctx.ui.notify(`Cannot message this child while ${state.phase}; inspect it before continuing.`, "error"); return "next"; }
+    const steerable = canSteer(state.phase);
+    const resuming = canResume(state.phase);
+    const message = action.message ?? await ctx.ui.editor(resuming ? `Resume ${state.role} in the original session` : state.phase === "idle" ? `New task for ${state.role}` : `Message ${state.role}`, "");
+    if (!message?.trim() || epoch !== sessionEpoch) return "next";
+    if (!steerable) ctx.ui.notify("Starting a new turn in the original session; this can take up to about 60 seconds...", "info");
+    const sent = await sendHuman(ctx, manager, action.id, message, epoch,
+      steerable ? "Requested input" : resuming ? "Requested original-session continuation with" : "Requested a new resident task with");
+    if (epoch !== sessionEpoch) return "stop";
+    if (!sent) return "next";
+    ctx.ui.notify(receiptText(sent), sent.receipt?.status === "unconfirmed" ? "warning" : "info");
+    return "next";
+  }
+
   async function openAgents(ctx: ExtensionContext): Promise<void> {
       // The roster is a widget above the editor, so it needs Pi's TUI layout and raw input.
       if (ctx.mode !== "tui") { ctx.ui.notify("The panel requires a TUI; parent tools remain available through subagent_query, subagent and subagent_reply.", "error"); return; }
@@ -628,109 +744,20 @@ ${view(state, args.action === "interrupt")}`);
           dismissPanel = undefined;
           if (!action || epoch !== sessionEpoch) return;
           try {
+            // The conversation overlay hands back the next action, so a key pressed inside the viewer is
+            // handled by this same iteration instead of reopening the roster.
+            let pending: PanelAction | undefined = action;
             if (action.kind === "view") {
-              const id = action.id;
-              const selected = manager.get(id);
-              // One paged window per instance: reuse it while this process has it, never scan history unprompted.
-              const identity: TranscriptIdentity = { parentFile: manager.parentFile, agentId: id, cli: selected.cli ?? "pi",
-                ...(selected.session?.cli === "codex" ? { nativeId: selected.session.threadId } : selected.session?.cli === "claude" ? { nativeId: selected.session.sessionId } : {}) };
-              const lease = await transcriptCache.acquire(identity, manager.eventLogs(id),
-                () => new TranscriptWindow(identity.cli, identity.nativeId));
-              let viewer: ConversationViewer | undefined;
-              try {
-                action = await ctx.ui.custom<PanelAction | undefined>((tui, theme, keybindings, done) => {
-                  overlayActive = true;
-                  dismissPanel = () => { viewer?.dispose(); done(undefined); };
-                  const files = () => manager.eventLogs(id);
-                  viewer = new ConversationViewer(tui, theme, done, async () => ({
-                    agent: manager.get(id), ...await lease.window.open(files()),
-                  }), { keybindings, markdownTheme: getMarkdownTheme(),
-                    paging: { older: async (boundary) => ({ agent: manager.get(id), ...await lease.window.pageUp(files(), boundary) }),
-                      newer: async (boundary) => ({ agent: manager.get(id), ...await lease.window.pageDown(files(), boundary) }),
-                      latest: async () => ({ agent: manager.get(id), ...await lease.window.toTail(files()) }) },
-                    onSend: async (message) => {
-                      try {
-                        const sent = await sendAndRecord(ctx, manager, id, message, epoch, "Requested input");
-                        return sent;
-                      }
-                      catch (error) {
-                        if (error instanceof WorkspaceDecisionRequired) return { kind: "message", id, resume: true, message };
-                        throw error;
-                      }
-                    },
-                    // Match Pi's input box: its border follows the main session's thinking level.
-                    frameColor: (text) => ctx.ui.theme.getThinkingBorderColor(ctx.thinkingLevel ?? "off")(text) });
-                  return viewer;
-                }, { overlay: true, overlayOptions: { width: "96%", maxHeight: "100%", margin: 1 } });
-              } finally { overlayActive = false; viewer?.dispose(); lease.release(); dismissPanel = undefined; }
+              pending = await showConversation(ctx, manager, epoch, action.id, (active) => { overlayActive = active; });
               if (epoch !== sessionEpoch) return;
-              if (!action || action.kind === "view") continue;
             }
-            if (action.kind === "close-idle") {
-              const targets = action.targets;
-              if (!targets.length) continue;
-              const confirmed = await ctx.ui.confirm("Release idle subagent processes?", targets
-                .map(target => `${oneLine(target.role, 120)} ${target.id} (run ${target.runId})`).join("\n")
-                + "\n\nRelease only these captured idle runtimes. This can stop background work; sessions, files and completed results are retained. Changed or busy targets are refused, not retried.");
-              if (!confirmed || epoch !== sessionEpoch) continue;
-              const outcomes: string[] = [];
-              let uncertain = false;
-              for (const target of targets) {
-                if (epoch !== sessionEpoch) return;
-                let result = target, message: string;
-                try {
-                  result = await manager.close(target.id, true, { runId: target.runId, runtimeId: target.runtimeId! });
-                  message = receiptText(result);
-                  if (result.receipt?.status !== "released") uncertain = true;
-                } catch (error) {
-                  uncertain = true;
-                  message = `Idle release request unconfirmed: ${(error as Error).message}\nInspect before retrying.`;
-                }
-                // Use the captured target on refusal, not a later run from a fresh list.
-                recordHumanAction(ctx, manager, result, `Batch idle release: ${message}`, epoch);
-                outcomes.push(`${oneLine(target.role, 120)} ${target.id}: ${message}`);
-              }
-              if (epoch !== sessionEpoch) return;
-              ctx.ui.notify(uncertain ? outcomes.join("\n") : `Released ${targets.length} idle subagent${targets.length === 1 ? "" : "s"}.`, uncertain ? "warning" : "info");
-              continue;
-            }
+            if (!pending || pending.kind === "view") continue;
+            if (pending.kind === "close-idle") { if (await releaseIdleTargets(ctx, manager, epoch, pending.targets) === "stop") return; continue; }
             // Re-read state before acting: the list is a snapshot, not an authorization or lifecycle guarantee.
-            const state = manager.get(action.id);
-            if (action.kind === "reply") { await replyPrompt(ctx, manager, action.id, action.questionId); continue; }
-            if (action.kind === "stop" || action.kind === "interrupt") {
-              const release = action.kind === "stop";
-              if (action.kind === "stop" && (!canRelease(state) || state.runId !== action.expected.runId || state.runtimeId !== action.expected.runtimeId)) {
-                ctx.ui.notify(`${state.role} is no longer the captured idle runtime; nothing was released.`, "warning"); continue;
-              }
-              const confirmed = await ctx.ui.confirm(release ? "Release idle subagent?" : "Interrupt the current subagent turn?", release
-                ? `${state.role} ${action.id.slice(0, 8)}: release only this idle runtime. Keep the native session, last run outcome and results. Changed or busy targets are refused.`
-                : `${state.role} ${action.id.slice(0, 8)}: end only the current turn, retaining the runtime and native session. This does not undo file changes.`);
-              if (!confirmed || epoch !== sessionEpoch) continue;
-              let result: AgentView;
-              try { result = action.kind === "stop" ? await manager.close(action.id, true, action.expected) : await manager.interrupt(action.id); }
-              catch (error) {
-                let observed = state;
-                if (!release) try { observed = manager.get(action.id); } catch { /* Preserve the pre-request identity. */ }
-                recordHumanAction(ctx, manager, observed, `${release ? "Release" : "Interrupt"} request unconfirmed: ${(error as Error).message}\nInspect before retrying.`, epoch);
-                throw error;
-              }
-              recordHumanAction(ctx, manager, result, receiptText(result), epoch);
-              if (epoch !== sessionEpoch) return;
-              ctx.ui.notify(release && result.receipt?.status === "released" ? `Released ${oneLine(state.role, 120)} ${action.id.slice(0, 8)}.` : receiptText(result), result.receipt?.status === "unconfirmed" ? "warning" : "info");
-              continue;
-            }
-            if (state.phase === "waiting") { ctx.ui.notify("This child has a pending interaction: use r in its details or subagent_reply; a message is not an answer.", "error"); continue; }
-            if (!canMessage(state.phase)) { ctx.ui.notify(`Cannot message this child while ${state.phase}; inspect it before continuing.`, "error"); continue; }
-            const steerable = canSteer(state.phase);
-            const resuming = canResume(state.phase);
-            const message = action.message ?? await ctx.ui.editor(resuming ? `Resume ${state.role} in the original session` : state.phase === "idle" ? `New task for ${state.role}` : `Message ${state.role}`, "");
-            if (!message?.trim() || epoch !== sessionEpoch) continue;
-            if (!steerable) ctx.ui.notify("Starting a new turn in the original session; this can take up to about 60 seconds...", "info");
-            const sent = await sendHuman(ctx, manager, action.id, message, epoch,
-              steerable ? "Requested input" : resuming ? "Requested original-session continuation with" : "Requested a new resident task with");
-            if (epoch !== sessionEpoch) return;
-            if (!sent) continue;
-            ctx.ui.notify(receiptText(sent), sent.receipt?.status === "unconfirmed" ? "warning" : "info");
+            const state = manager.get(pending.id);
+            if (pending.kind === "reply") { await replyPrompt(ctx, manager, pending.id, pending.questionId); continue; }
+            if (pending.kind === "stop" || pending.kind === "interrupt") { if (await interruptOrRelease(ctx, manager, epoch, pending, state) === "stop") return; continue; }
+            if (await messageFromRoster(ctx, manager, epoch, pending, state) === "stop") return;
           } catch (error) { if (epoch !== sessionEpoch) return; ctx.ui.notify((error as Error).message, "error"); }
         }
       } catch (error) { if (epoch === sessionEpoch) ctx.ui.notify((error as Error).message, "error"); }
