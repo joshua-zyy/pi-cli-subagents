@@ -1,4 +1,5 @@
 import { Type } from "@earendil-works/pi-ai";
+import { statSync } from "node:fs";
 import path from "node:path";
 import { Key, matchesKey } from "@earendil-works/pi-tui";
 import { getAgentDir, getMarkdownTheme, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -18,6 +19,7 @@ import { StatusWidget } from "./ui/status.js";
 import { TranscriptWindow } from "./transcript-window.js";
 import { TranscriptCache, type TranscriptIdentity } from "./ui/transcript-cache.js";
 import { ConversationViewer } from "./ui/conversation.js";
+import { projectUsage, type UsageProjection } from "./usage.js";
 import type { AgentView, Delivery, Launch, Question, QuestionAnswers, Role, Thinking } from "./types.js";
 
 export function parentManager(ctx: Pick<ExtensionContext, "sessionManager">, launch: Launch): AgentManager {
@@ -32,6 +34,16 @@ function visible(state: AgentView, includeText = true) {
   const { id, cli, role, phase, protocolVersion, runtimeId, lastStatus, receipt, task, history, runCount, runId, sessionId, session, cwd, startedAt, updatedAt, lastActivity, questions, text, truncated, error, logFile } = state;
   return { id, cli, role, phase, protocolVersion, runtimeId, lastStatus, ...(receipt ? { receipt } : {}), runId, sessionId, ...(session?.cli === "codex" ? { threadId: session.threadId } : {}), cwd, updatedAt, lastActivity, questions, ...(includeText ? { text, truncated } : {}), error, logFile, history, runCount,
     ...(state.workspace ? { workspace: state.workspace, workspaceBaseline: state.workspaceBaseline } : {}), ...(task ? { task } : {}), ...(startedAt ? { startedAt } : {}) };
+}
+
+/** Newest event-log write time, so reported totals can state when they were last current. */
+function newestLogTime(files: string[]): string | undefined {
+  let newest = 0;
+  for (const file of files) {
+    try { const { mtimeMs } = statSync(file); if (mtimeMs > newest) newest = mtimeMs; }
+    catch { /* An unreadable log is not a time. */ }
+  }
+  return newest > 0 ? new Date(newest).toISOString() : undefined;
 }
 
 /** Only describe the actual operation receipt, never infer delivery from an old phase/accepted bit. */
@@ -142,6 +154,22 @@ export default function extension(pi: ExtensionAPI): void {
     updatePanel?: (agents: AgentView[]) => void } | undefined;
   /** Paged transcript windows for this extension instance; cleared when monitoring stops. */
   const transcriptCache = new TranscriptCache();
+
+  /** The child's own reported usage for one instance, read on demand through the shared paged window. */
+  async function reportedUsage(manager: AgentManager, id: string, state: AgentView): Promise<UsageProjection> {
+    try {
+      const files = manager.eventLogs(id);
+      const cli = state.cli ?? "pi";
+      // Same identity rules as the viewer: only a native id already recorded may be attributed.
+      const identity: TranscriptIdentity = { parentFile: manager.parentFile, agentId: id, cli,
+        ...(state.session?.cli === "codex" ? { nativeId: state.session.threadId } : state.session?.cli === "claude" ? { nativeId: state.session.sessionId } : {}) };
+      const lease = await transcriptCache.acquire(identity, files, () => new TranscriptWindow(identity.cli, identity.nativeId));
+      try { return projectUsage(await lease.window.open(files), cli, newestLogTime(files)); }
+      finally { lease.release(); }
+    }
+    // Reading is best-effort: a query must still answer about the instance when logs cannot be read.
+    catch { return { usageComplete: false }; }
+  }
 
   function pump(): void {
     if (!active || active.ctx.sessionManager.getSessionFile() !== active.file) return;
@@ -264,7 +292,7 @@ ${view(state, args.action === "interrupt")}`);
   registerSubagent("Role catalog loads at session start.");
   pi.registerTool({
     name: "subagent_query", label: "Query CLI subagents",
-    description: "Inspect this parent's instances without starting or resuming them. idle still owns processes; closed retains the native session. lastStatus describes the last run, not resource release.\n\nlist returns metadata and workspaces; get includes pending requests and a bounded result preview. If truncated, use result with the original id/runId and follow nextOffset until null; never substitute another run. activity is a paged history projection, not the full final report.\n\nRead complete evidence and verify claims before reporting success.",
+    description: "Inspect this parent's instances without starting or resuming them. idle still owns processes; closed retains the native session. lastStatus describes the last run, not resource release.\n\nlist returns metadata and workspaces; get includes pending requests, a bounded result preview, and the child's native-reported usage when its log is fully readable (usageComplete). If truncated, use result with the original id/runId and follow nextOffset until null; never substitute another run. activity is a paged history projection, not the full final report.\n\nRead complete evidence and verify claims before reporting success.",
     parameters: Type.Object({
       action: Type.Union([Type.Literal("list"), Type.Literal("get"), Type.Literal("result"), Type.Literal("activity")]),
       id: Type.Optional(Type.String({ description: "get/result/activity only, required: instance ID" })),
@@ -296,7 +324,10 @@ ${view(state, args.action === "interrupt")}`);
       else if (args.action === "list") checkFields(args, ["action"]);
       else throw new Error("Unknown query action; use list, get, result or activity");
       const manager = parentManager(ctx, launch);
-      return content(JSON.stringify({ agents: (args.action === "get" ? [manager.get(args.id!)] : manager.list()).map(state => visible(state, args.action === "get")), workspaces: await manager.workspaces.list() }));
+      // Only `get` carries the on-demand native usage projection; list and receipts stay unchanged.
+      const agents = await Promise.all((args.action === "get" ? [manager.get(args.id!)] : manager.list()).map(async state =>
+        ({ ...visible(state, args.action === "get"), ...(args.action === "get" ? await reportedUsage(manager, state.id, state) : {}) })));
+      return content(JSON.stringify({ agents, workspaces: await manager.workspaces.list() }));
     },
   });
   pi.registerTool({
