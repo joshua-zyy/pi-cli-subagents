@@ -46,7 +46,13 @@ export class TranscriptCache {
     const key = identityKey(identity);
     const wanted = files.map(logSourceKey);
     let entry = this.entries.get(key);
-    if (entry && !sameList(entry.files, wanted)) { this.invalidated++; this.drop(entry); entry = undefined; }
+    if (entry && !sameList(entry.files, wanted)) {
+      this.invalidated++;
+      // A lease that still holds this window (an open viewer) keeps it; only the cache entry is replaced,
+      // so a new run never disposes a window another reader is still paging through.
+      if (entry.pins > 0) this.detach(entry); else this.drop(entry);
+      entry = undefined;
+    }
     const reopened = entry !== undefined;
     if (reopened) this.hits++; else this.misses++;
     if (!entry) {

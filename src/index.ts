@@ -16,10 +16,10 @@ import { AgentsPanel, paneRows, type PanelAction } from "./ui/panel.js";
 import { RoleSettingsPanel, SETTINGS_MAX_ROWS, type RoleSettingsAction, type RoleSettingsCursor } from "./ui/role-settings.js";
 import { canMessage, canResume, canSteer, canRelease, hasFailure, oneLine, viewStatus } from "./ui/format.js";
 import { StatusWidget } from "./ui/status.js";
-import { TranscriptWindow } from "./transcript-window.js";
+import { TranscriptWindow, WINDOW_MAX_BYTES } from "./transcript-window.js";
 import { TranscriptCache, type TranscriptIdentity } from "./ui/transcript-cache.js";
 import { ConversationViewer } from "./ui/conversation.js";
-import { projectUsage, type UsageProjection } from "./usage.js";
+import { projectUsage, USAGE_INCOMPLETE, USAGE_TOO_LARGE, USAGE_UNREADABLE, type UsageProjection } from "./usage.js";
 import type { AgentView, Delivery, Launch, Question, QuestionAnswers, Role, Thinking } from "./types.js";
 
 export function parentManager(ctx: Pick<ExtensionContext, "sessionManager">, launch: Launch): AgentManager {
@@ -36,14 +36,17 @@ function visible(state: AgentView, includeText = true) {
     ...(state.workspace ? { workspace: state.workspace, workspaceBaseline: state.workspaceBaseline } : {}), ...(task ? { task } : {}), ...(startedAt ? { startedAt } : {}) };
 }
 
-/** Newest event-log write time, so reported totals can state when they were last current. */
-function newestLogTime(files: string[]): string | undefined {
-  let newest = 0;
+/** How many bounded pages one query may walk back; the byte budget check bounds the rest. */
+const USAGE_PAGE_LIMIT = 12;
+
+/** Total size of the retained run logs, or undefined when any of them cannot be measured. */
+function logBytes(files: string[]): number | undefined {
+  let total = 0;
   for (const file of files) {
-    try { const { mtimeMs } = statSync(file); if (mtimeMs > newest) newest = mtimeMs; }
-    catch { /* An unreadable log is not a time. */ }
+    try { total += statSync(file).size; }
+    catch { return undefined; }
   }
-  return newest > 0 ? new Date(newest).toISOString() : undefined;
+  return total;
 }
 
 /** Only describe the actual operation receipt, never infer delivery from an old phase/accepted bit. */
@@ -154,21 +157,47 @@ export default function extension(pi: ExtensionAPI): void {
     updatePanel?: (agents: AgentView[]) => void } | undefined;
   /** Paged transcript windows for this extension instance; cleared when monitoring stops. */
   const transcriptCache = new TranscriptCache();
+  // A query reads through its own cache: it must never park, page or invalidate the window a viewer holds.
+  const usageCache = new TranscriptCache();
 
   /** The child's own reported usage for one instance, read on demand through the shared paged window. */
-  async function reportedUsage(manager: AgentManager, id: string, state: AgentView): Promise<UsageProjection> {
+  async function reportedUsage(manager: AgentManager, id: string, state: AgentView, signal?: AbortSignal): Promise<UsageProjection> {
     try {
       const files = manager.eventLogs(id);
+      const bytes = logBytes(files);
+      // A missing run log means the session total cannot be established from what remains, even when
+      // the older files read cleanly: never pass off an older run's numbers as the session total.
+      if (files.length > 0 && bytes === undefined) return { usageComplete: false, usageNote: USAGE_UNREADABLE };
       const cli = state.cli ?? "pi";
       // Same identity rules as the viewer: only a native id already recorded may be attributed.
       const identity: TranscriptIdentity = { parentFile: manager.parentFile, agentId: id, cli,
         ...(state.session?.cli === "codex" ? { nativeId: state.session.threadId } : state.session?.cli === "claude" ? { nativeId: state.session.sessionId } : {}) };
-      const lease = await transcriptCache.acquire(identity, files, () => new TranscriptWindow(identity.cli, identity.nativeId));
-      try { return projectUsage(await lease.window.open(files), cli, newestLogTime(files)); }
+      const lease = await usageCache.acquire(identity, files, () => new TranscriptWindow(identity.cli, identity.nativeId));
+      try {
+        signal?.throwIfAborted();
+        let snapshot = await lease.window.open(files);
+        signal?.throwIfAborted();
+        // A session total needs every record, so walk the existing paged read back to the start --
+        // but only while the whole retained log still fits the window's own byte budget, which keeps
+        // one query a bounded read and leaves oversized logs explicitly unknown instead of guessed.
+        if (!snapshot.usageComplete && bytes !== undefined && bytes <= WINDOW_MAX_BYTES) {
+          for (let page = 0; page < USAGE_PAGE_LIMIT && !snapshot.usageComplete && snapshot.window && !snapshot.window.atStart; page++) {
+            const from = snapshot.window.from.offset;
+            signal?.throwIfAborted();
+            snapshot = await lease.window.pageUp(files);
+            if (snapshot.window?.from.offset === from) break;
+          }
+        }
+        if (logBytes(files) === undefined) return { usageComplete: false, usageNote: USAGE_UNREADABLE };
+        return projectUsage(snapshot, cli, bytes !== undefined && bytes > WINDOW_MAX_BYTES ? USAGE_TOO_LARGE : USAGE_INCOMPLETE);
+      }
       finally { lease.release(); }
     }
-    // Reading is best-effort: a query must still answer about the instance when logs cannot be read.
-    catch { return { usageComplete: false }; }
+    // Reading is best-effort, but a cancelled call is not a successful answer: let it reject.
+    catch (error) {
+      if (signal?.aborted === true) throw error;
+      return { usageComplete: false, usageNote: USAGE_UNREADABLE };
+    }
   }
 
   function pump(): void {
@@ -192,6 +221,7 @@ export default function extension(pi: ExtensionAPI): void {
     if (active) { clearInterval(active.timer); active.widget?.dispose(); }
     active = undefined;
     transcriptCache.clear();
+    usageCache.clear();
   }
   pi.on("session_start", (_event, ctx) => {
     stopMonitor();
@@ -292,7 +322,7 @@ ${view(state, args.action === "interrupt")}`);
   registerSubagent("Role catalog loads at session start.");
   pi.registerTool({
     name: "subagent_query", label: "Query CLI subagents",
-    description: "Inspect this parent's instances without starting or resuming them. idle still owns processes; closed retains the native session. lastStatus describes the last run, not resource release.\n\nlist returns metadata and workspaces; get includes pending requests, a bounded result preview, and the child's native-reported usage when its log is fully readable (usageComplete). If truncated, use result with the original id/runId and follow nextOffset until null; never substitute another run. activity is a paged history projection, not the full final report.\n\nRead complete evidence and verify claims before reporting success.",
+    description: "Inspect this parent's instances without starting or resuming them. idle still owns processes; closed retains the native session. lastStatus describes the last run, not resource release.\n\nlist returns metadata and workspaces; get includes pending requests, a bounded result preview and optional reported usage; usageComplete=false means unknown, not zero. Usage is neither live telemetry nor a bill. If truncated, use result with the original id/runId and follow nextOffset until null; never substitute another run. activity is a paged history projection, not the full final report.\n\nRead complete evidence and verify claims before reporting success.",
     parameters: Type.Object({
       action: Type.Union([Type.Literal("list"), Type.Literal("get"), Type.Literal("result"), Type.Literal("activity")]),
       id: Type.Optional(Type.String({ description: "get/result/activity only, required: instance ID" })),
@@ -302,11 +332,11 @@ ${view(state, args.action === "interrupt")}`);
       cursor: Type.Optional(Type.String({ minLength: 1, description: "activity only: opaque next-older-page cursor from the previous response; do not edit" })),
       maxBytes: Type.Optional(Type.Integer({ minimum: 4096, maximum: 65536, description: "activity only: total JSON UTF-8 byte budget, default 16384" })),
     }, { additionalProperties: false }),
-    async execute(_id, args, _signal, _update, ctx) {
+    async execute(_id, args, signal, _update, ctx) {
       if (args.action === "activity") {
         checkFields(args, ["action", "id"], ["cursor", "limit", "maxBytes"]);
         return content(JSON.stringify(await parentManager(ctx, launch).activity(args.id!,
-          { cursor: args.cursor, limit: args.limit, maxBytes: args.maxBytes, signal: _signal })));
+          { cursor: args.cursor, limit: args.limit, maxBytes: args.maxBytes, signal })));
       }
       if (args.action === "result") {
         checkFields(args, ["action", "id", "runId"], ["offset", "limit"]);
@@ -326,7 +356,7 @@ ${view(state, args.action === "interrupt")}`);
       const manager = parentManager(ctx, launch);
       // Only `get` carries the on-demand native usage projection; list and receipts stay unchanged.
       const agents = await Promise.all((args.action === "get" ? [manager.get(args.id!)] : manager.list()).map(async state =>
-        ({ ...visible(state, args.action === "get"), ...(args.action === "get" ? await reportedUsage(manager, state.id, state) : {}) })));
+        ({ ...visible(state, args.action === "get"), ...(args.action === "get" ? await reportedUsage(manager, state.id, state, signal) : {}) })));
       return content(JSON.stringify({ agents, workspaces: await manager.workspaces.list() }));
     },
   });

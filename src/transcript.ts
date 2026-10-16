@@ -83,7 +83,9 @@ export interface TranscriptReaderOptions {
   beforeEntry?: (entry: TranscriptEntry) => boolean;
 }
 /** Lifetime tokens reported by the child's assistant messages, plus the latest context size. */
-export interface TranscriptUsage { input: number; output: number; cacheRead: number; cacheWrite: number; cost: number; contextTokens?: number }
+export interface TranscriptUsage { input: number; output: number; cacheRead: number; cacheWrite: number; cost: number; contextTokens?: number;
+  /** True when some counted message never reported one of the four counters, so this total is smaller than the real one. */
+  countersIncomplete?: boolean }
 
 const CHUNK_BYTES = 512 * 1024;
 const MAX_RECORD = 4 * 1024 * 1024;
@@ -603,14 +605,19 @@ export class TranscriptReader {
     if (typeof message.model === "string") this.model = message.model;
     const usage = object(message.usage);
     if (!usage) return;
-    if (typeof usage.totalTokens === "number" && Number.isFinite(usage.totalTokens)) this.usage = { ...(this.usage ?? zeroUsage()), contextTokens: usage.totalTokens };
-    const counted = ["input", "output", "cacheRead", "cacheWrite"].some(key => typeof usage[key] === "number" && Number.isFinite(usage[key]));
-    if (!counted) return;
+    const keys = ["input", "output", "cacheRead", "cacheWrite"] as const;
+    // A counter the CLI did not report is unknown, not zero: one incomplete message keeps the whole
+    // total marked incomplete instead of quietly publishing a smaller number as the lifetime usage.
+    const incomplete = keys.some(key => typeof usage[key] !== "number" || !Number.isFinite(usage[key]));
+    const counted = keys.some(key => typeof usage[key] === "number" && Number.isFinite(usage[key]));
+    if (!counted && typeof usage.totalTokens !== "number") return;
     const total = this.usage ?? zeroUsage();
-    for (const key of ["input", "output", "cacheRead", "cacheWrite"] as const) {
+    if (incomplete) total.countersIncomplete = true;
+    for (const key of keys) {
       const value = usage[key];
       if (typeof value === "number" && Number.isFinite(value) && value > 0) total[key] += value;
     }
+    if (typeof usage.totalTokens === "number" && Number.isFinite(usage.totalTokens)) total.contextTokens = usage.totalTokens;
     const cost = object(usage.cost)?.total;
     if (typeof cost === "number" && Number.isFinite(cost) && cost > 0) total.cost += cost;
     this.usage = total;
