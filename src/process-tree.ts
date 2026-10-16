@@ -31,3 +31,16 @@ export function killProcessTree(child: ChildProcess): Promise<void> {
   terminating.set(child, operation);
   return operation;
 }
+
+/**
+ * Terminate this child's process tree and record that the shutdown was forced, unless the child
+ * already exited: an exited child, or one without a pid, has nothing to kill and must not be
+ * reported as forced. `onForced` runs before the termination is awaited on purpose — `end()` reads
+ * the owner's forced marker after `closed` resolves, and the child's close event regularly arrives
+ * while the termination command is still running.
+ */
+export async function terminateProcessTree(child: ChildProcess, onForced: () => void): Promise<void> {
+  if (child.exitCode !== null || child.signalCode !== null || !child.pid) return;
+  onForced();
+  await killProcessTree(child);
+}

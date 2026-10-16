@@ -1,6 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { LogWriter } from "./log-writer.js";
-import { killProcessTree } from "./process-tree.js";
+import { terminateProcessTree } from "./process-tree.js";
 import type { Launch } from "./types.js";
 
 // Minimal structural view of Pi RPC; event-specific fields belong to Pi's versioned protocol.
@@ -238,8 +238,6 @@ export class PiProcess {
   }
 
   private async kill(): Promise<void> {
-    if (this.child.exitCode !== null || this.child.signalCode !== null || !this.child.pid) return;
-    this.forced = true;
-    await killProcessTree(this.child);
+    await terminateProcessTree(this.child, () => { this.forced = true; });
   }
 }

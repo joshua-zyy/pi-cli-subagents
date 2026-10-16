@@ -1,6 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { LogWriter } from "./log-writer.js";
-import { killProcessTree } from "./process-tree.js";
+import { terminateProcessTree } from "./process-tree.js";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
 import type { AdapterEvent, AdapterOptions, CliAdapter, InteractionReply } from "./cli-adapter.js";
@@ -520,8 +520,6 @@ export class CodexAdapter implements CliAdapter {
     } finally { clearTimeout(deadline); }
   }
   private async kill(): Promise<void> {
-    if (this.child.exitCode !== null || this.child.signalCode !== null || !this.child.pid) return;
-    this.forced = true;
-    await killProcessTree(this.child);
+    await terminateProcessTree(this.child, () => { this.forced = true; });
   }
 }
