@@ -33,6 +33,7 @@
     "ui-input-receipts.test.mjs",
     "ui-panel.test.mjs",
     "ui-role-settings.test.mjs",
+    "ui-selection-fit.test.mjs",
     "ui-status.test.mjs",
     "usage.test.mjs"
   ],
