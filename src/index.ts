@@ -774,6 +774,74 @@ ${view(state, args.action === "interrupt")}`);
     handler: (_args, ctx) => openAgents(ctx),
   });
 
+  /** What one role-editor session edits: its parent epoch, current scope and cursor, plus the draft and last disk contents. */
+  type RoleSettingsSession = {
+    epoch: number; scope: Scope; cursor: RoleSettingsCursor;
+    disk: Record<Scope, Record<string, Role>>; draft: Record<Scope, Record<string, Role>>; dirty: Record<Scope, boolean>;
+  };
+
+  /**
+   * Apply one role-editor action to the draft, and report whether the panel is done ("stop") or should
+   * reopen with what the action left behind ("next"). Every write still happens through `writeScope`,
+   * which validates the document and refuses a stale disk snapshot.
+   */
+  async function applyRoleSettingsAction(ctx: ExtensionContext, action: RoleSettingsAction, session: RoleSettingsSession,
+    preview: Record<string, Role>, agentDir: string, cwd: string): Promise<PanelStep> {
+    const { disk, draft, dirty, epoch } = session, scope = session.scope;
+    if (action.kind === "close") {
+      if (!dirty.user && !dirty.project) return "stop";
+      const discard = await ctx.ui.confirm("Discard unsaved role changes?", `Unsaved edits in: ${
+        ["user", "project"].filter((item): item is Scope => dirty[item as Scope]).map((item) => item === "user" ? "personal" : "project").join(", ")}. The files on disk are unchanged.`);
+      if (epoch !== sessionEpoch) return "stop";
+      return discard ? "stop" : "next";
+    }
+    // A different scope holds a different role set, so start it from the top.
+    if (action.kind === "scope") { session.scope = action.scope; session.cursor = {}; return "next"; }
+    if (action.kind === "save") {
+      const file = writeScope(scope, agentDir, cwd, draft[scope], disk[scope]);
+      disk[scope] = readScope(scope, agentDir, cwd); draft[scope] = structuredClone(disk[scope]); dirty[scope] = false;
+      refreshRoleCatalog(ctx);
+      ctx.ui.notify(`Saved ${file}`, "info");
+      return "next";
+    }
+    if (action.kind === "set" || action.kind === "edit") {
+      // Kept even when a dialog is cancelled, so the same field stays under the cursor.
+      session.cursor = { role: action.role, field: action.field };
+      const base = Object.hasOwn(preview, action.role) ? preview[action.role] : undefined;
+      if (!base) throw new Error(`Unknown role: ${action.role}`);
+      const field = action.field, role = Object.hasOwn(draft[scope], action.role) ? draft[scope][action.role] : base;
+      const value = action.kind === "set" ? action.value : field === "instructions" || field === "description"
+        ? await ctx.ui.editor(`${field === "instructions" ? "Instructions" : "Description"} for ${action.role}`, fieldValue(role, field))
+        : await ctx.ui.input(`${FIELD_LABELS[field]} for ${action.role}`, field === "model" ? "Exact model name or alias" : "", undefined);
+      if (value === undefined || epoch !== sessionEpoch) return "next";
+      draft[scope] = setField(draft[scope], action.role, base, field, value); dirty[scope] = true;
+      // A catalog selection names a pair; free text and later edits remain independent.
+      if (action.kind === "set" && field === "model" && action.provider)
+        draft[scope][action.role].provider = action.provider;
+      if (field === "provider" && catalog?.pi.length) {
+        const next = inheritParentModel(draft[scope][action.role], ctx);
+        if (next.provider && next.model && !catalog.pi.some(entry => entry.provider === next.provider && entry.model === next.model))
+          ctx.ui.notify(`Model ${next.model} is not listed for provider ${next.provider}; it was kept. Choose a model or verify your custom configuration.`, "warning");
+      }
+      return "next";
+    }
+    if (action.kind === "add") {
+      const name = await ctx.ui.input("New role name", "lowercase, e.g. tester");
+      if (name === undefined || epoch !== sessionEpoch) return "next";
+      const clean = name.trim();
+      if (!/^[a-z][a-z0-9-]*$/.test(clean)) { ctx.ui.notify("Role names use lowercase letters, digits and dashes.", "error"); return "next"; }
+      if (Object.hasOwn(preview, clean)) { ctx.ui.notify(`Role ${clean} already exists; select it and press enter to customize it here.`, "warning"); return "next"; }
+      draft[scope] = addRole(draft[scope], clean); dirty[scope] = true;
+      session.cursor = { role: clean };   // the new role needs its description and instructions written
+      return "next";
+    }
+    const label = scope === "user" ? "personal" : "project";
+    const confirmed = await ctx.ui.confirm(`Remove ${action.role} from ${label} roles?`, "Lower-scope definitions apply again. Other scopes are untouched.");
+    if (!confirmed || epoch !== sessionEpoch) return "next";
+    draft[scope] = deleteRole(draft[scope], action.role); dirty[scope] = true; session.cursor = {};
+    return "next";
+  }
+
   async function openRoleSettings(ctx: ExtensionContext): Promise<void> {
     // The panel is a widget above the editor, so it needs Pi's TUI layout and raw input.
     if (ctx.mode !== "tui") { ctx.ui.notify("Role settings need the TUI; edit ~/.pi/agent/cli-subagents.roles.json or .pi/cli-subagents.roles.json directly.", "error"); return; }
@@ -781,9 +849,9 @@ ${view(state, args.action === "interrupt")}`);
     panelBusy = true;
     const epoch = sessionEpoch;
     const agentDir = getAgentDir(), cwd = ctx.cwd, trusted = ctx.isProjectTrusted();
-    let scope: Scope = trusted ? "project" : "user";
     const disk = {} as Record<Scope, Record<string, Role>>, draft = {} as Record<Scope, Record<string, Role>>;
     const dirty: Record<Scope, boolean> = { user: false, project: false };
+    const session: RoleSettingsSession = { epoch, scope: trusted ? "project" : "user", cursor: {}, disk, draft, dirty };
     let panel: RoleSettingsPanel | undefined;
     let widget: PaneWidget | undefined;
     // Unset while a host dialog owns the keyboard, so this listener never swallows a dialog's input.
@@ -825,79 +893,26 @@ ${view(state, args.action === "interrupt")}`);
       } catch (error) { ctx.ui.notify((error as Error).message, "error"); return; }
       draft.user = structuredClone(disk.user); draft.project = structuredClone(disk.project);
       // Reopening where the user left off: every action rebuilds the panel from current state.
-      let cursor: RoleSettingsCursor = {};
       while (epoch === sessionEpoch) {
-        const preview = mergeRoles([scope === "user" ? draft.user : disk.user, scope === "project" ? draft.project : disk.project]);
-        const rows = roleRows(preview, draft.user, draft.project, scope);
+        const preview = mergeRoles([session.scope === "user" ? draft.user : disk.user, session.scope === "project" ? draft.project : disk.project]);
+        const rows = roleRows(preview, draft.user, draft.project, session.scope);
         const action = await new Promise<RoleSettingsAction | undefined>((resolve) => {
           let settled = false;
           const done = (result: RoleSettingsAction | undefined) => { if (!settled) { settled = true; deliver = undefined; resolve(result); } };
           // Shutdown or session replacement must also settle the pending pane action.
           dismissPanel = () => done(undefined);
           // A lower-screen pane: tall enough to be useful, never taller than a third of the terminal.
-          panel = new RoleSettingsPanel(rows, scope, trusted, dirty[scope], theme, done,
+          panel = new RoleSettingsPanel(rows, session.scope, trusted, dirty[session.scope], theme, done,
             () => Math.max(6, Math.min(SETTINGS_MAX_ROWS + 4, Math.floor((widget?.terminal.rows ?? 24) / 3))),
             (text) => ctx.ui.theme.getThinkingBorderColor(ctx.thinkingLevel ?? "off")(text),
-            () => ({ clis, defaults: displayDefaults, ...(catalog ? { catalog } : {}), ...(catalog ? {} : { pending: true }) }), cursor);
+            () => ({ clis, defaults: displayDefaults, ...(catalog ? { catalog } : {}), ...(catalog ? {} : { pending: true }) }), session.cursor);
           deliver = (data) => panel?.handleInput(data);
           refresh();
         });
         dismissPanel = undefined;
         if (!action || epoch !== sessionEpoch) return;
-        const label = scope === "user" ? "personal" : "project";
         try {
-          if (action.kind === "close") {
-            if (!dirty.user && !dirty.project) return;
-            const discard = await ctx.ui.confirm("Discard unsaved role changes?", `Unsaved edits in: ${["user", "project"].filter((item): item is Scope => dirty[item as Scope]).map((item) => item === "user" ? "personal" : "project").join(", ")}. The files on disk are unchanged.`);
-            if (epoch !== sessionEpoch) return;
-            if (discard) return;
-            continue;
-          }
-          // A different scope holds a different role set, so start it from the top.
-          if (action.kind === "scope") { scope = action.scope; cursor = {}; continue; }
-          if (action.kind === "save") {
-            const file = writeScope(scope, agentDir, cwd, draft[scope], disk[scope]);
-            disk[scope] = readScope(scope, agentDir, cwd); draft[scope] = structuredClone(disk[scope]); dirty[scope] = false;
-            refreshRoleCatalog(ctx);
-            ctx.ui.notify(`Saved ${file}`, "info");
-            continue;
-          }
-          if (action.kind === "set" || action.kind === "edit") {
-            // Kept even when a dialog is cancelled, so the same field stays under the cursor.
-            cursor = { role: action.role, field: action.field };
-            const base = Object.hasOwn(preview, action.role) ? preview[action.role] : undefined;
-            if (!base) throw new Error(`Unknown role: ${action.role}`);
-            const field = action.field, role = Object.hasOwn(draft[scope], action.role) ? draft[scope][action.role] : base;
-            const value = action.kind === "set" ? action.value : field === "instructions" || field === "description"
-              ? await ctx.ui.editor(`${field === "instructions" ? "Instructions" : "Description"} for ${action.role}`, fieldValue(role, field))
-              : await ctx.ui.input(`${FIELD_LABELS[field]} for ${action.role}`, field === "model" ? "Exact model name or alias" : "", undefined);
-            if (value === undefined || epoch !== sessionEpoch) continue;
-            draft[scope] = setField(draft[scope], action.role, base, field, value); dirty[scope] = true;
-            // A catalog selection names a pair; free text and later edits remain independent.
-            if (action.kind === "set" && field === "model" && action.provider)
-              draft[scope][action.role].provider = action.provider;
-            if (field === "provider" && catalog?.pi.length) {
-              const next = inheritParentModel(draft[scope][action.role], ctx);
-              if (next.provider && next.model && !catalog.pi.some(entry => entry.provider === next.provider && entry.model === next.model))
-                ctx.ui.notify(`Model ${next.model} is not listed for provider ${next.provider}; it was kept. Choose a model or verify your custom configuration.`, "warning");
-            }
-            continue;
-          }
-          if (action.kind === "add") {
-            const name = await ctx.ui.input("New role name", "lowercase, e.g. tester");
-            if (name === undefined || epoch !== sessionEpoch) continue;
-            const clean = name.trim();
-            if (!/^[a-z][a-z0-9-]*$/.test(clean)) { ctx.ui.notify("Role names use lowercase letters, digits and dashes.", "error"); continue; }
-            if (Object.hasOwn(preview, clean)) { ctx.ui.notify(`Role ${clean} already exists; select it and press enter to customize it here.`, "warning"); continue; }
-            draft[scope] = addRole(draft[scope], clean); dirty[scope] = true;
-            cursor = { role: clean };   // the new role needs its description and instructions written
-            continue;
-          }
-          if (action.kind === "remove") {
-            const confirmed = await ctx.ui.confirm(`Remove ${action.role} from ${label} roles?`, "Lower-scope definitions apply again. Other scopes are untouched.");
-            if (!confirmed || epoch !== sessionEpoch) continue;
-            draft[scope] = deleteRole(draft[scope], action.role); dirty[scope] = true; cursor = {};
-          }
+          if (await applyRoleSettingsAction(ctx, action, session, preview, agentDir, cwd) === "stop") return;
         } catch (error) { ctx.ui.notify((error as Error).message, "error"); }
       }
     } finally {
