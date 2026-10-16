@@ -38,6 +38,7 @@
 | I-005 | 监督预算退出截断通知观测窗口 | 证据不足：严格 FAIL 保留，不归因为插件丢报告 | 第 6 轮自然审计通过；不倒推第 5 轮 PASS |
 | I-006 | 派发与简报约定是否减少父上下文 | 版本对照已完成：质量一致，冻结净代理 −711 B（−0.46%）且方向不稳；产品决定保留 A | 已收口；候选分支与证据保留，不扩跑 |
 | I-007 | `shutdown.test.mjs` 偶发只记录 1 次 cancel 决策 | 证据不足：A/B 各 1/5 复现，根因未定位 | 若再现先固定夹具与关闭时序，勿改超时或断言 |
+| I-008 | `subagent_query get` 无法取得子代理原生用量；父端只能从状态/文本推断 | 已验证并合并本地 main（离线门 + 四轮独立复审逐条修复后确认）：三后端投影、缺失/降级/取消/一致性反例闭合；真实使用见证未执行 | 见证可后补（`witness/plan.md`）；不声称节省 |
 
 ### I-001：释放回执不重复报告
 
@@ -159,6 +160,26 @@ oracle 独立复核后，主端核查 22/22 冻结输入及对应来源 hash 一
 **停止条件**：若再现，先固定夹具进程与关闭阶段（多次 cancel 的写入时机）再讨论方案；不得靠扩大超时、删断言或重跑绿收口。该 flake 不影响本次版本对照的产品结论，但合并或发版前不得把该次全量写成全绿。
 
 **最小复现命令**：`node --test test/shutdown.test.mjs`（该文件在 acceptance-local 层；`node scripts/test.mjs acceptance-local` 会整层运行，选择层参数不接受单文件）。**当时失败频率**：两棵树各 1/5（B `3846e8f` 与 main `db43f4f`，失败点相同）。证据：`.test-output/plugin-version-iteration-01/flake-shutdown-20261016/evidence.json`。
+
+### I-008：`get` 按需返回子代理原生用量
+
+**事前承诺**（半程补记：写在实现之后、真实见证之前）：观察证据＝差距调研 `plugin-gap-research-01/findings.md` 与 oracle-gap-01 裁决（get/list/回执/通知均无结构化用量；`transcript.ts` 已解析但只有 TUI 查看器使用）。预期改善＝父端在 `get` 上按需取得可复核的会话总量（分项 + 完整性），用于判断是否继续投入。**失败条件**＝任一后端出现“数字存在但不可信”（漏计数、占位零、旧 run、混版快照）。**停止条件**＝离线反例未闭合或真实见证 `NOT_EXERCISED` 时不合并（本次合并依据用户指示与离线门通过，真实见证未执行）。**验证口径**＝离线正确性 + 公开合同与成本（get-only、不问不读、常驻与按需字节分列）+ 真实见证；**不声称节省费用**。
+
+**事后结论**：分支 `feature/usage-stats`（worktree `../pi-cli-subagents-wt/usage-stats`）经合并提交 `5d7b27a` 并入本地 main（父 `60ddcff`，分支 tip `1a8801e`），合并主题 `feat: report a child's native usage on subagent_query get`。候选链：`e289cec`（功能）→`224864b`（计数/取消/日志完整性）→`7971ea8`（完整性证据）→`34279a3`（粘性缺口、Codex 严格数值、取消停止读取、内容采样）→`5f7fb45`（Codex 拆分超输入拒绝、中段探针）→`1a8801e`（测试钩子绑定 chunk 常量）。公共合同：仅 `get` 增加 `usageComplete`/`usage`（四计数 + 真实 cost + `scope:"session"`）/`usageNote`；不做 asOf、上下文占比、list/回执/通知、持久状态、后台采集、唤醒 CLI。
+
+裁决链：`oracle-review-g1`（accept-with-required-fixes）→ `oracle-review-g1-delta`（accept-with-required-fixes）→ `oracle-review-g1-delta2`（额度耗尽、无裁决，不重试）→ `oracle-review-g1-delta3`（新实例，accept-with-required-fixes）→ `oracle-review-g1-delta4`（**accept，无阻塞项**，仅两处非行为性收尾）。证据：`test/usage.test.mjs` 22 例 + 缓存 pin 用例；合并后 main 全量 `712/712`；基线 dist 红测 21/21 行为用例断言级失败（原始 TAP 冻结于 `red-run1/2.raw.tap`）；39 个 dist 文件重建逐字节一致，合并后 main dist 与受审分支 tip 逐字节相同；`pi-usage-shapes.json` 实测 72 个 Pi 子代理 1,580 条 usage 消息零缺计数；`self-audit-7971/` 主端反例。
+
+**公开限制（调用方需知）**：① `usageComplete:true` 只保证“本次读取内未观察到该日志被替换或改写”，不是“与当前文件逐字节一致”——同尺寸且恰好避开头/尾/25%/75% 四片 4 KiB 采样窗口的原地重写不可发现（1 MiB 日志约 98% 中段不在采样窗内）；② Pi 会话级粘性降级：任一带 usage 的消息缺任一计数即整条会话永久不可用（畸形数据安全网，非常态）；③ 成本：工具说明 +114 B/每请求常驻、get 响应 +113 B（完整）/+94 B（未知）、list 0，另有每条日志每次 get ≤8 次同步采样读（≤32 KiB）与冷查询 2.12–2.50× 分页放大量。
+
+**最小复现命令**：
+
+```bash
+cd D:/AI/agentBySelf/pi-extensions/pi-cli-subagents
+node scripts/test.mjs all
+node .test-output/plugin-gap-research-01/red-check.mjs
+```
+
+**当时失败频率**：修复前主端反例 4/4 稳定失败（`self-audit-7971/result.tap`）；修复后 22/22 与全量 712/712 连续通过；旧时钟判定曾在全量下 1/1 偶发（已由内容采样取代）。
 
 ## 真实轮次与非产品因素
 
