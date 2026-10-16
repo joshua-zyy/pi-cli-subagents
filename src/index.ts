@@ -1,4 +1,5 @@
 import { Type } from "@earendil-works/pi-ai";
+import { closeSync, openSync, readSync, statSync } from "node:fs";
 import path from "node:path";
 import { Key, matchesKey } from "@earendil-works/pi-tui";
 import { getAgentDir, getMarkdownTheme, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -15,9 +16,10 @@ import { AgentsPanel, paneRows, type PanelAction } from "./ui/panel.js";
 import { RoleSettingsPanel, SETTINGS_MAX_ROWS, type RoleSettingsAction, type RoleSettingsCursor } from "./ui/role-settings.js";
 import { canMessage, canResume, canSteer, canRelease, hasFailure, oneLine, viewStatus } from "./ui/format.js";
 import { StatusWidget } from "./ui/status.js";
-import { TranscriptWindow } from "./transcript-window.js";
-import { TranscriptCache, type TranscriptIdentity } from "./ui/transcript-cache.js";
+import { TranscriptWindow, WINDOW_MAX_BYTES } from "./transcript-window.js";
+import { TranscriptCache, TRANSCRIPT_CACHE_LIMITS, type TranscriptIdentity } from "./ui/transcript-cache.js";
 import { ConversationViewer } from "./ui/conversation.js";
+import { projectUsage, USAGE_INCOMPLETE, USAGE_TOO_LARGE, USAGE_UNREADABLE, type UsageProjection } from "./usage.js";
 import type { AgentView, Delivery, Launch, Question, QuestionAnswers, Role, Thinking } from "./types.js";
 
 export function parentManager(ctx: Pick<ExtensionContext, "sessionManager">, launch: Launch): AgentManager {
@@ -32,6 +34,68 @@ function visible(state: AgentView, includeText = true) {
   const { id, cli, role, phase, protocolVersion, runtimeId, lastStatus, receipt, task, history, runCount, runId, sessionId, session, cwd, startedAt, updatedAt, lastActivity, questions, text, truncated, error, logFile } = state;
   return { id, cli, role, phase, protocolVersion, runtimeId, lastStatus, ...(receipt ? { receipt } : {}), runId, sessionId, ...(session?.cli === "codex" ? { threadId: session.threadId } : {}), cwd, updatedAt, lastActivity, questions, ...(includeText ? { text, truncated } : {}), error, logFile, history, runCount,
     ...(state.workspace ? { workspace: state.workspace, workspaceBaseline: state.workspaceBaseline } : {}), ...(task ? { task } : {}), ...(startedAt ? { startedAt } : {}) };
+}
+
+/** How many bounded pages one query may walk back; the byte budget check bounds the rest. */
+const USAGE_PAGE_LIMIT = 12;
+
+/** Bytes sampled at each end and at two interior quantiles of a run log, so an in-place rewrite is
+ * noticed without trusting clocks. The interior probes shrink the undetectable window to a rewrite
+ * that happens to avoid four bounded slices; a full-file hash would mean rescanning the log. */
+const USAGE_SAMPLE_BYTES = 4096;
+
+/** File identity of one retained run log, as seen at one point in time. */
+interface LogState { size: number; ino: number; dev: number; mtimeMs: number; ctimeMs: number; head: string; mid: string; tail: string }
+
+/** One bounded sample of an open run log; the caller decides which slice it read. */
+function sampleAt(file: string, offset: number, length: number, buffer: Buffer): string {
+  if (length <= 0) return "";
+  const handle = openSync(file, "r");
+  try { const read = readSync(handle, buffer, 0, length, Math.max(0, offset)); return buffer.subarray(0, read).toString("base64"); }
+  finally { closeSync(handle); }
+}
+
+/** Interior slices for a log long enough to have a middle that head and tail samples do not cover. */
+function interiorProbes(size: number): number[] {
+  if (size <= 3 * USAGE_SAMPLE_BYTES) return [];
+  const highest = size - 2 * USAGE_SAMPLE_BYTES;
+  const probe = (share: number): number => Math.max(USAGE_SAMPLE_BYTES, Math.min(highest, Math.floor(size * share) - USAGE_SAMPLE_BYTES / 2));
+  return [probe(0.25), probe(0.75)];
+}
+
+/** Identity of every retained run log, or undefined when one of them cannot be sampled as a file. */
+function logStates(files: string[]): LogState[] | undefined {
+  const states: LogState[] = [];
+  const buffer = Buffer.alloc(USAGE_SAMPLE_BYTES);
+  for (const file of files) {
+    try {
+      const stat = statSync(file);
+      if (!stat.isFile()) return undefined;
+      const length = Math.min(stat.size, USAGE_SAMPLE_BYTES);
+      const interior = interiorProbes(stat.size).map(offset => sampleAt(file, offset, USAGE_SAMPLE_BYTES, buffer));
+      states.push({ size: stat.size, ino: stat.ino, dev: stat.dev, mtimeMs: stat.mtimeMs, ctimeMs: stat.ctimeMs,
+        head: sampleAt(file, 0, length, buffer), mid: interior.join(""), tail: sampleAt(file, stat.size - length, length, buffer) });
+    }
+    catch { return undefined; }
+  }
+  return states;
+}
+
+/**
+ * A log that shrank, moved to another file or was rewritten in place cannot prove one snapshot.
+ * Appends are expected while a child runs, so a growing file is fine and only its head must hold;
+ * Windows keeps last-write times coarse, so content samples decide an in-place rewrite, not clocks.
+ * Undetectable without rescanning the log: a rewrite of the same size that avoids all four slices.
+ */
+function rewrittenInPlace(before: LogState, after: LogState): boolean {
+  if (after.size < before.size) return true;
+  if (after.ino !== before.ino || after.dev !== before.dev) return true;
+  if (after.head !== before.head) return true;
+  // Growth moves the tail and interior windows, so only a same-size file can be compared slice by slice.
+  if (after.size !== before.size) return false;
+  if (after.tail !== before.tail) return true;
+  if (after.mid !== before.mid) return true;
+  return after.mtimeMs !== before.mtimeMs || after.ctimeMs !== before.ctimeMs;
 }
 
 /** Only describe the actual operation receipt, never infer delivery from an old phase/accepted bit. */
@@ -142,6 +206,65 @@ export default function extension(pi: ExtensionAPI): void {
     updatePanel?: (agents: AgentView[]) => void } | undefined;
   /** Paged transcript windows for this extension instance; cleared when monitoring stops. */
   const transcriptCache = new TranscriptCache();
+  // A query reads through its own cache with its own explicit budget: it must never park, page or
+  // invalidate the window a viewer holds, and its retained windows stay bounded like the viewer's.
+  const usageCache = new TranscriptCache({ instances: TRANSCRIPT_CACHE_LIMITS.instances,
+    entries: TRANSCRIPT_CACHE_LIMITS.entries, bytes: TRANSCRIPT_CACHE_LIMITS.bytes });
+
+  /** The child's own reported usage for one instance, read on demand through its own paged window. */
+  async function reportedUsage(manager: AgentManager, id: string, state: AgentView, signal?: AbortSignal): Promise<UsageProjection> {
+    const unreadable = { usageComplete: false as const, usageNote: USAGE_UNREADABLE };
+    try {
+      const files = manager.eventLogs(id);
+      const before = logStates(files);
+      // A missing run log means the session total cannot be established from what remains, even when
+      // the older files read cleanly: never pass off an older run's numbers as the session total.
+      if (files.length > 0 && before === undefined) { signal?.throwIfAborted(); return unreadable; }
+      const bytes = before?.reduce((sum, state) => sum + state.size, 0);
+      const cli = state.cli ?? "pi";
+      // Same identity rules as the viewer: only a native id already recorded may be attributed.
+      const identity: TranscriptIdentity = { parentFile: manager.parentFile, agentId: id, cli,
+        ...(state.session?.cli === "codex" ? { nativeId: state.session.threadId } : state.session?.cli === "claude" ? { nativeId: state.session.sessionId } : {}) };
+      const lease = await usageCache.acquire(identity, files, () => new TranscriptWindow(identity.cli, identity.nativeId));
+      // A cancelled query must stop starting reads, not merely reject afterwards: the window owns the
+      // read loop, so cancellation is forwarded to it as well as checked at every boundary below.
+      const stopReads = (): void => lease.window.cancel();
+      signal?.addEventListener("abort", stopReads, { once: true });
+      try {
+        signal?.throwIfAborted();
+        let snapshot = await lease.window.open(files);
+        signal?.throwIfAborted();
+        // A session total needs every record, so walk the existing paged read back to the start --
+        // but only while the whole retained log still fits the window's own byte budget, which keeps
+        // one query a bounded read and leaves oversized logs explicitly unknown instead of guessed.
+        if (!snapshot.usageComplete && bytes !== undefined && bytes <= WINDOW_MAX_BYTES) {
+          for (let page = 0; page < USAGE_PAGE_LIMIT && !snapshot.usageComplete && snapshot.window && !snapshot.window.atStart; page++) {
+            const edge = snapshot.window.from;
+            signal?.throwIfAborted();
+            snapshot = await lease.window.pageUp(files);
+            // Paging back into an older run starts a new source, so progress is a new source or a new offset.
+            const next = snapshot.window?.from;
+            if (next && next.source === edge.source && next.offset === edge.offset) break;
+          }
+        }
+        signal?.throwIfAborted();
+        const after = logStates(files);
+        // The totals are only published for one consistent snapshot: a log that vanished, shrank or was
+        // rewritten in place while it was read cannot prove the numbers still describe this session.
+        if (after === undefined || (before !== undefined && after.some((state, index) => rewrittenInPlace(before[index], state)))) return unreadable;
+        return projectUsage(snapshot, cli, bytes !== undefined && bytes > WINDOW_MAX_BYTES ? USAGE_TOO_LARGE : USAGE_INCOMPLETE);
+      }
+      finally {
+        signal?.removeEventListener("abort", stopReads);
+        lease.release();
+      }
+    }
+    // Reading is best-effort, but a cancelled call is not a successful answer: let it reject.
+    catch (error) {
+      if (signal?.aborted === true) throw error;
+      return unreadable;
+    }
+  }
 
   function pump(): void {
     if (!active || active.ctx.sessionManager.getSessionFile() !== active.file) return;
@@ -164,6 +287,7 @@ export default function extension(pi: ExtensionAPI): void {
     if (active) { clearInterval(active.timer); active.widget?.dispose(); }
     active = undefined;
     transcriptCache.clear();
+    usageCache.clear();
   }
   pi.on("session_start", (_event, ctx) => {
     stopMonitor();
@@ -264,7 +388,7 @@ ${view(state, args.action === "interrupt")}`);
   registerSubagent("Role catalog loads at session start.");
   pi.registerTool({
     name: "subagent_query", label: "Query CLI subagents",
-    description: "Inspect this parent's instances without starting or resuming them. idle still owns processes; closed retains the native session. lastStatus describes the last run, not resource release.\n\nlist returns metadata and workspaces; get includes pending requests and a bounded result preview. If truncated, use result with the original id/runId and follow nextOffset until null; never substitute another run. activity is a paged history projection, not the full final report.\n\nRead complete evidence and verify claims before reporting success.",
+    description: "Inspect this parent's instances without starting or resuming them. idle still owns processes; closed retains the native session. lastStatus describes the last run, not resource release.\n\nlist returns metadata and workspaces; get includes pending requests, a bounded result preview and optional reported usage; usageComplete=false means unknown, not zero. Usage is neither live telemetry nor a bill. If truncated, use result with the original id/runId and follow nextOffset until null; never substitute another run. activity is a paged history projection, not the full final report.\n\nRead complete evidence and verify claims before reporting success.",
     parameters: Type.Object({
       action: Type.Union([Type.Literal("list"), Type.Literal("get"), Type.Literal("result"), Type.Literal("activity")]),
       id: Type.Optional(Type.String({ description: "get/result/activity only, required: instance ID" })),
@@ -274,11 +398,11 @@ ${view(state, args.action === "interrupt")}`);
       cursor: Type.Optional(Type.String({ minLength: 1, description: "activity only: opaque next-older-page cursor from the previous response; do not edit" })),
       maxBytes: Type.Optional(Type.Integer({ minimum: 4096, maximum: 65536, description: "activity only: total JSON UTF-8 byte budget, default 16384" })),
     }, { additionalProperties: false }),
-    async execute(_id, args, _signal, _update, ctx) {
+    async execute(_id, args, signal, _update, ctx) {
       if (args.action === "activity") {
         checkFields(args, ["action", "id"], ["cursor", "limit", "maxBytes"]);
         return content(JSON.stringify(await parentManager(ctx, launch).activity(args.id!,
-          { cursor: args.cursor, limit: args.limit, maxBytes: args.maxBytes, signal: _signal })));
+          { cursor: args.cursor, limit: args.limit, maxBytes: args.maxBytes, signal })));
       }
       if (args.action === "result") {
         checkFields(args, ["action", "id", "runId"], ["offset", "limit"]);
@@ -296,7 +420,10 @@ ${view(state, args.action === "interrupt")}`);
       else if (args.action === "list") checkFields(args, ["action"]);
       else throw new Error("Unknown query action; use list, get, result or activity");
       const manager = parentManager(ctx, launch);
-      return content(JSON.stringify({ agents: (args.action === "get" ? [manager.get(args.id!)] : manager.list()).map(state => visible(state, args.action === "get")), workspaces: await manager.workspaces.list() }));
+      // Only `get` carries the on-demand native usage projection; list and receipts stay unchanged.
+      const agents = await Promise.all((args.action === "get" ? [manager.get(args.id!)] : manager.list()).map(async state =>
+        ({ ...visible(state, args.action === "get"), ...(args.action === "get" ? await reportedUsage(manager, state.id, state, signal) : {}) })));
+      return content(JSON.stringify({ agents, workspaces: await manager.workspaces.list() }));
     },
   });
   pi.registerTool({

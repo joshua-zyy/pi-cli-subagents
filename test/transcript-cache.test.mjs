@@ -108,6 +108,24 @@ test('the cache stays bounded by entries and bytes when windows hold text', asyn
 })
 ;
 
+test('a pinned reader keeps its window when a new run changes the file list', async t => {
+  const w = workspace(t); append(w.file, 'FIRST');
+  const cache = new TranscriptCache(); t.after(() => cache.clear());
+  const viewer = await cache.acquire(identity(), w.files(), create);
+  assert.equal((await viewer.window.open(w.files())).entries.length, 1);
+  const next = path.join(w.dir, 'run-2', 'events.jsonl'); fs.mkdirSync(path.dirname(next), { recursive: true });
+  fs.writeFileSync(next, line(record('SECOND')));
+  const held = viewer.window.stats();
+  const after = await cache.acquire(identity(), [w.file, next], create);
+  assert.notEqual(after.window, viewer.window, 'the new run is read through a new window');
+  // The held window must survive the replacement itself, before any reopen from disk could mask a dispose.
+  assert.equal(viewer.window.stats().retainedEntries, held.retainedEntries, 'the open reader window was not disposed');
+  assert.equal(viewer.cached, false, 'the replaced window is no longer cache-resident');
+  const kept = await viewer.window.open(w.files());
+  assert.equal(kept.entries[0].text, 'FIRST', 'the open reader still pages through its own window');
+  after.release(); viewer.release();
+});
+
 test('closing a lease stops in-flight reads and the cached window is reused on reopen', async t => {
   const w = workspace(t);
   fs.appendFileSync(w.file, Array.from({ length: 40 }, (_, i) => line(record(`PAGE_${i} ` + 'p'.repeat(2000)))).join(''));

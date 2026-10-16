@@ -33,7 +33,8 @@
     "ui-input-receipts.test.mjs",
     "ui-panel.test.mjs",
     "ui-role-settings.test.mjs",
-    "ui-status.test.mjs"
+    "ui-status.test.mjs",
+    "usage.test.mjs"
   ],
   "domain": [
     "claude-adapter.test.mjs",
