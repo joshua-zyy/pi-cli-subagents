@@ -1,6 +1,6 @@
 # Local Test Tiers and Verification Costs
 
-问题、尝试过的方法、对应分支、失败证据和当前结论统一维护在 [插件迭代记录](iteration-log.md)；本页保留测试入口、分层与验证边界。
+问题、尝试过的方法、对应分支、失败证据和当前结论统一维护在插件迭代记录（本地保留，不进仓库、不随包发布）；本页保留测试入口、分层与验证边界。
 
 ## Entry points and boundaries
 
