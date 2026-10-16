@@ -461,6 +461,61 @@ test('a same-size rewrite is caught even when the filesystem reports unchanged t
   assert.equal(Object.hasOwn(got, 'usage'), false);
 });
 
+test('a codex report where the split exceeds the input total is unknown, not a clamped zero', async t => {
+  const { invoke } = harness();
+  const dir = tempDir('usage-codex-split'); t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const file = path.join(dir, 'events.jsonl');
+  const snapshot = total => ({ method: 'thread/tokenUsage/updated', params: { threadId: 'thread', tokenUsage: { total } } });
+  fs.writeFileSync(file, [snapshot({ inputTokens: 10, cachedInputTokens: 8, cacheWriteInputTokens: 5, outputTokens: 2 })].map(JSON.stringify).join('\n') + '\n');
+  t.mock.method(AgentManager.prototype, 'get', () => ({ ...claudeState, cli: 'codex', session: { cli: 'codex', threadId: 'thread', sessionId: 's', codexHome: '/fixture' } }));
+  t.mock.method(AgentManager.prototype, 'eventLogs', () => [file]);
+  t.mock.method(WorkspaceStore.prototype, 'list', async () => []);
+  const got = await get(invoke);
+  assert.equal(got.usageComplete, false, 'cached + write beyond input is not a native zero');
+  assert.equal(Object.hasOwn(got, 'usage'), false);
+});
+
+test('a rewrite confined to the middle is caught even with identical ends and frozen clocks', async t => {
+  const { invoke } = harness();
+  const dir = tempDir('usage-rewrite-middle'); t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const file = path.join(dir, 'events.jsonl');
+  const record = (text, input) => JSON.stringify({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text }], usage: { input, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: input + 1 } } }) + '\n';
+  // Head and tail records are identical in both versions; only the long middle record differs, and the
+  // 25%/75% interior probes are the only slices that cover it.
+  const version = old => record('a'.repeat(200000), 10) + record((old ? 'b' : 'c').repeat(900000), old ? 10 : 70) + record('d'.repeat(100000), 10);
+  const old = version(true), fresh = version(false);
+  assert.equal(Buffer.byteLength(old), Buffer.byteLength(fresh));
+  fs.writeFileSync(file, old);
+  t.mock.method(AgentManager.prototype, 'get', () => ({ ...claudeState, cli: 'pi', session: undefined }));
+  t.mock.method(AgentManager.prototype, 'eventLogs', () => [file]);
+  t.mock.method(WorkspaceStore.prototype, 'list', async () => []);
+  const realStat = fs.statSync;
+  const mockedStat = t.mock.method(fs, 'statSync', (target, ...rest) => {
+    const stat = realStat(target, ...rest);
+    return { size: stat.size, ino: stat.ino, dev: stat.dev, mtimeMs: 0, ctimeMs: 0, isFile: () => stat.isFile() };
+  });
+  syncBuiltinESMExports();
+  t.after(() => { mockedStat.mock.restore(); syncBuiltinESMExports(); });
+  const originalOpen = fsPromises.open;
+  let rewritten = false;
+  fsPromises.open = async (...args) => {
+    const handle = await originalOpen(...args);
+    const read = handle.read.bind(handle);
+    handle.read = async (...input) => {
+      const result = await read(...input);
+      if (!rewritten && input[2] === 512 * 1024 && input[3] === 0) { fs.writeFileSync(file, fresh); rewritten = true; }
+      return result;
+    };
+    return handle;
+  };
+  syncBuiltinESMExports();
+  t.after(() => { fsPromises.open = originalOpen; syncBuiltinESMExports(); });
+  const got = await get(invoke);
+  assert.equal(rewritten, true, 'the middle rewrite must actually happen during the read');
+  assert.equal(got.usageComplete, false, 'identical ends and frozen clocks must not hide a middle rewrite');
+  assert.equal(Object.hasOwn(got, 'usage'), false);
+});
+
 test('repeated gets follow appended and replaced logs instead of a stale cached window', async t => {
   const { invoke } = harness();
   const dir = tempDir('usage-refresh'); t.after(() => fs.rmSync(dir, { recursive: true, force: true }));

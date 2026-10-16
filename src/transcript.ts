@@ -665,7 +665,13 @@ export class TranscriptReader {
         this.usage = undefined;
         return;
       }
-      this.usage = { input: Math.max(0, input - cached - write), cacheRead: cached, cacheWrite: write, output, cost: 0 };
+      // cached + write is a split of the input total: a report where it exceeds the input is not a
+      // native zero, it is an unreadable snapshot, exactly like a missing counter.
+      if (cached + write > input) {
+        this.usage = undefined;
+        return;
+      }
+      this.usage = { input: input - cached - write, cacheRead: cached, cacheWrite: write, output, cost: 0 };
       return;
     }
     if (record.method === "item/agentMessage/delta" && typeof p.itemId === "string" && typeof p.delta === "string") {

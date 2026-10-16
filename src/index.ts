@@ -39,18 +39,28 @@ function visible(state: AgentView, includeText = true) {
 /** How many bounded pages one query may walk back; the byte budget check bounds the rest. */
 const USAGE_PAGE_LIMIT = 12;
 
-/** Bytes sampled at each end of a run log so an in-place rewrite is noticed without timestamps. */
+/** Bytes sampled at each end and at two interior quantiles of a run log, so an in-place rewrite is
+ * noticed without trusting clocks. The interior probes shrink the undetectable window to a rewrite
+ * that happens to avoid four bounded slices; a full-file hash would mean rescanning the log. */
 const USAGE_SAMPLE_BYTES = 4096;
 
 /** File identity of one retained run log, as seen at one point in time. */
-interface LogState { size: number; ino: number; dev: number; mtimeMs: number; ctimeMs: number; head: string; tail: string }
+interface LogState { size: number; ino: number; dev: number; mtimeMs: number; ctimeMs: number; head: string; mid: string; tail: string }
 
-/** One bounded sample of an open run log; the caller decides which end it read. */
+/** One bounded sample of an open run log; the caller decides which slice it read. */
 function sampleAt(file: string, offset: number, length: number, buffer: Buffer): string {
   if (length <= 0) return "";
   const handle = openSync(file, "r");
-  try { const read = readSync(handle, buffer, 0, length, offset); return buffer.subarray(0, read).toString("base64"); }
+  try { const read = readSync(handle, buffer, 0, length, Math.max(0, offset)); return buffer.subarray(0, read).toString("base64"); }
   finally { closeSync(handle); }
+}
+
+/** Interior slices for a log long enough to have a middle that head and tail samples do not cover. */
+function interiorProbes(size: number): number[] {
+  if (size <= 3 * USAGE_SAMPLE_BYTES) return [];
+  const highest = size - 2 * USAGE_SAMPLE_BYTES;
+  const probe = (share: number): number => Math.max(USAGE_SAMPLE_BYTES, Math.min(highest, Math.floor(size * share) - USAGE_SAMPLE_BYTES / 2));
+  return [probe(0.25), probe(0.75)];
 }
 
 /** Identity of every retained run log, or undefined when one of them cannot be sampled as a file. */
@@ -62,8 +72,9 @@ function logStates(files: string[]): LogState[] | undefined {
       const stat = statSync(file);
       if (!stat.isFile()) return undefined;
       const length = Math.min(stat.size, USAGE_SAMPLE_BYTES);
+      const interior = interiorProbes(stat.size).map(offset => sampleAt(file, offset, USAGE_SAMPLE_BYTES, buffer));
       states.push({ size: stat.size, ino: stat.ino, dev: stat.dev, mtimeMs: stat.mtimeMs, ctimeMs: stat.ctimeMs,
-        head: sampleAt(file, 0, length, buffer), tail: sampleAt(file, stat.size - length, length, buffer) });
+        head: sampleAt(file, 0, length, buffer), mid: interior.join(""), tail: sampleAt(file, stat.size - length, length, buffer) });
     }
     catch { return undefined; }
   }
@@ -73,14 +84,17 @@ function logStates(files: string[]): LogState[] | undefined {
 /**
  * A log that shrank, moved to another file or was rewritten in place cannot prove one snapshot.
  * Appends are expected while a child runs, so a growing file is fine and only its head must hold;
- * Windows keeps last-write times coarse, so the end samples decide a same-size rewrite, not clocks.
+ * Windows keeps last-write times coarse, so content samples decide an in-place rewrite, not clocks.
+ * Undetectable without rescanning the log: a rewrite of the same size that avoids all four slices.
  */
 function rewrittenInPlace(before: LogState, after: LogState): boolean {
   if (after.size < before.size) return true;
   if (after.ino !== before.ino || after.dev !== before.dev) return true;
   if (after.head !== before.head) return true;
+  // Growth moves the tail and interior windows, so only a same-size file can be compared slice by slice.
   if (after.size !== before.size) return false;
   if (after.tail !== before.tail) return true;
+  if (after.mid !== before.mid) return true;
   return after.mtimeMs !== before.mtimeMs || after.ctimeMs !== before.ctimeMs;
 }
 
