@@ -17,7 +17,7 @@ import { RoleSettingsPanel, SETTINGS_MAX_ROWS, type RoleSettingsAction, type Rol
 import { canMessage, canResume, canSteer, canRelease, hasFailure, oneLine, viewStatus } from "./ui/format.js";
 import { StatusWidget } from "./ui/status.js";
 import { TranscriptWindow, WINDOW_MAX_BYTES } from "./transcript-window.js";
-import { TranscriptCache, type TranscriptIdentity } from "./ui/transcript-cache.js";
+import { TranscriptCache, TRANSCRIPT_CACHE_LIMITS, type TranscriptIdentity } from "./ui/transcript-cache.js";
 import { ConversationViewer } from "./ui/conversation.js";
 import { projectUsage, USAGE_INCOMPLETE, USAGE_TOO_LARGE, USAGE_UNREADABLE, type UsageProjection } from "./usage.js";
 import type { AgentView, Delivery, Launch, Question, QuestionAnswers, Role, Thinking } from "./types.js";
@@ -39,14 +39,18 @@ function visible(state: AgentView, includeText = true) {
 /** How many bounded pages one query may walk back; the byte budget check bounds the rest. */
 const USAGE_PAGE_LIMIT = 12;
 
-/** Total size of the retained run logs, or undefined when any of them cannot be measured. */
-function logBytes(files: string[]): number | undefined {
-  let total = 0;
+/** Sizes of every retained run log, or undefined when one of them cannot be measured as a file. */
+function logSizes(files: string[]): number[] | undefined {
+  const sizes: number[] = [];
   for (const file of files) {
-    try { total += statSync(file).size; }
+    try {
+      const stat = statSync(file);
+      if (!stat.isFile()) return undefined;
+      sizes.push(stat.size);
+    }
     catch { return undefined; }
   }
-  return total;
+  return sizes;
 }
 
 /** Only describe the actual operation receipt, never infer delivery from an old phase/accepted bit. */
@@ -157,17 +161,21 @@ export default function extension(pi: ExtensionAPI): void {
     updatePanel?: (agents: AgentView[]) => void } | undefined;
   /** Paged transcript windows for this extension instance; cleared when monitoring stops. */
   const transcriptCache = new TranscriptCache();
-  // A query reads through its own cache: it must never park, page or invalidate the window a viewer holds.
-  const usageCache = new TranscriptCache();
+  // A query reads through its own cache with its own explicit budget: it must never park, page or
+  // invalidate the window a viewer holds, and its retained windows stay bounded like the viewer's.
+  const usageCache = new TranscriptCache({ instances: TRANSCRIPT_CACHE_LIMITS.instances,
+    entries: TRANSCRIPT_CACHE_LIMITS.entries, bytes: TRANSCRIPT_CACHE_LIMITS.bytes });
 
-  /** The child's own reported usage for one instance, read on demand through the shared paged window. */
+  /** The child's own reported usage for one instance, read on demand through its own paged window. */
   async function reportedUsage(manager: AgentManager, id: string, state: AgentView, signal?: AbortSignal): Promise<UsageProjection> {
+    const unreadable = { usageComplete: false as const, usageNote: USAGE_UNREADABLE };
     try {
       const files = manager.eventLogs(id);
-      const bytes = logBytes(files);
+      const sizes = logSizes(files);
       // A missing run log means the session total cannot be established from what remains, even when
       // the older files read cleanly: never pass off an older run's numbers as the session total.
-      if (files.length > 0 && bytes === undefined) return { usageComplete: false, usageNote: USAGE_UNREADABLE };
+      if (files.length > 0 && sizes === undefined) { signal?.throwIfAborted(); return unreadable; }
+      const bytes = sizes?.reduce((sum, size) => sum + size, 0);
       const cli = state.cli ?? "pi";
       // Same identity rules as the viewer: only a native id already recorded may be attributed.
       const identity: TranscriptIdentity = { parentFile: manager.parentFile, agentId: id, cli,
@@ -182,13 +190,19 @@ export default function extension(pi: ExtensionAPI): void {
         // one query a bounded read and leaves oversized logs explicitly unknown instead of guessed.
         if (!snapshot.usageComplete && bytes !== undefined && bytes <= WINDOW_MAX_BYTES) {
           for (let page = 0; page < USAGE_PAGE_LIMIT && !snapshot.usageComplete && snapshot.window && !snapshot.window.atStart; page++) {
-            const from = snapshot.window.from.offset;
+            const edge = snapshot.window.from;
             signal?.throwIfAborted();
             snapshot = await lease.window.pageUp(files);
-            if (snapshot.window?.from.offset === from) break;
+            // Paging back into an older run starts a new source, so progress is a new source or a new offset.
+            const next = snapshot.window?.from;
+            if (next && next.source === edge.source && next.offset === edge.offset) break;
           }
         }
-        if (logBytes(files) === undefined) return { usageComplete: false, usageNote: USAGE_UNREADABLE };
+        signal?.throwIfAborted();
+        const after = logSizes(files);
+        // The totals are only published for one consistent snapshot: a log that vanished or shrank
+        // while it was read cannot prove the numbers still describe the whole retained session.
+        if (after === undefined || (sizes !== undefined && after.some((size, index) => size < sizes[index]))) return unreadable;
         return projectUsage(snapshot, cli, bytes !== undefined && bytes > WINDOW_MAX_BYTES ? USAGE_TOO_LARGE : USAGE_INCOMPLETE);
       }
       finally { lease.release(); }
@@ -196,7 +210,7 @@ export default function extension(pi: ExtensionAPI): void {
     // Reading is best-effort, but a cancelled call is not a successful answer: let it reject.
     catch (error) {
       if (signal?.aborted === true) throw error;
-      return { usageComplete: false, usageNote: USAGE_UNREADABLE };
+      return unreadable;
     }
   }
 

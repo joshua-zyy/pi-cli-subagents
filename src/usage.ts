@@ -18,7 +18,7 @@ export type UsageProjection = { usageComplete: false; usageNote?: string } | { u
 /** Reasons a total may be missing, so a parent can tell "not readable here" from "not reported yet". */
 export const USAGE_TOO_LARGE = "the retained log is larger than the bounded transcript window";
 export const USAGE_UNREADABLE = "the retained log could not be read";
-export const USAGE_INCOMPLETE = "the native session has not reported a complete token breakdown";
+export const USAGE_INCOMPLETE = "the retained log does not hold a complete, usable usage total";
 
 /**
  * Project the child's own reported usage for a query response.

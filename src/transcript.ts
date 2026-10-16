@@ -606,18 +606,26 @@ export class TranscriptReader {
     const usage = object(message.usage);
     if (!usage) return;
     const keys = ["input", "output", "cacheRead", "cacheWrite"] as const;
-    // A counter the CLI did not report is unknown, not zero: one incomplete message keeps the whole
-    // total marked incomplete instead of quietly publishing a smaller number as the lifetime usage.
-    const incomplete = keys.some(key => typeof usage[key] !== "number" || !Number.isFinite(usage[key]));
-    const counted = keys.some(key => typeof usage[key] === "number" && Number.isFinite(usage[key]));
-    if (!counted && typeof usage.totalTokens !== "number") return;
+    // Only a non-negative safe integer is a counter the CLI really reported; negative or fractional
+    // values stay unknown, and a counter the CLI did not report is unknown rather than zero.
+    const value = (key: string): number | undefined => {
+      const raw = usage[key];
+      return typeof raw === "number" && Number.isSafeInteger(raw) && raw >= 0 ? raw : undefined;
+    };
+    const reported = keys.map(value);
+    const context = value("totalTokens");
+    const counted = reported.some(entry => entry !== undefined);
     const total = this.usage ?? zeroUsage();
-    if (incomplete) total.countersIncomplete = true;
-    for (const key of keys) {
-      const value = usage[key];
-      if (typeof value === "number" && Number.isFinite(value) && value > 0) total[key] += value;
+    // One message that leaves a counter unknown keeps the whole lifetime total marked incomplete: the
+    // running sum must never look complete while a message it counted contributed only part of itself.
+    if (reported.some(entry => entry === undefined)) total.countersIncomplete = true;
+    if (!counted && context === undefined) {
+      // A usage record carrying no counter at all still leaves this message's counters unknown.
+      if (this.usage !== undefined) this.usage = total;
+      return;
     }
-    if (typeof usage.totalTokens === "number" && Number.isFinite(usage.totalTokens)) total.contextTokens = usage.totalTokens;
+    keys.forEach((key, index) => { const amount = reported[index]; if (amount !== undefined && amount > 0) total[key] += amount; });
+    if (context !== undefined) total.contextTokens = context;
     const cost = object(usage.cost)?.total;
     if (typeof cost === "number" && Number.isFinite(cost) && cost > 0) total.cost += cost;
     this.usage = total;
@@ -642,9 +650,13 @@ export class TranscriptReader {
     const item = object(p.item);
     if (record.method === "thread/tokenUsage/updated") {
       const total = object(p.tokenUsage)?.total;
-      if (!object(total)) return;
-      const input = Number(total.inputTokens), cached = Number(total.cachedInputTokens), write = Number(total.cacheWriteInputTokens ?? 0), output = Number(total.outputTokens);
-      if (![input, cached, write, output].every(value => Number.isSafeInteger(value) && value >= 0)) return;
+      const input = Number(total?.inputTokens), cached = Number(total?.cachedInputTokens), write = Number(total?.cacheWriteInputTokens ?? 0), output = Number(total?.outputTokens);
+      // A later snapshot that cannot be read leaves the thread total unknown: never keep an older
+      // snapshot published as if it were the current one.
+      if (!object(total) || ![input, cached, write, output].every(entry => Number.isSafeInteger(entry) && entry >= 0)) {
+        this.usage = undefined;
+        return;
+      }
       this.usage = { input: Math.max(0, input - cached - write), cacheRead: cached, cacheWrite: write, output, cost: 0 };
       return;
     }
@@ -739,17 +751,20 @@ export class TranscriptReader {
         id: this.scoped("claude-result", String(record.uuid)), kind: failed ? "notice" : "assistant", title: failed ? "Claude error" : "Final response",
         text: "", ...(failed ? { status: "error" as const } : {}),
       }), bounded(text));
-      const models = object(record.modelUsage);
-      if (!models) return;
+      const models = record.modelUsage === undefined ? undefined : object(record.modelUsage);
       const total = zeroUsage();
+      // A result whose cumulative snapshot cannot be read leaves the session total unknown; an older
+      // snapshot must not stay published as the current one.
+      if (models === undefined) { this.usage = undefined; return; }
       for (const usage of Object.values(models)) {
-        if (!object(usage)) return;
+        if (!object(usage)) { this.usage = undefined; return; }
         for (const [native, key] of [["inputTokens", "input"], ["outputTokens", "output"], ["cacheReadInputTokens", "cacheRead"], ["cacheCreationInputTokens", "cacheWrite"]] as const) {
-          const value = usage[native]; if (!Number.isSafeInteger(value) || value < 0) return;
+          const value = usage[native];
+          if (!Number.isSafeInteger(value) || value < 0) { this.usage = undefined; return; }
           total[key] += value;
         }
       }
-      if (typeof record.total_cost_usd !== "number" || !Number.isFinite(record.total_cost_usd) || record.total_cost_usd < 0) return;
+      if (typeof record.total_cost_usd !== "number" || !Number.isFinite(record.total_cost_usd) || record.total_cost_usd < 0) { this.usage = undefined; return; }
       total.cost = record.total_cost_usd;
       // These totals include saved earlier turns on resume. Never add successive snapshots.
       if (!record.is_error || Object.values(total).some(value => value > 0)) this.usage = total;
