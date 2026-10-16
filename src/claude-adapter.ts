@@ -1,7 +1,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { readdirSync, lstatSync, fstatSync, openSync, readSync, closeSync } from "node:fs";
 import { LogWriter } from "./log-writer.js";
-import { killProcessTree } from "./process-tree.js";
+import { terminateProcessTree } from "./process-tree.js";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
 import type { AdapterEvent, AdapterOptions, CliAdapter, InteractionReply } from "./cli-adapter.js";
@@ -429,8 +429,6 @@ export class ClaudeAdapter implements CliAdapter {
     return this.end();
   }
   private async kill(): Promise<void> {
-    if (this.child.exitCode !== null || this.child.signalCode !== null || !this.child.pid) return;
-    this.forced = true;
-    await killProcessTree(this.child);
+    await terminateProcessTree(this.child, () => { this.forced = true; });
   }
 }

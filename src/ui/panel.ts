@@ -1,6 +1,6 @@
 import { matchesKey, stripTerminalSequences, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import type { AgentView } from "../types.js";
-import { canInterrupt, canMessage, canResume, canRelease, isReleased, formatElapsed, framePane, isActive, oneLine, rightAlign, shortId, viewElapsed, viewStatus, PANE_FRAME_COLS, PANE_FRAME_MIN_WIDTH, PANE_FRAME_ROWS, SPINNER, type UiColor, type UiTheme } from "./format.js";
+import { canInterrupt, canMessage, canResume, canRelease, isReleased, formatElapsed, fitSelection, framePane, isActive, oneLine, rightAlign, shortId, viewElapsed, viewStatus, PANE_FRAME_COLS, PANE_FRAME_MIN_WIDTH, PANE_FRAME_ROWS, SPINNER, type UiColor, type UiTheme } from "./format.js";
 
 export type PanelAction =
   | { kind: "view"; id: string }
@@ -196,16 +196,11 @@ export class AgentsPanel {
     const limit = this.room || this.maxRows + lines.length + 2;
     // Keep one selectable row before headers, then charge only indicators that actually exist.
     const header = lines.slice(0, Math.max(0, limit - 1)), budget = limit - header.length;
-    let visible = Math.max(1, Math.min(this.maxRows, this.agents.length, budget));
-    let start = Math.max(0, selected - visible + 1);
-    while (visible > 1 && visible + Number(start > 0) + Number(start + visible < this.agents.length) > budget) {
-      visible--; start = Math.max(0, selected - visible + 1);
-    }
-    let spare = budget - visible;
-    if (start > 0 && spare > 0) { header.push(rightAlign("", this.theme.fg("dim", `↑ ${start} more`), width)); spare--; }
-    for (let index = start; index < start + visible; index++) header.push(this.agentRow(index, selected, width));
-    const below = this.agents.length - start - visible;
-    if (below > 0 && spare > 0) header.push(rightAlign("", this.theme.fg("dim", `↓ ${below} more`), width));
+    const fit = fitSelection(this.agents.length, selected, budget, Math.max(1, Math.min(this.maxRows, this.agents.length, budget)));
+    let spare = fit.spare;
+    if (fit.above > 0 && spare > 0) { header.push(rightAlign("", this.theme.fg("dim", `↑ ${fit.above} more`), width)); spare--; }
+    for (let index = fit.start; index < fit.start + fit.visible; index++) header.push(this.agentRow(index, selected, width));
+    if (fit.below > 0 && spare > 0) header.push(rightAlign("", this.theme.fg("dim", `↓ ${fit.below} more`), width));
     return header;
   }
 

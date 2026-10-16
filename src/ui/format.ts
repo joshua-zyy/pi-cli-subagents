@@ -142,3 +142,35 @@ export function rightAlign(left: string, right: string, width: number): string {
   const head = truncateToWidth(left, room);
   return `${head}${" ".repeat(Math.max(0, room - visibleWidth(head)))} ${right}`;
 }
+
+/** One slice of a selectable list, with the scroll markers it leaves room for. */
+export interface SelectionFit {
+  /** First item index to render. */
+  start: number;
+  /** Items to render from `start`. */
+  visible: number;
+  /** Items hidden above the rendered run; the caller draws `↑ n more` when there is room. */
+  above: number;
+  /** Items hidden below the rendered run. */
+  below: number;
+  /** Rows left of the budget once the run is drawn; may be negative, so markers never overspend it. */
+  spare: number;
+}
+
+/**
+ * Which slice of a selectable list fits in `budget` rows while keeping `selected` on screen. The
+ * roster and the role editor both draw this window and must agree on its size and on when a scroll
+ * marker appears, so the arithmetic lives here once. `initialVisible` is the caller's own opening
+ * bound: the roster keeps one selectable row even at a zero budget because it crops its lines
+ * afterwards, while the role editor budgets exactly and never crops the result.
+ */
+export function fitSelection(itemCount: number, selected: number, budget: number, initialVisible: number): SelectionFit {
+  let visible = initialVisible;
+  let start = Math.max(0, selected - visible + 1);
+  // A marker is charged to the same budget as a selectable row: it exists on a side, or the row does.
+  while (visible > 1 && visible + Number(start > 0) + Number(start + visible < itemCount) > budget) {
+    visible--;
+    start = Math.max(0, selected - visible + 1);
+  }
+  return { start, visible, above: start, below: Math.max(0, itemCount - start - visible), spare: budget - visible };
+}

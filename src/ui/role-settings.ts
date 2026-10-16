@@ -1,7 +1,7 @@
 import { matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
 import { EMPTY_CATALOG } from "../cli-discovery.js";
 import { catalogEntries, CUSTOM_CHOICE, FIELD_LABELS, cliDetail, fieldChoices, fieldIsChoice, fieldValue, modeDetail, roleSummary, suppressesApprovals, visibleFields, type ChoiceOptions, type EditableField, type RoleRow, type Scope } from "../role-settings.js";
-import { framePane, PANE_FRAME_MIN_WIDTH, PANE_FRAME_ROWS, oneLine, type UiColor, type UiTheme } from "./format.js";
+import { fitSelection, framePane, PANE_FRAME_MIN_WIDTH, PANE_FRAME_ROWS, oneLine, type UiColor, type UiTheme } from "./format.js";
 
 export type RoleSettingsAction =
   | { kind: "close" }
@@ -181,17 +181,12 @@ export class RoleSettingsPanel {
     const footer = after.slice(0, Math.max(0, limit - Math.min(2, header.length) - 1));
     const lines = header.slice(0, Math.max(0, limit - footer.length - 1));
     const budget = limit - lines.length - footer.length;
-    let visible = Math.min(items.length, budget);
-    let start = Math.max(0, selected - visible + 1);
     // Fit scroll markers into the same budget, not on top of the selectable rows.
-    while (visible > 1 && visible + Number(start > 0) + Number(start + visible < items.length) > budget) {
-      visible--;
-      start = Math.max(0, selected - visible + 1);
-    }
-    let spare = budget - visible;
-    if (start > 0 && spare > 0) { lines.push(this.theme.fg("dim", `↑ ${start} more`)); spare--; }
-    for (let index = start; index < Math.min(items.length, start + visible); index++) lines.push(render(items[index], index === selected, index));
-    if (items.length > start + visible && spare > 0) lines.push(this.theme.fg("dim", `↓ ${items.length - start - visible} more`));
+    const fit = fitSelection(items.length, selected, budget, Math.min(items.length, budget));
+    let spare = fit.spare;
+    if (fit.above > 0 && spare > 0) { lines.push(this.theme.fg("dim", `↑ ${fit.above} more`)); spare--; }
+    for (let index = fit.start; index < Math.min(items.length, fit.start + fit.visible); index++) lines.push(render(items[index], index === selected, index));
+    if (fit.below > 0 && spare > 0) lines.push(this.theme.fg("dim", `↓ ${fit.below} more`));
     return [...lines, ...footer];
   }
 

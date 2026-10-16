@@ -94,6 +94,23 @@ test('concurrent end deadlines share one in-flight termination command for each 
   assert.deepEqual(h.errors, []);
 });
 
+// end() reads its owner's forced marker when `closed` resolves, and the child can close while the
+// termination command it started is still in flight. The marker is then the only evidence that this
+// shutdown forced the process tree, so it has to be set before the command is awaited, not after.
+test('a forced shutdown is recorded before the termination command it started is awaited', async t => {
+  const h = harness(t);
+  for (const cli of ['pi','codex','claude']) {
+    const {adapter,child} = h.make(cli), before = h.killers.length;
+    const ending = adapter.end();
+    await h.tick();
+    assert.equal(h.killers.length, before + 1, `${cli}: the end deadline starts one termination`);
+    h.close(child);
+    assert.equal((await ending).forced, true, `${cli}: end() must observe the forced shutdown`);
+    h.killers.at(-1).killer.emit('close', 0);
+  }
+  assert.deepEqual(h.errors, []);
+});
+
 test('POSIX process-group termination and its existing direct-child fallback remain available', async t => {
   const h = harness(t, 'linux'), groups = [];
   let groupFails = false;
