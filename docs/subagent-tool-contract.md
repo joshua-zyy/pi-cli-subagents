@@ -270,3 +270,18 @@ Implementation commits: `4b46bdc` (four-tool migration), `29de2e4` (effective ro
 At that four-tool migration baseline, no real models, real CLI collaboration or independent agent review were run. @-dispatch, new multi-entry-point behavior and real-endpoint compatibility remain unverified.
 
 Next step: reload the extension to inspect the tools and role catalog; real collaboration acceptance requires separate authorization.
+
+### 2.5 工具裁剪（仅 Pi 角色，H6 最小切片）
+
+角色 JSON 可带一个可选字段，直通 Pi 原生开关：
+
+```jsonc
+{ "cli": "pi", "tools": { "allow": ["read", "bash"], "deny": ["mcp__*"] } }
+```
+
+- `allow` → `--tools <逗号拼接>`；`deny` → `--exclude-tools <逗号拼接>`；两者可选，**至少要有一个非空**。
+- 校验：只接受 `allow`/`deny` 两个键；数组元素必须是**无首尾空格的非空字符串**；空数组=显式报错（`--tools ""` 会打开全部工具，不能当作"不裁剪"）。
+- **仅 Pi**：`cli: "codex"`/`"claude"` 带该字段 → 创建时**显式拒绝**，"Codex 与 Claude 没有工具白/黑名单，角色会静默保留全部工具"。实测依据：`codex-cli 0.162.1` 的 `--help`/`exec --help`/`mcp --help` 均无工具或技能裁剪入口，且 `-c tools.*` 不被 `--strict-config` 校验（沉默≠支持）；`claude` CLI 本机未安装，未验证。
+- 生效范围：写入实例 `spec.json`，随该实例每次原生启动/恢复生效（与 `defaultModeQuestions` 同样"创建时固化"）；改角色只影响新实例。
+- **不做**：MCP 集合限制、技能预加载/禁用、以及 Codex `agents.enabled` 一类"限制再派"的运行时开关 —— 这三项按 oracle 要求分别裁决，本片不含。
+- 角色摘要（工具描述里的 compact catalog）不重复该字段，避免每轮字节膨胀；字段只在 role JSON 与 spec 中可见。

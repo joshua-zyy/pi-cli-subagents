@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { PiProcess, type WireRecord, type Exit } from "./pi-process.js";
 import { ASK_PARENT_TOOL, parentQuestionDialog, readParentQuestion, type ParentQuestion } from "./pi-question.js";
 import type { AdapterEvent, AdapterOptions, CliAdapter, InteractionReply } from "./cli-adapter.js";
-import type { Delivery, NativeSession, Question, SessionHandle } from "./types.js";
+import type { Delivery, NativeSession, Question, SessionHandle, RoleToolTrim } from "./types.js";
 
 /** Human wording for the current step; a step label never uses the raw Pi event type. */
 function piActivity(type: string, toolName: unknown): string {
@@ -48,6 +48,14 @@ export async function inspectPiSession(session: SessionHandle): Promise<void> {
   } finally { await file.close(); }
 }
 
+/** Pi's native trimming flags. Validation already refused this field for Codex and Claude roles. */
+export function trimArgs(role: { tools?: RoleToolTrim }): string[] {
+  const args: string[] = [];
+  if (role.tools?.allow?.length) args.push("--tools", role.tools.allow.join(","));
+  if (role.tools?.deny?.length) args.push("--exclude-tools", role.tools.deny.join(","));
+  return args;
+}
+
 export class PiAdapter implements CliAdapter {
   readonly resident = true;
   private active = false;
@@ -82,6 +90,7 @@ export class PiAdapter implements CliAdapter {
     if (spec.role.provider) args.push("--provider", spec.role.provider);
     if (spec.role.model) args.push("--model", spec.role.model);
     if (spec.role.thinking) args.push("--thinking", spec.role.thinking);
+    args.push(...trimArgs(spec.role));
     this.rpc = new PiProcess(spec.launch, args, spec.cwd, options.logFile, record => this.event(record), options.requestTimeout);
     this.closed = this.rpc.closed;
   }
