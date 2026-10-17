@@ -58,10 +58,12 @@ const claudeLevels = new Set<Thinking>(CLAUDE_THINKING_LEVELS);
  * keeping every tool.
  */
 export function toolTrimError(cli: Cli | undefined, tools: unknown): string | undefined {
-  // Claude 2.1.296 does expose --allowedTools/--disallowedTools, but this extension does not wire them yet;
-  // saying "no list exists" would be false, and accepting the field would silently keep every tool.
+  // Codex exposes no tool list at all, so accepting the field would silently keep every tool.
   if (cli === "codex") return "tools requires a Pi role: Codex exposes no tool allow/deny list, so the role would silently keep every tool";
-  if (cli === "claude") return "tools is not wired for Claude yet (its --allowedTools/--disallowedTools are unverified here), so the role would silently keep every tool";
+  // Claude's --allowedTools pre-approves tools instead of restricting them (verified: passing Read alone left
+  // every tool in place), so an exclusive allow list cannot be expressed there; denial is the honest mapping.
+  if (cli === "claude" && !!tools && typeof tools === "object" && "allow" in tools)
+    return "tools.allow cannot be expressed for Claude: --allowedTools pre-approves tools, it does not restrict them; use tools.deny";
   if (!tools || typeof tools !== "object" || Array.isArray(tools)) return "tools must be an object with allow and/or deny";
   const unknown = Object.keys(tools).filter((key) => key !== "allow" && key !== "deny");
   if (unknown.length) return `tools contains unknown fields: ${unknown.join(", ")}`;
