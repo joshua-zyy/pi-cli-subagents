@@ -20,9 +20,10 @@ import type { AgentSpec, AgentState, AgentView, Control, ControlResult, Delivery
 const workerFile = fileURLToPath(new URL("./worker.js", import.meta.url));
 
 /**
- * Runtimes this process is admitting right now. The authoritative count stays on disk; this only covers
- * the synchronous window before the new runtime's state becomes visible to `list()`, where two
- * concurrent admissions (for example two resumes of released instances) would otherwise both pass.
+ * Runtimes this process is admitting right now, keyed by parent root so unrelated parents never share a
+ * reservation. The authoritative count stays on disk; this only covers the window before the new
+ * runtime's state becomes visible to `list()`, where two concurrent admissions (for example two resumes
+ * of released instances) would otherwise both pass.
  */
 const admitting = new Set<string>();
 
@@ -243,13 +244,15 @@ export class AgentManager {
   private admit(id: string): void {
     const cap = this.maxRuntimes();
     if (cap === undefined) return;
-    const occupied = this.list().filter(occupiesRuntime).length + admitting.size;
-    if (occupied < cap) { admitting.add(id); return; }
+    const prefix = `${this.root}\0`;
+    const pending = [...admitting].filter((key) => key.startsWith(prefix)).length;
+    const occupied = this.list().filter(occupiesRuntime).length + pending;
+    if (occupied < cap) { admitting.add(prefix + id); return; }
     throw new Error(`${occupied} of ${cap} managed runtimes are already occupied in this parent session (PI_CLI_SUBAGENTS_MAX_RUNTIMES); a runtime keeps its slot until its release is confirmed. Interrupt a running child and then stop it, or wait for it to finish, before starting or resuming another.`);
   }
 
   /** Only a confirmed release frees a reservation; a failed start must not leak it. */
-  private releaseAdmission(id: string): void { admitting.delete(id); }
+  private releaseAdmission(id: string): void { admitting.delete(`${this.root}\0${id}`); }
 
   async spawn(roleName: string, role: Role, cwd: string, message: string, workspace?: string): Promise<AgentView> {
     if (!message.trim()) throw new Error("Task must not be empty");
