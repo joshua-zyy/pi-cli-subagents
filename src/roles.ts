@@ -87,10 +87,12 @@ export function mcpError(cli: Cli | undefined, mcp: unknown): string | undefined
 /** Why `skills` cannot be used for this CLI, or `undefined` when it is valid. */
 export function skillsError(cli: Cli | undefined, skills: unknown): string | undefined {
   if (cli !== undefined && cli !== "pi") return "skills requires a Pi role: Codex and Claude expose no skill switch, so the role would silently keep every skill";
-  if (typeof skills !== "boolean") return "skills must be true or false";
+  if (typeof skills === "boolean") return undefined;
+  if (!Array.isArray(skills) || !skills.length) return "skills must be true, false or a non-empty array of skill paths";
+  if (skills.some((path) => typeof path !== "string" || !path.trim() || path !== path.trim()))
+    return "skills paths must be non-empty strings without surrounding spaces";
   return undefined;
 }
-
 /** Why `mode` cannot be used for this CLI, or `undefined` when it is valid. Shared with `AgentManager.spawn`. */
 export function modeError(cli: Cli | undefined, mode: string): string | undefined {
   if (cli === "claude") return CLAUDE_MODES.includes(mode as ClaudeMode) ? undefined : `Claude mode must be one of ${CLAUDE_MODES.join(", ")}`;
@@ -148,7 +150,7 @@ export function validateRoleFile(value: unknown, source: string): Record<string,
       ...(role.mode ? { mode: role.mode as Mode } : {}),
       ...(role.defaultModeQuestions !== undefined ? { defaultModeQuestions: role.defaultModeQuestions as boolean } : {}),
       ...(role.tools !== undefined ? { tools: role.tools as RoleToolTrim } : {}),
-      ...(role.skills !== undefined ? { skills: role.skills as boolean } : {}),
+      ...(role.skills !== undefined ? { skills: role.skills as boolean | string[] } : {}),
       ...(role.mcp !== undefined ? { mcp: role.mcp as boolean } : {}),
     };
   }

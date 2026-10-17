@@ -34,8 +34,8 @@ export interface Role {
   defaultModeQuestions?: boolean;
   /** Pi's own tool allow/deny list; Codex and Claude have no equivalent and reject this field. */
   tools?: RoleToolTrim;
-  /** false disables skill discovery for this Pi role; other backends have no switch and reject it. */
-  skills?: boolean;
+  /** false disables skill discovery; a path list loads only those skills. Pi only, other backends reject it. */
+  skills?: boolean | string[];
   /** false disables MCP for this Pi role; other backends have no switch and reject it. */
   mcp?: boolean;
 }

@@ -36,7 +36,7 @@ test('the role file loader keeps tools instead of dropping it', () => {
   assert.throws(() => validateRoleFile({ worker: { description: 'd', instructions: 'i', tools: [] } }, 'probe'), /must be an object/);
 });
 
-test('spawning a non-Pi role with tools refuses before creating anything', async t => {
+test('spawning a non-Pi role with tools refuses before creating anything', async () => {
   const cwd = tempDir('trim');
   const parent = path.join(cwd, 'parent.jsonl');
   fs.writeFileSync(parent, '{}\n');
@@ -54,14 +54,14 @@ test('a false skills flag disables discovery and leaves other roles untouched', 
     'both switches compose');
 });
 
-test('the skills switch is Pi-only and boolean', () => {
+test('the skills switch is Pi-only and boolean or a path list', () => {
   assert.equal(skillsError(undefined, false), undefined, 'an unset cli means Pi');
   assert.equal(skillsError('pi', true), undefined);
   assert.match(skillsError('codex', false), /skills requires a Pi role/);
   assert.match(skillsError('claude', false), /skills requires a Pi role/);
-  assert.match(skillsError('pi', 'false'), /must be true or false/);
-  assert.match(skillsError('pi', 0), /must be true or false/);
-  assert.match(skillsError('pi', {}), /must be true or false/);
+  assert.match(skillsError('pi', 'false'), /non-empty array of skill paths/);
+  assert.match(skillsError('pi', 0), /non-empty array of skill paths/);
+  assert.match(skillsError('pi', {}), /non-empty array of skill paths/);
 });
 
 test('the role file loader keeps skills and refuses it for other backends', () => {
@@ -70,7 +70,7 @@ test('the role file loader keeps skills and refuses it for other backends', () =
   assert.throws(() => validateRoleFile({ worker: { description: 'd', instructions: 'i', skills: false, cli: 'codex' } }, 'probe'),
     /skills requires a Pi role/);
   assert.throws(() => validateRoleFile({ worker: { description: 'd', instructions: 'i', skills: 'no' } }, 'probe'),
-    /must be true or false/);
+    /non-empty array of skill paths/);
 });
 
 test('spawning a non-Pi role with skills refuses before creating anything', async () => {
@@ -115,4 +115,27 @@ test('spawning a non-Pi role with mcp refuses before creating anything', async (
   await assert.rejects(manager.spawn('worker', { ...defaultRoles.worker, cli: 'codex', mcp: false }, cwd, 'DO NOT START'),
     /mcp requires a Pi role/);
   assert.equal(fs.existsSync(manager.root), false, 'a refused role must not create even the instance root');
+});
+
+test('a skill path list means only those skills', () => {
+  assert.deepEqual(trimArgs({ skills: ['/skills/a', 'b/SKILL.md'] }),
+    ['--no-skills', '--skill', '/skills/a', '--skill', 'b/SKILL.md'],
+    'a list disables discovery and loads each path, which is what makes it a whitelist');
+  assert.deepEqual(trimArgs({ skills: false }), ['--no-skills'], 'false still means off');
+  assert.deepEqual(trimArgs({ skills: true }), [], 'true still means inherit');
+});
+
+test('skill paths are validated and stay Pi-only', () => {
+  assert.equal(skillsError('pi', ['/skills/a']), undefined);
+  assert.match(skillsError('codex', ['/skills/a']), /skills requires a Pi role/);
+  assert.match(skillsError('pi', []), /non-empty array of skill paths/);
+  assert.match(skillsError('pi', [' spaced']), /without surrounding spaces/);
+  assert.match(skillsError('pi', [42]), /without surrounding spaces/);
+});
+
+test('the role file loader keeps a skill path list', () => {
+  const roles = validateRoleFile({ worker: { description: 'd', instructions: 'i', skills: ['/skills/a'] } }, 'probe');
+  assert.deepEqual(roles.worker.skills, ['/skills/a']);
+  assert.throws(() => validateRoleFile({ worker: { description: 'd', instructions: 'i', skills: [] } }, 'probe'),
+    /non-empty array of skill paths/);
 });
