@@ -72,17 +72,24 @@ Do not introduce an ambiguous `success: true` that collapses all states:
 
 The existing `AgentState.accepted` describes receipt of the run's initial task, not an independent receipt for every send. An existing true value cannot prove delivery of a new message, and false cannot prove that no prompt was written. Each operation returns a transient `receipt` with `operation`, `status`, affected `runId` and known `runtimeId`; it is not persisted into state/results or synthesized by queries. `accepted` requires the corresponding native acknowledgement; otherwise startup/legacy uncertainty is `unconfirmed`. Current adapters do not emit queue/injection claims merely from a delivery mode. `settled` confirms that the captured turn ended, including a natural-completion race; `not_running` confirms no captured active turn and does not cancel pending startup; `released` requires matching-runtime release proof. Errors retain known identity and no automatic retry. This follows the distinction between acceptance and applied notification in [Lody's pinned acknowledged-steer design](https://github.com/LodyAI/Lody/blob/6dc434952ab2e942291cc8392316bf760afbdaf0/apps/cli/src/agent/acknowledged-steer.ts), without importing ACP/Core or inventing an applied signal.
 
-### 2.3 Runtime admission cap（`PI_CLI_SUBAGENTS_MAX_RUNTIMES`）
+### 2.3 Runtime admission caps（`MAX_ACTIVE` / `MAX_RESIDENT` / 旧 `MAX_RUNTIMES`）
 
-一个父会话可以用环境变量 `PI_CLI_SUBAGENTS_MAX_RUNTIMES=<n>`（正整数）限定自己同时持有多少个**托管 runtime**；跨角色统一计数，作用域是这个父进程（不是机器级、不是全局）。
+一个父会话有两个互相独立的并发上限，跨角色统一计数，作用域是这个父进程（不是机器级、不是全局）：
 
-- **占用口径**：runtime 从创建那一刻起占一个名额，直到**释放被确认**（`phase=closed` 且 `runtimeClosed=true`）才归还。具体：`starting/running/waiting/stopping/idle` 全占；`closed` 但缺 `runtimeClosed` 的未确认释放**仍占**；记录不可读（`unreachable`）**仍占**——unknown ownership 不能当作已释放。
-- **计数来源**：每次准入都从磁盘重算（`manager.list()`），因此**跨 controller/跨工具调用**都一致；内存里只保留**在途预留**（见下条「并发」），它不作为权威计数，只覆盖状态可见之前的窗口。
-- **准入点**：只有"新建占用"的两条路径——`subagent` 的 `start`（`spawn` 顶部，校验参数之后、建目录之前）与对**已释放实例**的 `send` 恢复。对 `starting/running/waiting/idle` 实例的 `send`（新 run 或 steer）**不新增占用**，不受此上限影响。
-- **拒绝语义**：**显式拒绝**，不排队、不抢占；拒绝发生在任何目录/进程/人工动作记录之前（`spawn` 在参数校验之后、建目录之前；恢复路径在释放等待与会话前置检查之后、真正启动 runtime 之前）。错误消息给出 `占用数 of 上限` 与变量名，并提示可用动作（先 `interrupt` 再 `stop`，或等其完成）——不会建议不存在的 `keep`。
-- **窗口与顺序**（易误解处）：恢复路径会先 `waitForRelease`（最长约 15s）并跑该后端的会话前置检查（如 Codex/Claude 的 session preflight），**之后**才判名额——所以恢复被拒可能发生在数秒之后，而不是立即；若前置检查先失败，会先报那个错误。TUI 里的同类动作（roster/viewer 的 send）把拒绝作为通知显示，不改变实例状态。
-- **并发**：同一父进程内并发发起多次准入（例如同一回合并行恢复两个已释放实例）时，实现会在每次准入成功时先做一次**进程内预留**，直到该 runtime 的状态对磁盘可见；权威计数仍以磁盘为准，因此第二个并发恢复会被拒，不会超过上限。跨进程的多个父会话各自拥有自己的上限（不是机器级共享配额）。
-- **未配置 / 非法值**：变量**缺失** = 不启用上限（与此前行为完全一致）；变量**存在但不是正整数**（含空字符串）= 显式报错并拒绝派发，避免"看着设了限其实没设"。
+| 变量 | 默认 | 计数对象 |
+|---|---|---|
+| `PI_CLI_SUBAGENTS_MAX_ACTIVE` | **4** | 可能仍在执行的轮次：`starting/running/waiting/stopping`，以及执行状态未知的 `unreachable` |
+| `PI_CLI_SUBAGENTS_MAX_RESIDENT` | **12** | 尚未确认释放的托管 runtime（口径见下） |
+
+- **`0` 的含义**：每个维度可单独用 `0` 关闭；**两个维度都写 `0`** 才完全恢复不限。只写 `RESIDENT=0` 不会解除 active 上限。
+- **旧变量**：`PI_CLI_SUBAGENTS_MAX_RUNTIMES` 继续表示 **resident**；它的 `0` 由非法变为合法。旧变量与新 `MAX_RESIDENT` 同时出现即**拒绝**（即使数值相同），避免隐含优先级；旧变量与新 `MAX_ACTIVE` 可以同时配置。
+- **破坏性变更（必须显式声明）**：旧合同为「变量缺失 = 不启用上限」，现改为「未配置即 4 / 12」。要恢复旧行为须同时设置 `MAX_ACTIVE=0` 与 `MAX_RESIDENT=0`。
+- **占用口径（resident）**：runtime 从创建那一刻起占一个名额，直到**释放被确认**（`phase=closed` 且 `runtimeClosed=true`）才归还。`starting/running/waiting/stopping/idle` 与带终态的 `completed/failed/stopped` 全占；`closed` 但缺 `runtimeClosed` 的未确认释放**仍占**；记录不可读（`unreachable`）**仍占**。
+- **计数来源**：每次准入都从磁盘重算（`manager.list()`），因此跨 controller / 跨工具调用一致。
+- **准入点**（三条）：新建实例（`start`）、对**已释放实例**的 `send` 恢复、以及**对 `idle` 实例开启新 run 的 `send`**。最后一条只判 active、不判 resident——该实例已经占着 runtime 名额，新 run 不新增 runtime。
+- **并发**：每次准入成功先做一次**进程内轮次预留**，直到该轮次的 runId 对磁盘可见；预留按「实例 + 前一个 runId」判定撤销，所以「实例已在列表中可见」本身**不会**撤销预留（`idle` 实例天然可见）。无法确认结果（超时等）不因 `finally` 就归还名额，须等磁盘出现该轮次或该实例可被证明未启动。
+- **拒绝语义**：**显式拒绝**，不排队、不抢占，且发生在任何目录/进程/人工动作记录之前。错误消息给出 `占用数 of 上限` 与产生该上限的变量名；**不建议任何驱逐动作**（不提示「去释放一个」）。
+- **非法值**：空字符串、空白、负数、非整数（含小数、字母）= 显式报错并拒绝派发，避免「看着设了限其实没设」；空字符串**不会**被读成 `0`。
 
 ### 2.4 Examples
 

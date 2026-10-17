@@ -84,14 +84,19 @@ Pi children can ask the parent a single task question through `subagent_ask_pare
   or pushed.
 - **Stopping is not a rollback.** An uncertain outcome is reported as uncertain, and a native session
   is never silently replaced by a new one.
-- **One parent session can cap its runtimes.** Set `PI_CLI_SUBAGENTS_MAX_RUNTIMES` to a positive
-  integer to limit how many managed runtimes this parent holds. A slot is held from the moment a
-  runtime is created until its release is confirmed: an idle child still owns its managed runtime
-  (whether that keeps a resident process depends on the backend), a starting, stopping or
-  unconfirmed release still holds its slot, and an unreadable record counts as unknown ownership. Reaching the cap refuses a new `start` or a `resume` of a released instance; nothing is
-  queued or preempted and no instance directory or process is created. Running or idle children can
-  still be steered or given a new turn, because that adds no runtime. Unset means no cap; a present
-  value that is not a positive integer is refused instead of being read as unlimited.
+- **One parent session caps concurrency and runtimes.** Two independent limits apply to a parent
+  session, counted across roles: `PI_CLI_SUBAGENTS_MAX_ACTIVE` (default **4**) limits turns that may
+  still be executing, and `PI_CLI_SUBAGENTS_MAX_RESIDENT` (default **12**) limits managed runtimes
+  whose release is not confirmed yet. Each accepts `0` to disable that dimension; setting both to `0`
+  (`MAX_ACTIVE=0` and `MAX_RESIDENT=0`) restores uncapped dispatch. `PI_CLI_SUBAGENTS_MAX_RUNTIMES` still names the resident cap (by itself;
+  naming it together with `PI_CLI_SUBAGENTS_MAX_RESIDENT` is refused), and a value that is not a
+  non-negative integer is refused instead of being read as unlimited.
+- **These defaults are a behavior change.** Earlier versions treated a missing setting as no cap;
+  a parent session now starts at 4 concurrent turns and 12 resident runtimes. Reaching a limit refuses
+  the dispatch; nothing is queued or preempted and no instance directory or process is created.
+  A new run inside an already-resident child takes a turn slot but no runtime slot, so steering and
+  follow-ups on resident children keep working while the resident cap is full, as long as the turn cap
+  has room.
 
 ## In the session
 

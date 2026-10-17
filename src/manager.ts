@@ -20,12 +20,57 @@ import type { AgentSpec, AgentState, AgentView, Control, ControlResult, Delivery
 const workerFile = fileURLToPath(new URL("./worker.js", import.meta.url));
 
 /**
- * Runtimes this process is admitting right now, keyed by parent root so unrelated parents never share a
- * reservation. The authoritative count stays on disk; this only covers the window before the new
- * runtime's state becomes visible to `list()`, where two concurrent admissions (for example two resumes
- * of released instances) would otherwise both pass.
+ * Runtimes this process is admitting right now, keyed by an opaque token so two attempts on one
+ * instance never share a slot. The authoritative count stays on disk; this covers the window where
+ * a reserved run is not visible yet, and it keeps covering an uncertain attempt: a lost response
+ * does not prove the run failed to start.
  */
-const admitting = new Set<string>();
+const admitting = new Map<string, Reservation>();
+let nextReservation = 0;
+
+/** One in-flight admission: the run it reserves, and the run the instance showed beforehand. */
+export interface Reservation { id: string; priorRunId?: string; newRuntime: boolean }
+
+/** Steps that still execute: `stopping` is set before the CLI is asked to stop (worker.ts:95-107). */
+const ACTIVE_PHASES = new Set(["starting", "running", "waiting", "stopping"]);
+/** Unknown ownership may still execute, so it must not be mistaken for a free turn slot. */
+export function countsAsActive(view: Pick<AgentView, "phase">): boolean {
+  return ACTIVE_PHASES.has(view.phase) || view.phase === "unreachable";
+}
+
+/** Concurrency caps for one parent session; `undefined` means that dimension is unlimited. */
+export interface AdmissionCaps { active?: number; resident?: number }
+const DEFAULT_ACTIVE = 4;
+const DEFAULT_RESIDENT = 12;
+
+/** Absent = not configured, `0` = unlimited, anything else must be a non-negative integer. */
+function readCap(name: string, env: NodeJS.ProcessEnv): number | undefined {
+  const raw = env[name];
+  if (raw === undefined) return undefined;
+  // An empty value must not read as `0` (unlimited): only an explicit `0` disables a cap.
+  const text = raw.trim(), value = Number(text);
+  if (!text || !Number.isSafeInteger(value) || value < 0)
+    throw new Error(`${name} must be a non-negative integer (0 disables that cap); got ${JSON.stringify(raw)}. Refusing to dispatch so the limit is not silently ignored.`);
+  return value === 0 ? undefined : value;
+}
+
+/**
+ * The two caps, resolved from the environment on every call so a test or a user can change them mid-run.
+ * `PI_CLI_SUBAGENTS_MAX_RUNTIMES` keeps meaning the resident cap; naming both resident variables at
+ * once is refused rather than resolved by an undocumented precedence.
+ */
+export function resolveCaps(env: NodeJS.ProcessEnv = process.env): AdmissionCaps {
+  const has = (name: string) => env[name] !== undefined;
+  if (has("PI_CLI_SUBAGENTS_MAX_RESIDENT") && has("PI_CLI_SUBAGENTS_MAX_RUNTIMES"))
+    throw new Error("PI_CLI_SUBAGENTS_MAX_RESIDENT and PI_CLI_SUBAGENTS_MAX_RUNTIMES both set the resident cap; configure only one so the effective limit is not ambiguous.");
+  const active = readCap("PI_CLI_SUBAGENTS_MAX_ACTIVE", env);
+  const resident = readCap("PI_CLI_SUBAGENTS_MAX_RESIDENT", env);
+  const legacy = readCap("PI_CLI_SUBAGENTS_MAX_RUNTIMES", env);
+  return {
+    active: has("PI_CLI_SUBAGENTS_MAX_ACTIVE") ? active : DEFAULT_ACTIVE,
+    resident: has("PI_CLI_SUBAGENTS_MAX_RESIDENT") ? resident : has("PI_CLI_SUBAGENTS_MAX_RUNTIMES") ? legacy : DEFAULT_RESIDENT,
+  };
+}
 
 /**
  * A managed runtime keeps its admission slot until its release is confirmed: an idle child still owns
@@ -37,19 +82,21 @@ export function occupiesRuntime(view: Pick<AgentView, "phase" | "runtimeClosed">
 }
 
 /**
- * Count the reservations that the disk still cannot account for, dropping those whose runtime is now
- * visible: a reservation covers only that window, and counting a visible runtime twice would refuse
- * admissions while the cap still has room. Returns how many reservations under `prefix` remain.
+ * Drop the reservations the disk can already account for, and report how many still count in each
+ * dimension. A new instance is accounted once it exists; a reused one only once a run it did not have
+ * is visible, because an idle instance is always visible and would otherwise release its reservation
+ * immediately. Only a reservation that creates a runtime holds a resident slot.
  */
-export function pruneVisibleReservations(reservations: Set<string>, prefix: string, visibleIds: Iterable<string>): number {
-  const visible = new Set(visibleIds);
-  let pending = 0;
-  for (const key of [...reservations]) {
-    if (!key.startsWith(prefix)) continue;
-    if (visible.has(key.slice(prefix.length))) reservations.delete(key);
-    else pending++;
+export function pruneVisibleReservations(reservations: Map<string, Reservation>, prefix: string, views: Iterable<Pick<AgentView, "id" | "runId">>): { active: number; resident: number } {
+  const runById = new Map([...views].map((view) => [view.id, view.runId]));
+  let active = 0, resident = 0;
+  for (const [token, reservation] of [...reservations]) {
+    if (!token.startsWith(prefix)) continue;
+    if (runById.has(reservation.id) && runById.get(reservation.id) !== reservation.priorRunId) { reservations.delete(token); continue; }
+    active++;
+    if (reservation.newRuntime) resident++;
   }
-  return pending;
+  return { active, resident };
 }
 
 const idPattern = /^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/;
@@ -242,36 +289,59 @@ export class AgentManager {
   }
 
   /**
-   * One parent session, counted across roles: the cap exists so a parent cannot turn one delegation
-   * decision into an unbounded number of resident CLI processes. Unset keeps the previous behavior.
+   * One parent session, counted across roles in two dimensions: concurrent turns (a step that may still
+   * execute) and resident runtimes (a slot not yet released). Both are settable; `0` disables one.
    */
-  private maxRuntimes(): number | undefined {
-    const raw = process.env.PI_CLI_SUBAGENTS_MAX_RUNTIMES;
-    // Only an absent variable means "no cap"; a present but empty value must not read as unlimited.
-    if (raw === undefined) return undefined;
-    const value = Number(raw.trim());
-    if (!Number.isSafeInteger(value) || value < 1)
-      throw new Error(`PI_CLI_SUBAGENTS_MAX_RUNTIMES must be a positive integer; got ${JSON.stringify(raw)}. Refusing to dispatch so the limit is not silently ignored.`);
-    return value;
-  }
+  private caps(): AdmissionCaps { return resolveCaps(); }
 
   /**
    * Refuse before anything is written or started; the count comes from disk so every controller agrees.
-   * The id is reserved for the window until its own state is visible, then released by the caller.
+   * A new runtime takes both dimensions; a new run inside a resident runtime only takes a turn slot,
+   * because the runtime it runs in is already counted. The returned token must be settled afterwards.
    */
-  private admit(id: string): void {
-    const cap = this.maxRuntimes();
-    if (cap === undefined) return;
+  private admit(id: string, options: { priorRunId?: string; newRuntime?: boolean } = {}): string {
+    const { active, resident } = this.caps();
     const prefix = `${this.root}\0`;
-    const occupied = this.list().filter(occupiesRuntime);
-    const pending = pruneVisibleReservations(admitting, prefix, occupied.map((view) => view.id));
-    const total = occupied.length + pending;
-    if (total < cap) { admitting.add(prefix + id); return; }
-    throw new Error(`${total} of ${cap} managed runtimes are already occupied in this parent session (PI_CLI_SUBAGENTS_MAX_RUNTIMES); a runtime keeps its slot until its release is confirmed. Interrupt a running child and then stop it, or wait for it to finish, before starting or resuming another.`);
+    const views = this.list();
+    const newRuntime = options.newRuntime !== false;
+    // One reservation per instance: a second run on one instance is already impossible, and replacing
+    // the older token keeps an uncertain attempt from accumulating slots.
+    for (const [token, reservation] of [...admitting]) if (reservation.id === id) admitting.delete(token);
+    const pending = pruneVisibleReservations(admitting, prefix, views);
+    const occupied = views.filter(occupiesRuntime);
+    const residentTotal = occupied.length + pending.resident;
+    if (newRuntime && resident !== undefined && residentTotal >= resident)
+      throw new Error(`${residentTotal} of ${resident} managed runtimes are already occupied in this parent session (${this.residentCapName()}); a runtime keeps its slot until its release is confirmed. This dispatch was refused.`);
+    const activeTotal = occupied.filter(countsAsActive).length + pending.active;
+    if (active !== undefined && activeTotal >= active)
+      throw new Error(`${activeTotal} of ${active} concurrent turns are already active in this parent session (PI_CLI_SUBAGENTS_MAX_ACTIVE); this dispatch was refused.`);
+    const token = `${prefix}${id}\0${++nextReservation}`;
+    admitting.set(token, { id, newRuntime, ...(options.priorRunId !== undefined ? { priorRunId: options.priorRunId } : {}) });
+    return token;
   }
 
-  /** Only a confirmed release frees a reservation; a failed start must not leak it. */
-  private releaseAdmission(id: string): void { admitting.delete(`${this.root}\0${id}`); }
+  /** Name the variable that produced the resident cap, so a refusal stays actionable. */
+  private residentCapName(): string {
+    // The legacy name only applies when it is the one configured; an unconfigured cap names the default's variable.
+    return process.env.PI_CLI_SUBAGENTS_MAX_RUNTIMES !== undefined && process.env.PI_CLI_SUBAGENTS_MAX_RESIDENT === undefined
+      ? "PI_CLI_SUBAGENTS_MAX_RUNTIMES" : "PI_CLI_SUBAGENTS_MAX_RESIDENT";
+  }
+
+  /**
+   * Drop a reservation once the disk accounts for the attempt. A missing or old run id on a settled
+   * phase proves no run started; an unreadable record keeps the slot while a runtime claim remains,
+   * because a lost response does not prove the run failed.
+   */
+  private settleAdmission(token: string): void {
+    const reservation = admitting.get(token);
+    if (!reservation) return;
+    try {
+      const view = this.get(reservation.id);
+      if (view.runId !== reservation.priorRunId || ["idle", "completed", "failed", "stopped", "closed"].includes(view.phase)) admitting.delete(token);
+    } catch {
+      if (!existsSync(path.join(this.directory(reservation.id), "owner.lock"))) admitting.delete(token);
+    }
+  }
 
   async spawn(roleName: string, role: Role, cwd: string, message: string, workspace?: string): Promise<AgentView> {
     if (!message.trim()) throw new Error("Task must not be empty");
@@ -288,7 +358,7 @@ export class AgentManager {
     // Same shape rule as the role loader: a non-boolean here would silently mean "deny", so refuse it.
     if (role.allowSubagents !== undefined && typeof role.allowSubagents !== "boolean") throw new Error("allowSubagents must be a boolean");
     const id = randomUUID(), dir = this.directory(id);
-    this.admit(id);
+    const admission = this.admit(id, { newRuntime: true });
     const start = async (directory: string, baseline?: AgentSpec["workspaceBaseline"], notice?: string): Promise<AgentView> => {
       directory = path.resolve(directory);
       if (!statSync(directory).isDirectory()) throw new Error("cwd must be an existing directory");
@@ -306,7 +376,7 @@ export class AgentManager {
       if (workspace !== undefined) return await this.workspaces.runAgent(workspace, id, (ws, notice) => start(ws.cwd, { commit: ws.baseCommit, revision: ws.revision }, notice));
       this.workspaces.assertShared(cwd);
       return await start(cwd);
-    } finally { this.releaseAdmission(id); }
+    } finally { this.settleAdmission(admission); }
   }
 
   private async start(id: string, message: string, session?: NativeSession | SessionHandle, operation: "start" | "send" = "start"): Promise<AgentView> {
@@ -404,8 +474,14 @@ export class AgentManager {
       let state = this.get(id);
       if (state.phase === "unreachable") throw new Error(state.error);
       if (state.phase === "idle") {
-        const result = await this.request(id, { type: "start", message: prompt });
-        return this.view(id, result, result.receipt && { ...result.receipt, operation: "send" });
+        // A new run on a resident instance takes a turn slot too; the instance is already visible, so
+        // the reservation is settled against its new run id instead of its existence.
+        const admission = this.admit(id, { priorRunId: state.runId, newRuntime: false });
+        try {
+          const result = await this.request(id, { type: "start", message: prompt });
+          return this.view(id, result, result.receipt && { ...result.receipt, operation: "send" });
+        }
+        finally { this.settleAdmission(admission); }
       }
       if (["starting", "running", "waiting"].includes(state.phase)) {
         if (spec.cli === "codex" && mode === "followUp") throw new Error("Codex followUp while running is not supported; wait for this run to finish");
@@ -419,9 +495,9 @@ export class AgentManager {
       if (session.cli === "codex" && session.codexHome !== spec.codexHome) throw new Error("Codex native home changed; refusing to resume a different session store");
       if (session.cli === "claude") inspectClaudeSession(spec, session);
       // Resuming a released instance starts a new runtime, so it needs a free slot like spawn does.
-      this.admit(id);
+      const admission = this.admit(id, { priorRunId: state.runId, newRuntime: true });
       try { return await this.start(id, prompt, session, "send"); }
-      finally { this.releaseAdmission(id); }
+      finally { this.settleAdmission(admission); }
     };
     try {
       if (!spec.workspace) return await send();
