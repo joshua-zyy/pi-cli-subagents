@@ -6,7 +6,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { execFile, execFileSync, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { randomUUID } from 'node:crypto';
-import { AgentManager } from '../dist/manager.js';
+import { AgentManager, occupiesRuntime } from '../dist/manager.js';
 import { defaultRoles } from '../dist/roles.js';
 import { processAlive, waitUntil, readJson, writeJson } from '../dist/storage.js';
 import { tempDir } from './helpers/tmp.mjs';
@@ -388,4 +388,135 @@ test('a resident runtime writes each run to its own raw log', { timeout: 30_000 
   assert.ok(fs.statSync(secondLog).size > 0, 'the second run must write its own raw log');
   assert.equal(fs.readFileSync(firstLog, 'utf8'), before, 'the first run log keeps its bytes');
   assert.equal(second.logFile, secondLog, 'the instance points at the current run log');
+});
+
+const capKey = 'PI_CLI_SUBAGENTS_MAX_RUNTIMES';
+/** Run one case with a specific cap; every case restores the inherited value. */
+const withCap = async (value, body) => {
+  const saved = process.env[capKey];
+  if (value === undefined) delete process.env[capKey]; else process.env[capKey] = value;
+  try { return await body(); } finally { if (saved === undefined) delete process.env[capKey]; else process.env[capKey] = saved; }
+};
+
+test('a full parent session refuses a new runtime without dispatching', { timeout: 30_000 }, async t => {
+  const { cwd, manager } = setup(t);
+  await withCap('1', async () => {
+    const first = await manager.spawn('worker', defaultRoles.worker, cwd, 'REMEMBER first');
+    await complete(manager, first.id);
+    await assert.rejects(manager.spawn('worker', defaultRoles.worker, cwd, 'DO NOT START'), (error) => {
+      assert.match(error.message, /1 of 1/, 'the refusal names the occupied slots and the cap');
+      assert.match(error.message, new RegExp(capKey), 'the refusal names the setting that produced the cap');
+      assert.doesNotMatch(error.message, /\bkeep\b/, 'the refusal must not suggest an action that does not exist');
+      return true;
+    });
+    assert.equal(manager.list().length, 1, 'a refused admission creates no instance directory or process');
+    // A confirmed release returns the slot to the same parent session.
+    await manager.close(first.id);
+    const second = await manager.spawn('worker', defaultRoles.worker, cwd, 'REMEMBER second');
+    await complete(manager, second.id);
+    assert.equal(manager.list().length, 2);
+  });
+});
+
+test('the cap counts runtimes another manager owns', { timeout: 30_000 }, async t => {
+  const { cwd, parent, manager } = setup(t);
+  // Another tool call constructs its own manager over the same root; the count must come from disk.
+  const other = new AgentManager(parent, launch);
+  await withCap('1', async () => {
+    const first = await manager.spawn('worker', defaultRoles.worker, cwd, 'REMEMBER owner');
+    await complete(manager, first.id);
+    await assert.rejects(other.spawn('worker', defaultRoles.worker, cwd, 'DO NOT START'), /1 of 1/);
+    await manager.close(first.id);
+    const second = await other.spawn('worker', defaultRoles.worker, cwd, 'REMEMBER after release');
+    await complete(manager, second.id);
+  });
+});
+
+test('a full session still steers existing children but cannot resume a released one', { timeout: 40_000 }, async t => {
+  const { cwd, manager } = setup(t);
+  await withCap('1', async () => {
+    const started = await manager.spawn('worker', defaultRoles.worker, cwd, 'REMEMBER released');
+    const released = await release(manager, started.id);
+    const occupied = await manager.spawn('worker', defaultRoles.worker, cwd, 'REMEMBER idle');
+    await complete(manager, occupied.id);
+    // A new run inside the resident runtime adds no occupancy, so the cap must not block it.
+    const run = await manager.send(occupied.id, 'REMEMBER second run');
+    assert.equal(run.id, occupied.id);
+    await complete(manager, occupied.id);
+    // Resuming the released instance would create a second runtime while the only slot is taken.
+    await assert.rejects(manager.send(released.id, 'RECALL'), /1 of 1/);
+    await manager.close(occupied.id);
+    const resumed = await manager.send(released.id, 'RECALL');
+    await complete(manager, resumed.id);
+    assert.equal(resumed.sessionId, released.sessionId, 'the resumed run keeps the original native session');
+  });
+});
+
+test('an invalid cap value refuses to dispatch instead of ignoring the limit', { timeout: 30_000 }, async t => {
+  const { cwd, manager } = setup(t);
+  for (const value of ['', '0', '-1', 'abc', '1.5', '  ']) {
+    await withCap(value, async () => {
+      await assert.rejects(manager.spawn('worker', defaultRoles.worker, cwd, 'DO NOT START'), new RegExp(capKey), `value ${JSON.stringify(value)} must be refused`);
+    });
+  }
+  assert.equal(manager.list().length, 0, 'a refused configuration creates no instance');
+  await withCap(undefined, async () => {
+    const first = await manager.spawn('worker', defaultRoles.worker, cwd, 'REMEMBER one');
+    const second = await manager.spawn('worker', defaultRoles.worker, cwd, 'REMEMBER two');
+    await complete(manager, first.id); await complete(manager, second.id);
+    assert.equal(manager.list().length, 2, 'without the setting the previous behavior is unchanged');
+  });
+});
+
+test('concurrent resumes cannot exceed the cap', { timeout: 60_000 }, async t => {
+  const { cwd, manager } = setup(t);
+  await withCap('1', async () => {
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      // Two released instances: both look free on disk until a resume makes its state visible.
+      const left = await release(manager, (await manager.spawn('worker', defaultRoles.worker, cwd, `REMEMBER left ${attempt}`)).id);
+      const right = await release(manager, (await manager.spawn('worker', defaultRoles.worker, cwd, `REMEMBER right ${attempt}`)).id);
+      const results = await Promise.allSettled([manager.send(left.id, 'RECALL'), manager.send(right.id, 'RECALL')]);
+      const fulfilled = results.filter((result) => result.status === 'fulfilled');
+      const rejected = results.filter((result) => result.status === 'rejected');
+      assert.equal(fulfilled.length, 1, `attempt ${attempt}: exactly one resume may take the only slot`);
+      assert.equal(rejected.length, 1, `attempt ${attempt}: the other resume must be refused`);
+      assert.match(rejected[0].reason.message, /1 of 1/);
+      // Whatever the interleaving was, the session must never end up above the cap.
+      assert.equal(manager.list().filter(occupiesRuntime).length, 1, `attempt ${attempt}: the cap must hold after the race`);
+      const winner = fulfilled[0].value;
+      await complete(manager, winner.id);
+      await manager.close(winner.id);
+    }
+  });
+});
+
+test('a released record whose runtime is still owned keeps its slot', { timeout: 30_000 }, async t => {
+  const { cwd, manager } = setup(t);
+  await withCap('1', async () => {
+    const started = await manager.spawn('worker', defaultRoles.worker, cwd, 'REMEMBER owned');
+    await complete(manager, started.id);
+    const stateFile = path.join(manager.root, started.id, 'state.json'), sealed = fs.readFileSync(stateFile, 'utf8');
+    // Hand-edit the record to look released while its owner lock is still held.
+    writeJson(stateFile, { ...readJson(stateFile), phase: 'closed', runtimeClosed: true });
+    try {
+      assert.equal(manager.get(started.id).phase, 'stopping', 'a release claim without a released lock normalizes to an owned runtime');
+      await assert.rejects(manager.spawn('worker', defaultRoles.worker, cwd, 'DO NOT START'), /1 of 1/,
+        'an unconfirmed release must keep occupying its slot');
+    } finally { fs.writeFileSync(stateFile, sealed); }
+    await manager.close(started.id);
+    const next = await manager.spawn('worker', defaultRoles.worker, cwd, 'REMEMBER after release');
+    await complete(manager, next.id);
+  });
+});
+
+test('a start that fails before creating anything returns the slot', { timeout: 30_000 }, async t => {
+  const { cwd, manager } = setup(t);
+  await withCap('1', async () => {
+    // This cwd check runs before the instance directory exists, so the failure leaves nothing on disk.
+    const file = path.join(cwd, 'not-a-directory.txt');
+    fs.writeFileSync(file, 'x');
+    await assert.rejects(manager.spawn('worker', defaultRoles.worker, file, 'DO NOT START'), /cwd must be an existing directory/);
+    const next = await manager.spawn('worker', defaultRoles.worker, cwd, 'REMEMBER after a failed start');
+    await complete(manager, next.id);
+  });
 });

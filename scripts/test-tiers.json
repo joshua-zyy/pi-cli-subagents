@@ -1,6 +1,7 @@
 {
   "fast": [
     "activity.test.mjs",
+    "admission.test.mjs",
     "claude-launch.test.mjs",
     "claude-question.test.mjs",
     "claude-transcript.test.mjs",

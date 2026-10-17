@@ -84,6 +84,14 @@ Pi children can ask the parent a single task question through `subagent_ask_pare
   or pushed.
 - **Stopping is not a rollback.** An uncertain outcome is reported as uncertain, and a native session
   is never silently replaced by a new one.
+- **One parent session can cap its runtimes.** Set `PI_CLI_SUBAGENTS_MAX_RUNTIMES` to a positive
+  integer to limit how many managed runtimes this parent holds. A slot is held from the moment a
+  runtime is created until its release is confirmed: an idle child still owns its managed runtime
+  (whether that keeps a resident process depends on the backend), a starting, stopping or
+  unconfirmed release still holds its slot, and an unreadable record counts as unknown ownership. Reaching the cap refuses a new `start` or a `resume` of a released instance; nothing is
+  queued or preempted and no instance directory or process is created. Running or idle children can
+  still be steered or given a new turn, because that adds no runtime. Unset means no cap; a present
+  value that is not a positive integer is refused instead of being read as unlimited.
 
 ## In the session
 

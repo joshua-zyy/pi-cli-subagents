@@ -18,6 +18,40 @@ import { directories, jsonFiles, processAlive, readJson, shorten, waitUntil, wri
 import type { AgentSpec, AgentState, AgentView, Control, ControlResult, Delivery, Endpoint, Launch, NativeSession, OperationReceipt, Report, Role, SessionHandle, StartRequest, TaskRun } from "./types.js";
 
 const workerFile = fileURLToPath(new URL("./worker.js", import.meta.url));
+
+/**
+ * Runtimes this process is admitting right now, keyed by parent root so unrelated parents never share a
+ * reservation. The authoritative count stays on disk; this only covers the window before the new
+ * runtime's state becomes visible to `list()`, where two concurrent admissions (for example two resumes
+ * of released instances) would otherwise both pass.
+ */
+const admitting = new Set<string>();
+
+/**
+ * A managed runtime keeps its admission slot until its release is confirmed: an idle child still owns
+ * its runtime (whether that keeps a resident process depends on the backend), a stopping one may still
+ * be winding down, and an unknown record may still own one.
+ */
+export function occupiesRuntime(view: Pick<AgentView, "phase" | "runtimeClosed">): boolean {
+  return !(view.phase === "closed" && view.runtimeClosed === true);
+}
+
+/**
+ * Count the reservations that the disk still cannot account for, dropping those whose runtime is now
+ * visible: a reservation covers only that window, and counting a visible runtime twice would refuse
+ * admissions while the cap still has room. Returns how many reservations under `prefix` remain.
+ */
+export function pruneVisibleReservations(reservations: Set<string>, prefix: string, visibleIds: Iterable<string>): number {
+  const visible = new Set(visibleIds);
+  let pending = 0;
+  for (const key of [...reservations]) {
+    if (!key.startsWith(prefix)) continue;
+    if (visible.has(key.slice(prefix.length))) reservations.delete(key);
+    else pending++;
+  }
+  return pending;
+}
+
 const idPattern = /^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/;
 /** Enough recent assignments to choose a reusable instance without pasting a whole work history. */
 const HISTORY_LIMIT = 5;
@@ -207,6 +241,38 @@ export class AgentManager {
     return [...new Set(logs)];
   }
 
+  /**
+   * One parent session, counted across roles: the cap exists so a parent cannot turn one delegation
+   * decision into an unbounded number of resident CLI processes. Unset keeps the previous behavior.
+   */
+  private maxRuntimes(): number | undefined {
+    const raw = process.env.PI_CLI_SUBAGENTS_MAX_RUNTIMES;
+    // Only an absent variable means "no cap"; a present but empty value must not read as unlimited.
+    if (raw === undefined) return undefined;
+    const value = Number(raw.trim());
+    if (!Number.isSafeInteger(value) || value < 1)
+      throw new Error(`PI_CLI_SUBAGENTS_MAX_RUNTIMES must be a positive integer; got ${JSON.stringify(raw)}. Refusing to dispatch so the limit is not silently ignored.`);
+    return value;
+  }
+
+  /**
+   * Refuse before anything is written or started; the count comes from disk so every controller agrees.
+   * The id is reserved for the window until its own state is visible, then released by the caller.
+   */
+  private admit(id: string): void {
+    const cap = this.maxRuntimes();
+    if (cap === undefined) return;
+    const prefix = `${this.root}\0`;
+    const occupied = this.list().filter(occupiesRuntime);
+    const pending = pruneVisibleReservations(admitting, prefix, occupied.map((view) => view.id));
+    const total = occupied.length + pending;
+    if (total < cap) { admitting.add(prefix + id); return; }
+    throw new Error(`${total} of ${cap} managed runtimes are already occupied in this parent session (PI_CLI_SUBAGENTS_MAX_RUNTIMES); a runtime keeps its slot until its release is confirmed. Interrupt a running child and then stop it, or wait for it to finish, before starting or resuming another.`);
+  }
+
+  /** Only a confirmed release frees a reservation; a failed start must not leak it. */
+  private releaseAdmission(id: string): void { admitting.delete(`${this.root}\0${id}`); }
+
   async spawn(roleName: string, role: Role, cwd: string, message: string, workspace?: string): Promise<AgentView> {
     if (!message.trim()) throw new Error("Task must not be empty");
     if (role.cli !== undefined && !["pi", "codex", "claude"].includes(role.cli)) throw new Error("Unsupported CLI");
@@ -217,6 +283,7 @@ export class AgentManager {
     if (role.cli !== "codex" && role.effort) throw new Error("Codex effort requires cli: codex");
     if (role.mode !== undefined) { const invalid = modeError(role.cli, role.mode); if (invalid) throw new Error(invalid); }
     const id = randomUUID(), dir = this.directory(id);
+    this.admit(id);
     const start = async (directory: string, baseline?: AgentSpec["workspaceBaseline"], notice?: string): Promise<AgentView> => {
       directory = path.resolve(directory);
       if (!statSync(directory).isDirectory()) throw new Error("cwd must be an existing directory");
@@ -230,9 +297,11 @@ export class AgentManager {
       writeJson(path.join(dir, "spec.json"), spec);
       return this.start(id, notice ? `${message}\n\n[Workspace baseline]\n${notice}` : message);
     };
-    if (workspace !== undefined) return this.workspaces.runAgent(workspace, id, (ws, notice) => start(ws.cwd, { commit: ws.baseCommit, revision: ws.revision }, notice));
-    this.workspaces.assertShared(cwd);
-    return start(cwd);
+    try {
+      if (workspace !== undefined) return await this.workspaces.runAgent(workspace, id, (ws, notice) => start(ws.cwd, { commit: ws.baseCommit, revision: ws.revision }, notice));
+      this.workspaces.assertShared(cwd);
+      return await start(cwd);
+    } finally { this.releaseAdmission(id); }
   }
 
   private async start(id: string, message: string, session?: NativeSession | SessionHandle, operation: "start" | "send" = "start"): Promise<AgentView> {
@@ -344,7 +413,10 @@ export class AgentManager {
       if (!session || session.cli !== (spec.cli ?? "pi")) throw new Error("No resumable original session; will not silently create a new session");
       if (session.cli === "codex" && session.codexHome !== spec.codexHome) throw new Error("Codex native home changed; refusing to resume a different session store");
       if (session.cli === "claude") inspectClaudeSession(spec, session);
-      return this.start(id, prompt, session, "send");
+      // Resuming a released instance starts a new runtime, so it needs a free slot like spawn does.
+      this.admit(id);
+      try { return await this.start(id, prompt, session, "send"); }
+      finally { this.releaseAdmission(id); }
     };
     try {
       if (!spec.workspace) return await send();
