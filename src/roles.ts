@@ -47,7 +47,7 @@ export const CODEX_MODE_PRESETS: Record<CodexMode, { approvalPolicy: "untrusted"
   "full-access": { approvalPolicy: "never", sandbox: "danger-full-access" },
 };
 export const CODEX_MODES = Object.keys(CODEX_MODE_PRESETS) as CodexMode[];
-export const ROLE_FIELDS = ["description", "instructions", "provider", "model", "thinking", "cli", "effort", "mode", "defaultModeQuestions", "tools"] as const;
+export const ROLE_FIELDS = ["description", "instructions", "provider", "model", "thinking", "cli", "effort", "mode", "defaultModeQuestions", "tools", "skills"] as const;
 
 const levels = new Set<Thinking>(PI_THINKING_LEVELS);
 const claudeLevels = new Set<Thinking>(CLAUDE_THINKING_LEVELS);
@@ -74,7 +74,18 @@ export function toolTrimError(cli: Cli | undefined, tools: unknown): string | un
   return undefined;
 }
 
-/** Why `mode` cannot be used for this CLI, or `undefined` when it is valid. Shared with `AgentManager.spawn`. */export function modeError(cli: Cli | undefined, mode: string): string | undefined {
+/**
+ * Why `skills` cannot be used for this CLI, or `undefined` when it is valid. Pi only: the other backends
+ * expose no switch, so accepting the field would silently keep every skill.
+ */
+export function skillsError(cli: Cli | undefined, skills: unknown): string | undefined {
+  if (cli !== undefined && cli !== "pi") return "skills requires a Pi role: Codex and Claude expose no skill switch, so the role would silently keep every skill";
+  if (typeof skills !== "boolean") return "skills must be true or false";
+  return undefined;
+}
+
+/** Why `mode` cannot be used for this CLI, or `undefined` when it is valid. Shared with `AgentManager.spawn`. */
+export function modeError(cli: Cli | undefined, mode: string): string | undefined {
   if (cli === "claude") return CLAUDE_MODES.includes(mode as ClaudeMode) ? undefined : `Claude mode must be one of ${CLAUDE_MODES.join(", ")}`;
   if (cli === "codex") return CODEX_MODES.includes(mode as CodexMode) ? undefined : `Codex mode must be one of ${CODEX_MODES.join(", ")}`;
   return "mode requires cli: claude or codex";
@@ -103,6 +114,10 @@ export function validateRoleFile(value: unknown, source: string): Record<string,
       const invalid = toolTrimError(role.cli as Cli | undefined, role.tools);
       if (invalid) throw new Error(`${source}: ${name} ${invalid}`);
     }
+    if (role.skills !== undefined) {
+      const invalid = skillsError(role.cli as Cli | undefined, role.skills);
+      if (invalid) throw new Error(`${source}: ${name} ${invalid}`);
+    }
     if (role.cli === "claude" && role.provider) throw new Error(`${source}: ${name} Claude role does not accept a Pi provider`);
     if (role.cli === "claude" && role.thinking !== undefined && !claudeLevels.has(role.thinking as Thinking)) throw new Error(`${source}: ${name} Claude thinking must be low, medium, high, xhigh or max`);
     if (role.cli === "codex" && (role.provider || role.thinking)) throw new Error(`${source}: ${name} Codex role does not accept Pi provider/thinking fields`);
@@ -122,6 +137,7 @@ export function validateRoleFile(value: unknown, source: string): Record<string,
       ...(role.mode ? { mode: role.mode as Mode } : {}),
       ...(role.defaultModeQuestions !== undefined ? { defaultModeQuestions: role.defaultModeQuestions as boolean } : {}),
       ...(role.tools !== undefined ? { tools: role.tools as RoleToolTrim } : {}),
+      ...(role.skills !== undefined ? { skills: role.skills as boolean } : {}),
     };
   }
   return roles;

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { AgentManager } from '../dist/manager.js';
-import { defaultRoles, toolTrimError, validateRoleFile } from '../dist/roles.js';
+import { defaultRoles, skillsError, toolTrimError, validateRoleFile } from '../dist/roles.js';
 import { trimArgs } from '../dist/pi-adapter.js';
 import { tempDir } from './helpers/tmp.mjs';
 
@@ -44,5 +44,41 @@ test('spawning a non-Pi role with tools refuses before creating anything', async
   assert.equal(fs.existsSync(manager.root), false, 'nothing exists before the first instance');
   await assert.rejects(manager.spawn('worker', { ...defaultRoles.worker, cli: 'codex', tools: { allow: ['read'] } }, cwd, 'DO NOT START'),
     /Pi role: Codex and Claude expose no tool allow\/deny list/);
+  assert.equal(fs.existsSync(manager.root), false, 'a refused role must not create even the instance root');
+});
+
+test('a false skills flag disables discovery and leaves other roles untouched', () => {
+  assert.deepEqual(trimArgs({ skills: false }), ['--no-skills']);
+  assert.deepEqual(trimArgs({ skills: true }), [], 'true means inherit, so no flag is passed');
+  assert.deepEqual(trimArgs({ skills: false, tools: { allow: ['read'] } }), ['--tools', 'read', '--no-skills'],
+    'both switches compose');
+});
+
+test('the skills switch is Pi-only and boolean', () => {
+  assert.equal(skillsError(undefined, false), undefined, 'an unset cli means Pi');
+  assert.equal(skillsError('pi', true), undefined);
+  assert.match(skillsError('codex', false), /skills requires a Pi role/);
+  assert.match(skillsError('claude', false), /skills requires a Pi role/);
+  assert.match(skillsError('pi', 'false'), /must be true or false/);
+  assert.match(skillsError('pi', 0), /must be true or false/);
+  assert.match(skillsError('pi', {}), /must be true or false/);
+});
+
+test('the role file loader keeps skills and refuses it for other backends', () => {
+  const roles = validateRoleFile({ worker: { description: 'd', instructions: 'i', skills: false } }, 'probe');
+  assert.equal(roles.worker.skills, false, 'a known field must survive loading');
+  assert.throws(() => validateRoleFile({ worker: { description: 'd', instructions: 'i', skills: false, cli: 'codex' } }, 'probe'),
+    /skills requires a Pi role/);
+  assert.throws(() => validateRoleFile({ worker: { description: 'd', instructions: 'i', skills: 'no' } }, 'probe'),
+    /must be true or false/);
+});
+
+test('spawning a non-Pi role with skills refuses before creating anything', async () => {
+  const cwd = tempDir('skills');
+  const parent = path.join(cwd, 'parent.jsonl');
+  fs.writeFileSync(parent, '{}\n');
+  const manager = new AgentManager(parent, launch);
+  await assert.rejects(manager.spawn('worker', { ...defaultRoles.worker, cli: 'claude', skills: false }, cwd, 'DO NOT START'),
+    /skills requires a Pi role/);
   assert.equal(fs.existsSync(manager.root), false, 'a refused role must not create even the instance root');
 });
