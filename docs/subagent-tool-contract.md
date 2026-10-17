@@ -271,7 +271,7 @@ At that four-tool migration baseline, no real models, real CLI collaboration or 
 
 Next step: reload the extension to inspect the tools and role catalog; real collaboration acceptance requires separate authorization.
 
-### 2.5 工具裁剪（仅 Pi 角色，H6 最小切片）
+### 2.5 工具裁剪（Pi 支持白/黑名单，Claude 仅黑名单）
 
 角色 JSON 可带一个可选字段，直通 Pi 原生开关：
 
