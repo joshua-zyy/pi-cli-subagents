@@ -6,7 +6,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { execFile, execFileSync, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { randomUUID } from 'node:crypto';
-import { AgentManager } from '../dist/manager.js';
+import { AgentManager, occupiesRuntime } from '../dist/manager.js';
 import { defaultRoles } from '../dist/roles.js';
 import { processAlive, waitUntil, readJson, writeJson } from '../dist/storage.js';
 import { tempDir } from './helpers/tmp.mjs';
@@ -454,7 +454,7 @@ test('a full session still steers existing children but cannot resume a released
 
 test('an invalid cap value refuses to dispatch instead of ignoring the limit', { timeout: 30_000 }, async t => {
   const { cwd, manager } = setup(t);
-  for (const value of ['0', '-1', 'abc', '1.5', '  ']) {
+  for (const value of ['', '0', '-1', 'abc', '1.5', '  ']) {
     await withCap(value, async () => {
       await assert.rejects(manager.spawn('worker', defaultRoles.worker, cwd, 'DO NOT START'), new RegExp(capKey), `value ${JSON.stringify(value)} must be refused`);
     });
@@ -465,5 +465,46 @@ test('an invalid cap value refuses to dispatch instead of ignoring the limit', {
     const second = await manager.spawn('worker', defaultRoles.worker, cwd, 'REMEMBER two');
     await complete(manager, first.id); await complete(manager, second.id);
     assert.equal(manager.list().length, 2, 'without the setting the previous behavior is unchanged');
+  });
+});
+
+test('concurrent resumes cannot exceed the cap', { timeout: 60_000 }, async t => {
+  const { cwd, manager } = setup(t);
+  await withCap('1', async () => {
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      // Two released instances: both look free on disk until a resume makes its state visible.
+      const left = await release(manager, (await manager.spawn('worker', defaultRoles.worker, cwd, `REMEMBER left ${attempt}`)).id);
+      const right = await release(manager, (await manager.spawn('worker', defaultRoles.worker, cwd, `REMEMBER right ${attempt}`)).id);
+      const results = await Promise.allSettled([manager.send(left.id, 'RECALL'), manager.send(right.id, 'RECALL')]);
+      const fulfilled = results.filter((result) => result.status === 'fulfilled');
+      const rejected = results.filter((result) => result.status === 'rejected');
+      assert.equal(fulfilled.length, 1, `attempt ${attempt}: exactly one resume may take the only slot`);
+      assert.equal(rejected.length, 1, `attempt ${attempt}: the other resume must be refused`);
+      assert.match(rejected[0].reason.message, /1 of 1/);
+      // Whatever the interleaving was, the session must never end up above the cap.
+      assert.equal(manager.list().filter(occupiesRuntime).length, 1, `attempt ${attempt}: the cap must hold after the race`);
+      const winner = fulfilled[0].value;
+      await complete(manager, winner.id);
+      await manager.close(winner.id);
+    }
+  });
+});
+
+test('a released record whose runtime is still owned keeps its slot', { timeout: 30_000 }, async t => {
+  const { cwd, manager } = setup(t);
+  await withCap('1', async () => {
+    const started = await manager.spawn('worker', defaultRoles.worker, cwd, 'REMEMBER owned');
+    await complete(manager, started.id);
+    const stateFile = path.join(manager.root, started.id, 'state.json'), sealed = fs.readFileSync(stateFile, 'utf8');
+    // Hand-edit the record to look released while its owner lock is still held.
+    writeJson(stateFile, { ...readJson(stateFile), phase: 'closed', runtimeClosed: true });
+    try {
+      assert.equal(manager.get(started.id).phase, 'stopping', 'a release claim without a released lock normalizes to an owned runtime');
+      await assert.rejects(manager.spawn('worker', defaultRoles.worker, cwd, 'DO NOT START'), /1 of 1/,
+        'an unconfirmed release must keep occupying its slot');
+    } finally { fs.writeFileSync(stateFile, sealed); }
+    await manager.close(started.id);
+    const next = await manager.spawn('worker', defaultRoles.worker, cwd, 'REMEMBER after release');
+    await complete(manager, next.id);
   });
 });

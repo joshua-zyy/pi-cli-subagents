@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { occupiesRuntime } from '../dist/manager.js';
 
 test('a managed runtime occupies its slot until the release is confirmed', () => {
-  for (const phase of ['starting', 'running', 'waiting', 'stopping', 'idle']) {
+  for (const phase of ['starting', 'running', 'waiting', 'stopping', 'idle', 'completed', 'failed', 'stopped']) {
     assert.equal(occupiesRuntime({ phase }), true, `${phase} still owns a runtime`);
   }
   assert.equal(occupiesRuntime({ phase: 'closed', runtimeClosed: true }), false, 'only a confirmed release returns the slot');
