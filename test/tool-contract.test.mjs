@@ -33,6 +33,8 @@ test('action validation refuses missing, irrelevant and unknown fields before ru
     ['subagent', { action: 'send', id: 'old' }, /message/],
     ['subagent', { action: 'send', id: 'old', message: 'new', role: 'worker' }, /role/],
     ['subagent', { action: 'stop', id: 'old', message: 'new' }, /message/],
+    ['subagent', { action: 'reclaim', id: 'old' }, /runtimeId/],
+    ['subagent', { action: 'reclaim', id: 'old', runtimeId: 'r1', message: 'x' }, /message/],
     ['subagent_query', { action: 'list', id: 'old' }, /id/],
     ['subagent_query', { action: 'get', id: 'old', runId: 'old-run' }, /runId/],
     ['subagent_query', { action: 'result', id: 'old' }, /runId/],
