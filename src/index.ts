@@ -31,8 +31,8 @@ export function parentManager(ctx: Pick<ExtensionContext, "sessionManager">, lau
 function visible(state: AgentView, includeText = true) {
   // `task`, `history` and `startedAt` let the parent match an instance to its assignments
   // after its own context is compacted, without reading the child's transcript.
-  const { id, cli, role, phase, protocolVersion, runtimeId, lastStatus, receipt, task, history, runCount, runId, sessionId, session, cwd, startedAt, updatedAt, lastActivity, questions, text, truncated, error, logFile } = state;
-  return { id, cli, role, phase, protocolVersion, runtimeId, lastStatus, ...(receipt ? { receipt } : {}), runId, sessionId, ...(session?.cli === "codex" ? { threadId: session.threadId } : {}), cwd, updatedAt, lastActivity, questions, ...(includeText ? { text, truncated } : {}), error, logFile, history, runCount,
+  const { id, cli, role, phase, protocolVersion, runtimeId, lastStatus, receipt, reclaimed, task, history, runCount, runId, sessionId, session, cwd, startedAt, updatedAt, lastActivity, questions, text, truncated, error, logFile } = state;
+  return { id, cli, role, phase, protocolVersion, runtimeId, lastStatus, ...(receipt ? { receipt } : {}), ...(reclaimed ? { reclaimed } : {}), runId, sessionId, ...(session?.cli === "codex" ? { threadId: session.threadId } : {}), cwd, updatedAt, lastActivity, questions, ...(includeText ? { text, truncated } : {}), error, logFile, history, runCount,
     ...(state.workspace ? { workspace: state.workspace, workspaceBaseline: state.workspaceBaseline } : {}), ...(task ? { task } : {}), ...(startedAt ? { startedAt } : {}) };
 }
 

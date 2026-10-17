@@ -173,11 +173,14 @@ test('reclaim is idempotent and keeps the first evidence', { timeout: 20000 }, a
   const spec = await specTemplate(m, cwd);
   const target = instance(m, spec);
   const first = await m.reclaim(target.id, target.state.runtimeId);
-  const file = reclaimFile(target.dir, target.state.runtimeId), bytes = fs.readFileSync(file, 'utf8');
+  const file = reclaimFile(target.dir, target.state.runtimeId);
+  // Pin an unmistakable observation time: a rewrite would replace it with "now" even within one millisecond.
+  const pinned = { ...readJson(file), observedAt: 1 };
+  writeJson(file, pinned);
   const second = await m.reclaim(target.id, target.state.runtimeId);
   assert.equal(second.receipt.status, 'reclaimed');
   assert.equal(second.receipt.evidence.worker.pid, first.receipt.evidence.worker.pid);
-  assert.equal(fs.readFileSync(file, 'utf8'), bytes, 'a repeated reclaim never rewrites the observation');
+  assert.equal(readJson(file).observedAt, 1, 'a repeated reclaim never rewrites the first observation');
 });
 
 test('a damaged claim is ignored instead of making the instance unreadable', { timeout: 20000 }, async t => {
@@ -239,4 +242,74 @@ test('a reclaimed runtime is not resumable, and a new reservation still counts',
   await assert.rejects(m.spawn('worker', role, cwd, 'SECOND'), /managed runtimes are already occupied/,
     'a new runtime still occupies its slot after a reclaim');
   await m.close(resident.id);
+});
+
+test('a reachable runtime is refused: reclaim is not a substitute for stop', { timeout: 30000 }, async t => {
+  const { cwd, m } = setup(t);
+  const live = await m.spawn('worker', role, cwd, 'HOLD');
+  const state = readJson(path.join(m.root, live.id, 'state.json'));
+  await assert.rejects(m.reclaim(live.id, state.runtimeId), /not unreachable/,
+    'a runtime whose worker is alive has a native release path: reclaim must not bypass it');
+  await m.close(live.id);
+});
+
+test('the lock must match both runtime and pid, and an unusable lock is never read as absent', { timeout: 20000 }, async t => {
+  const { cwd, m } = setup(t);
+  const spec = await specTemplate(m, cwd);
+  const sameRuntime = instance(m, spec);
+  writeJson(path.join(sameRuntime.dir, 'owner.lock'), { pid: process.pid, runId: sameRuntime.state.runId, runtimeId: sameRuntime.state.runtimeId });
+  await assert.rejects(m.reclaim(sameRuntime.id, sameRuntime.state.runtimeId), /Owner conflict/,
+    'a matching runtimeId with a different pid is a conflict, not a match');
+
+  for (const content of ['null\n', '{}\n', '{"pid":0}\n']) {
+    const broken = instance(m, spec);
+    fs.writeFileSync(path.join(broken.dir, 'owner.lock'), content);
+    const label = JSON.stringify(content.trim());
+    // An unusable lock makes the record uninspectable: it keeps its slot and never reads as "no owner".
+    let view;
+    try { view = m.get(broken.id); } catch { view = m.list().find(candidate => candidate.id === broken.id); }
+    assert.equal(view.phase, 'unreachable', `lock ${label} must not be read as absent`);
+    assert.equal(occupiesRuntime(view), true, `lock ${label} must keep occupying`);
+    await assert.rejects(m.reclaim(broken.id, broken.state.runtimeId), /ownership|Owner conflict/i,
+      `lock ${label} must not be reclaimed`);
+  }
+});
+
+test('a repeated reclaim is refused once ownership or identity stopped matching', { timeout: 20000 }, async t => {
+  const { cwd, m } = setup(t);
+  const spec = await specTemplate(m, cwd);
+  const target = instance(m, spec);
+  await m.reclaim(target.id, target.state.runtimeId);
+  writeJson(path.join(target.dir, 'owner.lock'), { pid: target.state.workerPid, runId: target.state.runId, runtimeId: randomUUID() });
+  await assert.rejects(m.reclaim(target.id, target.state.runtimeId), /Owner conflict/,
+    'idempotency cannot outlive the checks that made the first claim valid');
+  assert.equal(occupiesRuntime(m.get(target.id)), true);
+
+  writeJson(path.join(target.dir, 'owner.lock'), { pid: target.state.workerPid, runId: target.state.runId, runtimeId: target.state.runtimeId });
+  const later = randomUUID();
+  writeJson(path.join(target.dir, 'state.json'), { ...target.state, runtimeId: later });
+  await assert.rejects(m.reclaim(target.id, target.state.runtimeId), /is not the runtime recorded/);
+});
+
+test('a claim from another instance, other parent or without a runtime id is ignored', { timeout: 20000 }, async t => {
+  const { cwd, m } = setup(t);
+  const spec = await specTemplate(m, cwd);
+  const target = instance(m, spec), runtimeId = target.state.runtimeId;
+  const record = (over = {}) => ({
+    version: 1, parentFile: m.parentFile, id: target.id, runtimeId, observedAt: Date.now(),
+    evidence: { worker: { pid: target.state.workerPid, absent: true, criterion: 'ESRCH' },
+      cli: { pid: target.state.cliPid, absent: true, criterion: 'ESRCH' } },
+    nativeReleaseConfirmed: false, continuation: 'blocked', ...over,
+  });
+  fs.mkdirSync(path.join(target.dir, 'reclaims'), { recursive: true });
+  for (const [label, over] of [['another instance', { id: randomUUID() }], ['another parent', { parentFile: 'elsewhere.jsonl' }],
+    ['continuation not blocked', { continuation: 'open' }], ['native release claimed', { nativeReleaseConfirmed: true }]]) {
+    writeJson(reclaimFile(target.dir, runtimeId), record(over));
+    const view = m.get(target.id);
+    assert.equal(view.reclaimed, undefined, `a claim with ${label} must not apply`);
+    assert.equal(occupiesRuntime(view), true);
+  }
+
+  const legacy = instance(m, spec, { state: { protocolVersion: undefined, runtimeId: undefined } });
+  await assert.rejects(m.reclaim(legacy.id, randomUUID()), /is not the runtime recorded/);
 });

@@ -212,6 +212,8 @@ export class AgentManager {
       || typeof state.logFile !== "string" || !Array.isArray(state.questions) || state.questions.some(q => !q || typeof q.id !== "string" || typeof q.title !== "string" || !["select", "confirm", "input", "editor", "form"].includes(q.method)))
       throw new Error(`Invalid runtime state for subagent ${id}; inspect ${dir}`);
     let lockAbsent = false, lockMatches = false;
+    // A reclaim needs the file itself to be gone: an empty lock record still claims the instance.
+    const lockMissing = !existsSync(path.join(dir, "owner.lock"));
     if (state.protocolVersion !== undefined) {
       if (state.protocolVersion !== 2 || typeof state.runtimeId !== "string" || !idPattern.test(state.runtimeId) ||
         state.phase === "closed" && state.runtimeClosed !== true ||
@@ -219,7 +221,7 @@ export class AgentManager {
         state.runtimeClosed && !["completed", "failed", "stopped", "closed"].includes(state.phase))
         throw new Error(`Invalid runtime identity for subagent ${id}`);
       const owner = this.readOwner(dir);
-      lockAbsent = owner.kind === "absent";
+      lockAbsent = lockMissing;
       lockMatches = owner.kind === "ok" && owner.value.runtimeId === state.runtimeId && owner.value.pid === state.workerPid;
       if (state.runtimeClosed && owner.kind === "absent") state = { ...state, phase: "closed" };
       else if (!lockMatches)
@@ -256,15 +258,22 @@ export class AgentManager {
     return { ...state, cli: spec.cli ?? "pi", role: spec.roleName, cwd: spec.cwd, ...(spec.workspace ? { workspace: spec.workspace, workspaceBaseline: spec.workspaceBaseline } : {}), history, runCount: runs.length,
       ...(latest?.runId === current && latest.task ? { task: latest.task } : {}), ...(report ? { text: report.text, truncated: report.truncated } : {}), ...(receipt ? { receipt } : {}) };
   }
-  /** `absent` only on ENOENT: an unreadable lock keeps its old meaning (the record is unusable). */
+  /** Preserves the existing projection: a missing or ownerless record means "no owner" for the phase. */
   private readOwner(dir: string): { kind: "absent" } | { kind: "ok"; value: { pid: number; runtimeId?: string } } {
     const file = path.join(dir, "owner.lock");
     if (!existsSync(file)) return { kind: "absent" };
     const value = readJson<{ pid: number; runtimeId?: string }>(file);
-    return value ? { kind: "ok", value } : { kind: "absent" };
+    return value && typeof value === "object" ? { kind: "ok", value } : { kind: "absent" };
   }
   private reclaimFile(dir: string, runtimeId: string): string {
     return path.join(dir, "reclaims", `${runtimeId}.json`);
+  }
+  /** A lock that cannot be read is an ownership conflict with a readable reason, not a raw JSON error. */
+  private readOwnership(dir: string): { kind: "absent" } | { kind: "ok"; value: { pid: number; runtimeId?: string } } {
+    try { return this.readOwner(dir); }
+    catch (error) {
+      throw new Error(`Ownership cannot be established: ${(error as Error).message} Nothing was reclaimed and no control request was sent.`);
+    }
   }
   /** A reclaim counts only when its content names this parent, this instance and this exact runtime. */
   private readReclaim(dir: string, id: string, runtimeId: string): ReclaimRecord | undefined {
@@ -300,13 +309,19 @@ export class AgentManager {
     if (!idPattern.test(runtimeId) || target.runtimeId !== runtimeId)
       throw new Error(`Runtime ${runtimeId} is not the runtime recorded for subagent ${id} (${target.runtimeId ?? "none"}); nothing was reclaimed. Query the instance for its current runtime ID.`);
     const view = this.get(id);
-    const existing = this.readReclaim(dir, id, runtimeId);
-    if (existing) return this.viewWithReclaim(view, existing);
+    // Identity is captured once and re-checked here: a runtime that replaced the target between the
+    // two reads must not inherit a decision made about its predecessor.
+    if (view.runtimeId !== runtimeId)
+      throw new Error(`Runtime identity changed to ${view.runtimeId ?? "none"} while reclaiming ${runtimeId}; nothing was reclaimed. Query the instance for its current runtime ID.`);
     if (view.phase !== "unreachable")
       throw new Error(`Runtime ${runtimeId} is ${view.phase}, not unreachable; stop a live runtime instead of reclaiming its accounting. Nothing was reclaimed.`);
-    const owner = this.readOwner(dir);
-    if (owner.kind === "ok" && !(owner.value.runtimeId === runtimeId && owner.value.pid === target.workerPid))
-      throw new Error(`Owner conflict for runtime ${runtimeId}: owner.lock records pid ${owner.value.pid} and runtime ${owner.value.runtimeId ?? "none"}. Check state.json and owner.lock; nothing was reclaimed and no control request was sent.`);
+    const owner = this.readOwnership(dir);
+    // An unowned but present lock file still blocks the reclaim: only a missing file or a full match counts.
+    if (existsSync(path.join(dir, "owner.lock")) && !(owner.kind === "ok" && owner.value.runtimeId === runtimeId && owner.value.pid === target.workerPid))
+      throw new Error(`Owner conflict for runtime ${runtimeId}: owner.lock ${owner.kind === "ok" ? `records pid ${owner.value.pid} and runtime ${owner.value.runtimeId ?? "none"}` : "names no owner"}. Check state.json and owner.lock; nothing was reclaimed and no control request was sent.`);
+    // Idempotency is only valid while the checks above still hold, so it comes after them.
+    const existing = this.readReclaim(dir, id, runtimeId);
+    if (existing) return this.viewWithReclaim(view, existing);
     const refuse = (name: string, pid: number | undefined, state: string): void => {
       if (state === "absent") return;
       const detail = state === "alive" ? `PID ${pid} still exists` : `the absence of PID ${pid} could not be verified`;
