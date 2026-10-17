@@ -32,12 +32,14 @@ export interface Role {
   mode?: Mode;
   /** Codex experimental Default-mode question gate; omitted inherits native config, not permissions. */
   defaultModeQuestions?: boolean;
-  /** Pi's own tool allow/deny list; Codex and Claude have no equivalent and reject this field. */
+  /** Pi's own tool allow/deny list. Codex has none; Claude has flags this extension does not wire yet. */
   tools?: RoleToolTrim;
   /** false disables skill discovery; a path list loads only those skills. Pi only, other backends reject it. */
   skills?: boolean | string[];
   /** false disables MCP for this Pi role; other backends have no switch and reject it. */
   mcp?: boolean;
+  /** Omitted or false keeps this child from spawning subagents; true allows it. */
+  allowSubagents?: boolean;
 }
 
 // An argv launch, not a shell command. Injectable for protocol tests.

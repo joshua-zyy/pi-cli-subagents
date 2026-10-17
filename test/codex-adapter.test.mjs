@@ -168,7 +168,8 @@ test('Codex Default question override uses process config on initial launch and 
       assert.equal((await c.end()).exit.code, 0);
     }
     const calls = requests();
-    const args = [...(value === undefined ? [] : ['-c', 'features.default_mode_request_user_input=' + value]), 'app-server', '--listen', 'stdio://'];
+    // A child cannot spawn subagents unless the role says so, so every launch carries the denial.
+    const args = [...(value === undefined ? [] : ['-c', 'features.default_mode_request_user_input=' + value]), '-c', 'agents.enabled=false', 'app-server', '--listen', 'stdio://'];
     assert.deepEqual(calls.filter(r => r.method === 'initialize').map(r => r.launchArgs), [args, args]);
     for (const call of calls.filter(r => ['thread/start', 'thread/resume'].includes(r.method))) {
       assert.deepEqual([call.params.model, call.params.approvalPolicy, call.params.sandbox], ['gpt-6-luna', 'on-request', 'read-only']);

@@ -281,7 +281,9 @@ Next step: reload the extension to inspect the tools and role catalog; real coll
 
 - `allow` → `--tools <逗号拼接>`；`deny` → `--exclude-tools <逗号拼接>`；两者可选，**至少要有一个非空**。
 - 校验：只接受 `allow`/`deny` 两个键；数组元素必须是**无首尾空格的非空字符串**；空数组=显式报错（`--tools ""` 会打开全部工具，不能当作"不裁剪"）。
-- **仅 Pi**：`cli: "codex"`/`"claude"` 带该字段 → 创建时**显式拒绝**，"Codex 与 Claude 没有工具白/黑名单，角色会静默保留全部工具"。实测依据：`codex-cli 0.162.1` 的 `--help`/`exec --help`/`mcp --help` 均无工具或技能裁剪入口，且 `-c tools.*` 不被 `--strict-config` 校验（沉默≠支持）；`claude` CLI 本机未安装，未验证。
+- **仅 Pi**：
+  - `cli: "codex"` 带该字段 → 创建时**显式拒绝**：Codex 实测（`--help`/`exec --help`/`mcp --help`，且 `-c tools.*` 不被 `--strict-config` 校验）**没有**工具白/黑名单，接受字段会静默保留全部工具。
+  - `cli: "claude"` 带该字段 → 同样拒绝，但**理由不同**：Claude Code 2.1.296 **确实有** `--allowedTools` / `--disallowedTools`（帮助与真实会话工具清单均证实，`--disallowedTools Agent` 会让 `Agent` 工具消失），只是**本扩展还没接线**。拒绝文案说的是“尚未接线”，不是“没有这个能力”。接线属单独一片。
 - 生效范围：写入实例 `spec.json`，随该实例每次原生启动/恢复生效（与 `defaultModeQuestions` 同样"创建时固化"）；改角色只影响新实例。
 - **不做**：MCP 集合限制、技能预加载/禁用、以及 Codex `agents.enabled` 一类"限制再派"的运行时开关 —— 这三项按 oracle 要求分别裁决，本片不含。
 - 角色摘要（工具描述里的 compact catalog）不重复该字段，避免每轮字节膨胀；字段只在 role JSON 与 spec 中可见。
@@ -291,7 +293,7 @@ Next step: reload the extension to inspect the tools and role catalog; real coll
 角色 JSON 的 `skills` 接受三种形态：`false`（不加载任何技能）、`true`/省略（继承默认发现）、或**路径数组**（只加载点名的那些）。
 
 - `skills: false` → `--no-skills`；`skills: true` → **不传任何 flag**（与省略等价，风格与 `defaultModeQuestions` 一致）。
-- **仅 Pi**：`cli: "codex"`/`"claude"` 带该字段 → 创建时**显式拒绝**（"Codex 与 Claude 没有技能开关，角色会静默保留全部技能"）。依据：`codex 0.162.1` 帮助里无技能通道；`claude` 本机未安装，未验证。
+- **仅 Pi**：`cli: "codex"`/`"claude"` 带该字段 → 创建时**显式拒绝**（"Codex 与 Claude 没有技能开关，角色会静默保留全部技能"）。依据：`codex 0.162.1` 帮助里无技能通道；`claude 2.1.296` 帮助里也只有 `--append-system-prompt`/`--settings`/`--plugin-dir`，无技能开关（其技能经 `/skill-name` 解析）。
 - **形态校验**：只接受布尔或非空的字符串数组；`"false"`、`0`、`{}`、数组内非字符串或带首尾空格的元素 → 显式报错，不做隐式转换。
 - 与 §2.5 的 `tools` 可同时存在，互不影响（`--tools … --no-skills` 并列下发）。
 - **路径列表（白名单）**：`skills: ["<path>", …]` 表示**只加载这些** —— 实现为 `--no-skills` + 每个路径一个 `--skill`。空数组被拒：它看着像一份配置，实际含义是"不发现也不加载"，与本字段的另外两种形态语义重叠，应按需求显式写 `false`。
@@ -310,3 +312,25 @@ Next step: reload the extension to inspect the tools and role catalog; real coll
 - **不做 MCP 服务器级白名单**：pi 只有"全禁"（`--no-mcp`），没有"只允许某几个"的 flag；Codex 0.162.1 的 `-c mcp_servers.*` 在本机探针中被 `--strict-config` 接受（该记录不随包分发），但**运行效果未验证**，因此本片不接。
 - **真机验收**（2026-10-17，本机 pi 1.3.0 + 一个自建 stdio MCP 服务器作探针）：不带 `--no-mcp` 时该服务器**被启动**（探针写下了启动记录）；带 `--no-mcp` 时**未启动**；再加 `--no-tools` 亦未启动。结论限定为"服务器未连接"，**未**验证 MCP 工具在工具列表中的可见性。
 - 生效范围同前：写入 `spec.json`，随该实例每次启动/恢复生效；改角色只影响新实例。
+
+### 2.8 默认禁止再派（`allowSubagents`，三后端）
+
+**默认行为**：子代理**不能再派子代理**。只有角色显式写 `allowSubagents: true` 才放行。
+
+```jsonc
+{ "cli": "codex", "allowSubagents": true }
+```
+
+- 省略或 `false` = 禁止；`true` = 允许。非布尔 → 显式报错。
+- **三个后端都能兑现**（因此不像 `tools`/`skills`/`mcp` 那样对某后端拒绝）：
+
+| 后端 | 下发 | 证据 |
+| --- | --- | --- |
+| pi | `--exclude-tools subagent`（与角色自己的 `deny` 合并为一个列表，不另起 flag） | `pi --help`；denylist 作用于所有工具 |
+| codex | `-c agents.enabled=false` | 真机工具清单对比：六个 `collaboration.*` 工具全部消失（**主要依据**）；同 prompt 下模型自报也从 `SPAWN-AVAILABLE` 转为 `SPAWN-UNAVAILABLE`（**仅作旁证**，自报不作为独立证据） |
+| claude | `--disallowedTools Agent` | 真机：`Agent` 工具从清单消失（prompt 必须走 stdin，否则会被当成工具名） |
+
+- **例外**：pi 角色若在 `tools.allow` 里显式写了 `subagent`，视为显式允许（不再追加拒绝）；若 `tools.deny` 已有 `subagent`，不重复追加。
+- **为什么默认禁止**：父会话的容量上限（§2.3）只管本扩展创建的 runtime，孙代理不经过它；允许再派等于给出一条绕过容量边界的放大路径。
+- 生效范围同前：写入 `spec.json`，随实例每次启动/恢复生效；改角色只影响新实例。
+- **未覆盖**：本字段只约束"该子代理能不能再派"，不约束"孙代理的数量"（若显式允许，放大仍可能发生）。
