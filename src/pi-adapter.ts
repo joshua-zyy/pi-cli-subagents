@@ -49,10 +49,15 @@ export async function inspectPiSession(session: SessionHandle): Promise<void> {
 }
 
 /** Pi's native trimming flags. Validation already refused this field for Codex and Claude roles. */
-export function trimArgs(role: { tools?: RoleToolTrim; skills?: boolean | string[]; mcp?: boolean }): string[] {
+export function trimArgs(role: { tools?: RoleToolTrim; skills?: boolean | string[]; mcp?: boolean; allowSubagents?: boolean }): string[] {
   const args: string[] = [];
   if (role.tools?.allow?.length) args.push("--tools", role.tools.allow.join(","));
-  if (role.tools?.deny?.length) args.push("--exclude-tools", role.tools.deny.join(","));
+  // Delegation must not amplify itself: a child cannot spawn grandchildren unless the role says so. It
+  // joins the role's own deny list rather than becoming a second flag, so neither list can replace the
+  // other. An explicit `subagent` in `allow` is the other way to say yes.
+  const deny = [...(role.tools?.deny ?? [])];
+  if (role.allowSubagents !== true && role.tools?.allow?.includes("subagent") !== true && !deny.includes("subagent")) deny.push("subagent");
+  if (deny.length) args.push("--exclude-tools", deny.join(","));
   if (role.skills === false) args.push("--no-skills");
   else if (Array.isArray(role.skills)) {
     // A list means "only these": discovery off, then each path loaded explicitly. Paths pass through

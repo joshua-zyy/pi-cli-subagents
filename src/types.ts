@@ -38,6 +38,8 @@ export interface Role {
   skills?: boolean | string[];
   /** false disables MCP for this Pi role; other backends have no switch and reject it. */
   mcp?: boolean;
+  /** Omitted or false keeps this child from spawning subagents; true allows it. */
+  allowSubagents?: boolean;
 }
 
 // An argv launch, not a shell command. Injectable for protocol tests.

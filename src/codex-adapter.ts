@@ -36,6 +36,11 @@ type Approval = { id: string; rpcId?: string | number; threadId: string; turnId:
   mcp?: { questionId?: string; item: RecordValue }; resolved?: () => void; rejected?: (error: Error) => void };
 
 /** One worker owns one app-server process and one thread at a time. */
+/** Delegation must not amplify itself: codex keeps its whole collaboration family only when asked. */
+export function subagentArgs(role: { allowSubagents?: boolean }): string[] {
+  return role.allowSubagents === true ? [] : ["-c", "agents.enabled=false"];
+}
+
 export class CodexAdapter implements CliAdapter {
   readonly resident = true;
   readonly child: ChildProcessWithoutNullStreams;
@@ -76,7 +81,7 @@ export class CodexAdapter implements CliAdapter {
     const { defaultModeQuestions } = options.spec.role;
     if (defaultModeQuestions !== undefined && typeof defaultModeQuestions !== "boolean") throw new Error("Codex defaultModeQuestions must be a boolean");
     this.timeout = options.requestTimeout ?? 30_000;
-    const questionArgs = defaultModeQuestions === undefined ? [] : ["-c", `features.default_mode_request_user_input=${defaultModeQuestions}`];
+    const questionArgs = [...(defaultModeQuestions === undefined ? [] : ["-c", `features.default_mode_request_user_input=${defaultModeQuestions}`]), ...subagentArgs(options.spec.role)];
     const fail = (error: Error) => this.fail(error);
     this.log = new LogWriter(options.logFile, (error) => { fail(error); void this.kill(); });
     this.child = spawn(options.spec.launch.command, [...options.spec.launch.args, ...questionArgs, "app-server", "--listen", "stdio://"], {

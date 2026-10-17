@@ -93,6 +93,11 @@ export function inspectClaudeSession(spec: AgentSpec, session: ClaudeSession): s
 
 type Approval = { id: string; requestId: string; toolId: string; input: Json; messageId: string; attempted: boolean; fields?: QuestionField[] };
 /** Native stream-json stays inside this adapter; the worker retains ownership and audit. */
+/** Delegation must not amplify itself. --disallowedTools takes names, and the spawn tool is Agent. */
+export function subagentArgs(role: { allowSubagents?: boolean }): string[] {
+  return role.allowSubagents === true ? [] : ["--disallowedTools", "Agent"];
+}
+
 export class ClaudeAdapter implements CliAdapter {
   readonly resident = true;
   private runId?: string;
@@ -145,7 +150,7 @@ export class ClaudeAdapter implements CliAdapter {
     this.child = spawn(spec.launch.command, [...spec.launch.args, "-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
       "--include-partial-messages", "--replay-user-messages", "--permission-prompt-tool", "stdio", "--await-initialize",
       session ? "--resume" : "--session-id", this.session.sessionId, ...(spec.role.model ? ["--model", spec.role.model] : []),
-      ...(spec.role.thinking ? ["--effort", spec.role.thinking] : []), ...(spec.role.mode ? ["--permission-mode", spec.role.mode] : [])], {
+      ...(spec.role.thinking ? ["--effort", spec.role.thinking] : []), ...(spec.role.mode ? ["--permission-mode", spec.role.mode] : []), ...subagentArgs(spec.role)], {
       cwd: spec.cwd, env, stdio: ["pipe", "pipe", "pipe"], shell: false, windowsHide: true, detached: process.platform !== "win32",
     });
     this.child.stderr.pipe(this.log.errorStream);

@@ -47,7 +47,7 @@ export const CODEX_MODE_PRESETS: Record<CodexMode, { approvalPolicy: "untrusted"
   "full-access": { approvalPolicy: "never", sandbox: "danger-full-access" },
 };
 export const CODEX_MODES = Object.keys(CODEX_MODE_PRESETS) as CodexMode[];
-export const ROLE_FIELDS = ["description", "instructions", "provider", "model", "thinking", "cli", "effort", "mode", "defaultModeQuestions", "tools", "skills", "mcp"] as const;
+export const ROLE_FIELDS = ["description", "instructions", "provider", "model", "thinking", "cli", "effort", "mode", "defaultModeQuestions", "tools", "skills", "mcp", "allowSubagents"] as const;
 
 const levels = new Set<Thinking>(PI_THINKING_LEVELS);
 const claudeLevels = new Set<Thinking>(CLAUDE_THINKING_LEVELS);
@@ -58,7 +58,10 @@ const claudeLevels = new Set<Thinking>(CLAUDE_THINKING_LEVELS);
  * keeping every tool.
  */
 export function toolTrimError(cli: Cli | undefined, tools: unknown): string | undefined {
-  if (cli !== undefined && cli !== "pi") return "tools requires a Pi role: Codex and Claude expose no tool allow/deny list, so the role would silently keep every tool";
+  // Claude 2.1.296 does expose --allowedTools/--disallowedTools, but this extension does not wire them yet;
+  // saying "no list exists" would be false, and accepting the field would silently keep every tool.
+  if (cli === "codex") return "tools requires a Pi role: Codex exposes no tool allow/deny list, so the role would silently keep every tool";
+  if (cli === "claude") return "tools is not wired for Claude yet (its --allowedTools/--disallowedTools are unverified here), so the role would silently keep every tool";
   if (!tools || typeof tools !== "object" || Array.isArray(tools)) return "tools must be an object with allow and/or deny";
   const unknown = Object.keys(tools).filter((key) => key !== "allow" && key !== "deny");
   if (unknown.length) return `tools contains unknown fields: ${unknown.join(", ")}`;
@@ -131,6 +134,7 @@ export function validateRoleFile(value: unknown, source: string): Record<string,
       const invalid = mcpError(role.cli as Cli | undefined, role.mcp);
       if (invalid) throw new Error(`${source}: ${name} ${invalid}`);
     }
+    if (role.allowSubagents !== undefined && typeof role.allowSubagents !== "boolean") throw new Error(`${source}: ${name}.allowSubagents must be a boolean`);
     if (role.cli === "claude" && role.provider) throw new Error(`${source}: ${name} Claude role does not accept a Pi provider`);
     if (role.cli === "claude" && role.thinking !== undefined && !claudeLevels.has(role.thinking as Thinking)) throw new Error(`${source}: ${name} Claude thinking must be low, medium, high, xhigh or max`);
     if (role.cli === "codex" && (role.provider || role.thinking)) throw new Error(`${source}: ${name} Codex role does not accept Pi provider/thinking fields`);
@@ -152,6 +156,7 @@ export function validateRoleFile(value: unknown, source: string): Record<string,
       ...(role.tools !== undefined ? { tools: role.tools as RoleToolTrim } : {}),
       ...(role.skills !== undefined ? { skills: role.skills as boolean | string[] } : {}),
       ...(role.mcp !== undefined ? { mcp: role.mcp as boolean } : {}),
+      ...(role.allowSubagents !== undefined ? { allowSubagents: role.allowSubagents as boolean } : {}),
     };
   }
   return roles;
