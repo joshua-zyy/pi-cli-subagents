@@ -36,6 +36,22 @@ export function occupiesRuntime(view: Pick<AgentView, "phase" | "runtimeClosed">
   return !(view.phase === "closed" && view.runtimeClosed === true);
 }
 
+/**
+ * Count the reservations that the disk still cannot account for, dropping those whose runtime is now
+ * visible: a reservation covers only that window, and counting a visible runtime twice would refuse
+ * admissions while the cap still has room. Returns how many reservations under `prefix` remain.
+ */
+export function pruneVisibleReservations(reservations: Set<string>, prefix: string, visibleIds: Iterable<string>): number {
+  const visible = new Set(visibleIds);
+  let pending = 0;
+  for (const key of [...reservations]) {
+    if (!key.startsWith(prefix)) continue;
+    if (visible.has(key.slice(prefix.length))) reservations.delete(key);
+    else pending++;
+  }
+  return pending;
+}
+
 const idPattern = /^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/;
 /** Enough recent assignments to choose a reusable instance without pasting a whole work history. */
 const HISTORY_LIMIT = 5;
@@ -248,11 +264,7 @@ export class AgentManager {
     if (cap === undefined) return;
     const prefix = `${this.root}\0`;
     const occupied = this.list().filter(occupiesRuntime);
-    // A reservation covers only the window before its runtime is visible. Once the record itself shows
-    // an occupied runtime, keeping the reservation would count that instance twice and refuse work that
-    // still fits, so the reservation is dropped as soon as the record takes over.
-    for (const view of occupied) admitting.delete(prefix + view.id);
-    const pending = [...admitting].filter((key) => key.startsWith(prefix)).length;
+    const pending = pruneVisibleReservations(admitting, prefix, occupied.map((view) => view.id));
     const total = occupied.length + pending;
     if (total < cap) { admitting.add(prefix + id); return; }
     throw new Error(`${total} of ${cap} managed runtimes are already occupied in this parent session (PI_CLI_SUBAGENTS_MAX_RUNTIMES); a runtime keeps its slot until its release is confirmed. Interrupt a running child and then stop it, or wait for it to finish, before starting or resuming another.`);
