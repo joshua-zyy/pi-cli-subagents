@@ -109,5 +109,7 @@ test('spawning a non-Pi role with a Pi-only field refuses before creating anythi
     /skills requires a Pi role/);
   await assert.rejects(manager.spawn('worker', { ...defaultRoles.worker, cli: 'codex', mcp: false }, cwd, 'DO NOT START'),
     /mcp requires a Pi role/);
+  await assert.rejects(manager.spawn('worker', { ...defaultRoles.worker, allowSubagents: 'yes' }, cwd, 'DO NOT START'),
+    /allowSubagents must be a boolean/, 'spawn validates the shape too, not just the role loader');
   assert.equal(fs.existsSync(manager.root), false, 'a refused role must not create even the instance root');
 });

@@ -285,6 +285,8 @@ export class AgentManager {
     if (role.tools !== undefined) { const invalid = toolTrimError(role.cli, role.tools); if (invalid) throw new Error(invalid); }
     if (role.skills !== undefined) { const invalid = skillsError(role.cli, role.skills); if (invalid) throw new Error(invalid); }
     if (role.mcp !== undefined) { const invalid = mcpError(role.cli, role.mcp); if (invalid) throw new Error(invalid); }
+    // Same shape rule as the role loader: a non-boolean here would silently mean "deny", so refuse it.
+    if (role.allowSubagents !== undefined && typeof role.allowSubagents !== "boolean") throw new Error("allowSubagents must be a boolean");
     const id = randomUUID(), dir = this.directory(id);
     this.admit(id);
     const start = async (directory: string, baseline?: AgentSpec["workspaceBaseline"], notice?: string): Promise<AgentView> => {

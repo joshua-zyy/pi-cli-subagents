@@ -327,7 +327,7 @@ Next step: reload the extension to inspect the tools and role catalog; real coll
 | 后端 | 下发 | 证据 |
 | --- | --- | --- |
 | pi | `--exclude-tools subagent`（与角色自己的 `deny` 合并为一个列表，不另起 flag） | `pi --help`；denylist 作用于所有工具 |
-| codex | `-c agents.enabled=false` | 真机：六个 `collaboration.*` 工具全部消失，模型自报从 `SPAWN-AVAILABLE` 转为 `SPAWN-UNAVAILABLE` |
+| codex | `-c agents.enabled=false` | 真机工具清单对比：六个 `collaboration.*` 工具全部消失（**主要依据**）；同 prompt 下模型自报也从 `SPAWN-AVAILABLE` 转为 `SPAWN-UNAVAILABLE`（**仅作旁证**，自报不作为独立证据） |
 | claude | `--disallowedTools Agent` | 真机：`Agent` 工具从清单消失（prompt 必须走 stdin，否则会被当成工具名） |
 
 - **例外**：pi 角色若在 `tools.allow` 里显式写了 `subagent`，视为显式允许（不再追加拒绝）；若 `tools.deny` 已有 `subagent`，不重复追加。
