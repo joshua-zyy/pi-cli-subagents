@@ -49,11 +49,17 @@ export async function inspectPiSession(session: SessionHandle): Promise<void> {
 }
 
 /** Pi's native trimming flags. Validation already refused this field for Codex and Claude roles. */
-export function trimArgs(role: { tools?: RoleToolTrim; skills?: boolean; mcp?: boolean }): string[] {
+export function trimArgs(role: { tools?: RoleToolTrim; skills?: boolean | string[]; mcp?: boolean }): string[] {
   const args: string[] = [];
   if (role.tools?.allow?.length) args.push("--tools", role.tools.allow.join(","));
   if (role.tools?.deny?.length) args.push("--exclude-tools", role.tools.deny.join(","));
   if (role.skills === false) args.push("--no-skills");
+  else if (Array.isArray(role.skills)) {
+    // A list means "only these": discovery off, then each path loaded explicitly. Paths pass through
+    // unchanged, so a relative one resolves against the subagent cwd, exactly as pi would.
+    args.push("--no-skills");
+    for (const skill of role.skills) args.push("--skill", skill);
+  }
   if (role.mcp === false) args.push("--no-mcp");
   return args;
 }
