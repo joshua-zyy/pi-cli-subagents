@@ -247,10 +247,15 @@ export class AgentManager {
     const cap = this.maxRuntimes();
     if (cap === undefined) return;
     const prefix = `${this.root}\0`;
+    const occupied = this.list().filter(occupiesRuntime);
+    // A reservation covers only the window before its runtime is visible. Once the record itself shows
+    // an occupied runtime, keeping the reservation would count that instance twice and refuse work that
+    // still fits, so the reservation is dropped as soon as the record takes over.
+    for (const view of occupied) admitting.delete(prefix + view.id);
     const pending = [...admitting].filter((key) => key.startsWith(prefix)).length;
-    const occupied = this.list().filter(occupiesRuntime).length + pending;
-    if (occupied < cap) { admitting.add(prefix + id); return; }
-    throw new Error(`${occupied} of ${cap} managed runtimes are already occupied in this parent session (PI_CLI_SUBAGENTS_MAX_RUNTIMES); a runtime keeps its slot until its release is confirmed. Interrupt a running child and then stop it, or wait for it to finish, before starting or resuming another.`);
+    const total = occupied.length + pending;
+    if (total < cap) { admitting.add(prefix + id); return; }
+    throw new Error(`${total} of ${cap} managed runtimes are already occupied in this parent session (PI_CLI_SUBAGENTS_MAX_RUNTIMES); a runtime keeps its slot until its release is confirmed. Interrupt a running child and then stop it, or wait for it to finish, before starting or resuming another.`);
   }
 
   /** Only a confirmed release frees a reservation; a failed start must not leak it. */
