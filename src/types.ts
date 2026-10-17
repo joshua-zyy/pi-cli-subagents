@@ -168,14 +168,45 @@ export interface Report {
 }
 /** Evidence for this operation response only; never persisted in state or reports. */
 export interface OperationReceipt {
-  operation: "start" | "send" | "interrupt" | "stop";
-  status: "accepted" | "queued" | "unconfirmed" | "settled" | "released" | "not_running";
+  operation: "start" | "send" | "interrupt" | "stop" | "reclaim";
+  status: "accepted" | "queued" | "unconfirmed" | "settled" | "released" | "not_running" | "reclaimed";
   runId: string;
   runtimeId?: string;
+  /** reclaim only: both dimensions no longer count this runtime. */
+  accounting?: { active: boolean; resident: boolean };
+  /** reclaim only: what was observed, by which criterion, so the claim is auditable. */
+  evidence?: ReclaimEvidence;
+  /** reclaim only: always false — a reclaim is a parent-side accounting claim, not a native release. */
+  nativeReleaseConfirmed?: false;
+  /** reclaim only: the instance is not resumable in this version, even though nothing was released natively. */
+  continuation?: "blocked";
+}
+
+/** Absence is only claimed on an explicit OS answer; unknown, invalid and query failures are not absence. */
+export interface ReclaimEvidence {
+  worker: { pid: number; absent: true; criterion: "ESRCH" };
+  cli: { pid: number; absent: true; criterion: "ESRCH" };
+}
+
+/**
+ * A parent-side accounting reclaim for exactly one runtime. It is written once, kept next to the
+ * runtime it names, and never replaces the worker's own execution state.
+ */
+export interface ReclaimRecord {
+  version: 1;
+  parentFile: string;
+  id: string;
+  runtimeId: string;
+  observedAt: number;
+  evidence: ReclaimEvidence;
+  nativeReleaseConfirmed: false;
+  continuation: "blocked";
 }
 export type ControlResult = AgentState & { receipt?: OperationReceipt };
 export interface AgentView extends AgentState {
   receipt?: OperationReceipt;
+  /** A valid reclaim names this instance's current runtime: its accounting no longer counts. */
+  reclaimed?: { at: number; evidence: ReclaimEvidence; nativeReleaseConfirmed: false; continuation: "blocked" };
   cli?: Cli;
   role: string;
   cwd: string;

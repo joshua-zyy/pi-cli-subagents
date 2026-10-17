@@ -10,7 +10,7 @@ The current scope covers only CLI subagent dispatch and management by the parent
 
 | Tool | Operations | Existing capability source |
 |---|---|---|
-| `subagent` | `start` / `send` / `interrupt` / `stop` / `workspace_create` / `workspace_integrate` | Instance lifecycle and existing `WorkspaceStore.create` / `integrate` |
+| `subagent` | `start` / `send` / `interrupt` / `stop` / `reclaim` / `workspace_create` / `workspace_integrate` | Instance lifecycle and existing `WorkspaceStore.create` / `integrate` |
 | `subagent_query` | `list` / `get` / `result` / `activity` | Existing inventory/result reads plus bounded projected history |
 | `subagent_reply` | Answer one specific request; no action required | `respond_to_permission` |
 
@@ -28,6 +28,7 @@ The following is a logical parameter contract, not the final TypeBox/JSON Schema
 | `send` | `id`, `message` | `mode`, `baseline`, `includeUncommitted` | Deliver instructions while running, or begin a new run in the same native session after completion |
 | `interrupt` | `id` | None | End only the captured current turn, retaining a usable runtime; unsupported backends reject |
 | `stop` | `id` | None | Release native resources of an instance with no accepted turn in flight; a turn in flight must be interrupted first, because releasing would discard it. Retains the native session and history; do not delete files or roll back changes |
+| `reclaim` | `id`, `runtimeId` | None | Free the **accounting** of one unreachable runtime whose recorded worker and CLI are both reliably gone. Not a native release: it confirms no process exit, leaves `state.json` and `owner.lock` untouched, and does not make the instance resumable. Refuses when either pid exists or its absence cannot be established (only an `ESRCH` observation counts), when ownership conflicts, when `cliPid` is missing, or when the named runtime is not the recorded one |
 | `workspace_create` | None | `includeUncommitted: { reason }` | 从当前 Pi cwd 所属仓库的已提交 HEAD 创建托管工作树；见 §5 |
 | `workspace_integrate` | `workspace` | None | 向原父目录集成该工作区的待集成改动；见 §5 |
 
@@ -85,6 +86,7 @@ The existing `AgentState.accepted` describes receipt of the run's initial task, 
 - **旧变量**：`PI_CLI_SUBAGENTS_MAX_RUNTIMES` 继续表示 **resident**；它的 `0` 由非法变为合法。旧变量与新 `MAX_RESIDENT` 同时出现即**拒绝**（即使数值相同），避免隐含优先级；旧变量与新 `MAX_ACTIVE` 可以同时配置。
 - **破坏性变更（必须显式声明）**：旧合同为「变量缺失 = 不启用上限」，现改为「未配置即 4 / 12」。要恢复旧行为须同时设置 `MAX_ACTIVE=0` 与 `MAX_RESIDENT=0`。
 - **占用口径（resident）**：runtime 从创建那一刻起占一个名额，直到**释放被确认**（`phase=closed` 且 `runtimeClosed=true`）才归还。`starting/running/waiting/stopping/idle` 与带终态的 `completed/failed/stopped` 全占；`closed` 但缺 `runtimeClosed` 的未确认释放**仍占**；记录不可读（`unreachable`）**仍占**。
+- **唯一例外：`reclaim`**。不可达 runtime 只有在**显式** `reclaim` 且 worker 与 CLI 两个记录 PID 都得到 `ESRCH` 观察后，才停止计入 active/resident。凭据写在实例目录的 `reclaims/<runtimeId>.json`（一 runtime 一份，**创建后不覆盖**；重复调用返回原证据）。生效条件（同时满足）：记录内容绑定当前父会话、实例与**同一个** `runtimeId`；证据结构完整且判据为 `ESRCH`；`owner.lock` **不存在**或 runtimeId 与 pid 均与记录一致。以下情形**回收记录不生效**且该 runtime 继续占位：当前 `owner.lock` 属于另一个 runtime（所有权冲突）、`phase` 不是 `unreachable`、带过期或不可解析内容。回收不影响未结算的准入预留，也不解除 workspace 写入排他或允许恢复原会话。
 - **计数来源**：每次准入都从磁盘重算（`manager.list()`），因此跨 controller / 跨工具调用一致。
 - **准入点**（三条）：新建实例（`start`）、对**已释放实例**的 `send` 恢复、以及**对 `idle` 实例开启新 run 的 `send`**。最后一条只判 active、不判 resident——该实例已经占着 runtime 名额，新 run 不新增 runtime。
 - **并发**：每次准入成功先做一次**进程内轮次预留**，直到该轮次的 runId 对磁盘可见；预留按「实例 + 前一个 runId」判定撤销，所以「实例已在列表中可见」本身**不会**撤销预留（`idle` 实例天然可见）。无法确认结果（超时等）不因 `finally` 就归还名额，须等磁盘出现该轮次或该实例可被证明未启动。

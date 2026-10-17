@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, writeFileSync, renameSync, readdirSync, unlinkSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync, renameSync, readdirSync, unlinkSync, linkSync } from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 
@@ -24,6 +24,39 @@ export function writeJson(file: string, data: unknown): void {
     }
   }
 }
+/**
+ * True only when the OS answers ESRCH for this pid. An invalid pid, a permission error or an
+ * unsupported query is "unknown", never "absent": a reclaim must not read unknown as dead.
+ */
+export function processAbsent(pid: number | undefined): boolean {
+  if (!Number.isInteger(pid) || !pid || pid <= 0) return false;
+  try { process.kill(pid, 0); return false; }
+  catch (error) { return (error as NodeJS.ErrnoException).code === "ESRCH"; }
+}
+
+/**
+ * Create-only write: the first reclaim record for a runtime keeps its evidence, so a late or
+ * concurrent attempt cannot overwrite the observation that made the claim valid.
+ */
+export function writeJsonExclusive(file: string, data: unknown): boolean {
+  mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+  const text = `${JSON.stringify(data, null, 2)}\n`;
+  const temporary = `${file}.${randomUUID()}.tmp`;
+  writeFileSync(temporary, text, { mode: 0o600 });
+  try {
+    // link() publishes content and name in one step and fails when the target exists; rename() would overwrite.
+    linkSync(temporary, file);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "EEXIST") return false;
+    // Filesystems without hard links fall back to an exclusive create; a torn write stays invalid on read.
+    try { writeFileSync(file, text, { flag: "wx", mode: 0o600 }); return true; }
+    catch (fallback) { if ((fallback as NodeJS.ErrnoException).code === "EEXIST") return false; throw fallback; }
+  } finally {
+    try { unlinkSync(temporary); } catch { /* published through the hard link, or already removed */ }
+  }
+}
+
 export function directories(root: string): string[] {
   try { return readdirSync(root, { withFileTypes: true }).filter((item) => item.isDirectory()).map((item) => item.name); }
   catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return []; throw error; }

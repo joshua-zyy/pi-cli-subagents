@@ -58,7 +58,7 @@ four above are replaceable rather than a fixed hierarchy.
 
 | Tool | Use |
 | --- | --- |
-| `subagent` | `start`, `send`, `interrupt` and `stop` an instance; `workspace_create` and `workspace_integrate` for managed worktrees |
+| `subagent` | `start`, `send`, `interrupt`, `stop` and `reclaim` an instance; `workspace_create` and `workspace_integrate` for managed worktrees |
 | `subagent_query` | Read-only `list`, `get`, `result` and `activity` over this session's instances |
 | `subagent_reply` | Answer one pending task question, or review one permission request within the user's authorization |
 
@@ -76,6 +76,12 @@ Pi children can ask the parent a single task question through `subagent_ask_pare
   and refuses while a turn it already accepted is still in flight: releasing that runtime would
   discard the turn, so `interrupt` it first. Whether a backend stays resident between turns is
   reported per instance rather than promised uniformly.
+- **A dead worker can leave accounting behind.** If a worker dies and its runtime becomes
+  `unreachable`, that runtime keeps occupying a slot until it is proven gone. `reclaim` frees the
+  slot only when both the recorded worker and CLI process no longer exist (an explicit `ESRCH`
+  observation, never an assumption); it confirms **no** native release, leaves the execution record
+  and lock untouched, and does not make the instance resumable. Refusals name the surviving process
+  and the files to inspect instead of suggesting a retry loop.
 - **Answers are not permissions.** A reply supplies task context, or reviews one request. It never
   grants a session-wide or persistent permission.
 - **Worktrees isolate; they are not a sandbox.** `workspace_create` makes a detached worktree from

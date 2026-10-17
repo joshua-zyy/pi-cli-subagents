@@ -105,6 +105,7 @@ function receiptText(state: AgentView): string {
     case "queued": return "Input queued by the native CLI; model consumption and execution are not confirmed.";
     case "settled": return "The captured turn has ended; its actual outcome is retained. The runtime was not released.";
     case "released": return "Native processes released; the original session, history and completed results are retained.";
+    case "reclaimed": return "Accounting reclaimed for this runtime only: both dimensions no longer count it. No native release was confirmed, the lock and history are untouched, and this instance cannot be continued.";
     case "not_running": return "No captured active turn to interrupt; pending startup is not cancelled. History is retained.";
     default: return "Operation confirmation is unconfirmed. Inspect the instance before retrying; work may already have run.";
   }
@@ -324,14 +325,15 @@ export default function extension(pi: ExtensionAPI): void {
 
   const registerSubagent = (catalog: string): void => pi.registerTool({
     name: "subagent", label: "CLI subagent",
-    description: `Start or continue a persistent CLI subagent. send keeps the same native session: idle starts a new run; closed resumes the original session. interrupt ends the captured run without releasing its runtime; Claude also cancels that run's queued inputs. stop releases a runtime that has no accepted turn in flight; while a turn is in flight it refuses, because releasing would discard that turn — interrupt it first. Sessions, history and results are retained. Answer pending interactions with subagent_reply.\n\nworkspace_create/workspace_integrate manage detached Git worktrees of the parent repository or of the repository at cwd; read the delegate-cli-agents workspaces reference before either. Inherit ALL uncommitted parent changes only with explicit authorization.\n\nGive the goal, necessary context, authorized scope and acceptance criteria; a new instance has not seen this conversation. Let the child choose its approach unless required behavior constrains it.\n\nReports return automatically. Do not sleep or poll for completion; continue independent work or end this turn. Receipts do not prove execution or success. Inspect uncertain outcomes before retrying; do not bypass refusals with replacement instances or edited records.\n\n${catalog}`,
+    description: `Start or continue a persistent CLI subagent. send keeps the same native session: idle starts a new run; closed resumes the original session. interrupt ends the captured run without releasing its runtime; Claude also cancels that run's queued inputs. stop releases a runtime that has no accepted turn in flight; while a turn is in flight it refuses, because releasing would discard that turn — interrupt it first. reclaim frees the accounting of one unreachable runtime whose recorded worker and CLI are both reliably gone: it confirms no native release, leaves the lock and history untouched, and does not make the instance resumable. Sessions, history and results are retained. Answer pending interactions with subagent_reply.\n\nworkspace_create/workspace_integrate manage detached Git worktrees of the parent repository or of the repository at cwd; read the delegate-cli-agents workspaces reference before either. Inherit ALL uncommitted parent changes only with explicit authorization.\n\nGive the goal, necessary context, authorized scope and acceptance criteria; a new instance has not seen this conversation. Let the child choose its approach unless required behavior constrains it.\n\nReports return automatically. Do not sleep or poll for completion; continue independent work or end this turn. Receipts do not prove execution or success. Inspect uncertain outcomes before retrying; do not bypass refusals with replacement instances or edited records.\n\n${catalog}`,
     parameters: Type.Object({
-      action: Type.Union([Type.Literal("start"), Type.Literal("send"), Type.Literal("interrupt"), Type.Literal("stop"), Type.Literal("workspace_create"), Type.Literal("workspace_integrate")], { description: "interrupt requires native captured-turn confirmation; unsupported capabilities reject. send to a stopping instance waits for release before attempting original-session resume; uncertain release rejects." }),
+      action: Type.Union([Type.Literal("start"), Type.Literal("send"), Type.Literal("interrupt"), Type.Literal("stop"), Type.Literal("reclaim"), Type.Literal("workspace_create"), Type.Literal("workspace_integrate")], { description: "interrupt requires native captured-turn confirmation; unsupported capabilities reject. send to a stopping instance waits for release before attempting original-session resume; uncertain release rejects. reclaim frees the accounting of one unreachable runtime whose recorded worker and CLI are both reliably gone; it never claims a native release and never makes the instance resumable." }),
       role: Type.Optional(Type.String({ description: "start only, required: configured role name" })),
       task: Type.Optional(Type.String({ description: "start only, required: task and authorized scope" })),
       cwd: Type.Optional(Type.String({ description: "start/workspace_create: absolute, or relative to the parent cwd; start: mutually exclusive with workspace" })),
       workspace: Type.Optional(Type.String({ description: "start/workspace_integrate: managed workspace ID; required for workspace_integrate; start excludes cwd" })),
-      id: Type.Optional(Type.String({ description: "send/interrupt/stop only, required: existing instance ID" })),
+      id: Type.Optional(Type.String({ description: "send/interrupt/stop/reclaim only, required: existing instance ID" })),
+      runtimeId: Type.Optional(Type.String({ description: "reclaim only, required: the exact runtime ID reported by subagent_query get; a different runtime is refused so a retry cannot silently move to a newer owner" })),
       message: Type.Optional(Type.String({ description: "send only, required: follow-up goal, new context and changed constraints; repeat the full task only when needed" })),
       mode: Type.Optional(Type.Union([Type.Literal("steer"), Type.Literal("followUp")], { description: "send only, defaults to steer. Running Pi: steer supplies input before a subsequent model request without cancelling the in-flight tool; followUp waits until the current execution has no more tool calls. Running Codex supports steer only. Claude maps steer to non-aborting next input and followUp to later input; native receipt capabilities are required. This selects child input delivery, not parent report delivery." })),
       baseline: Type.Optional(Type.Union([Type.Literal("keep"), Type.Literal("sync")], { description: "managed-workspace send only, required when a changed baseline needs acknowledgement. keep uses current workspace files; it does not restore remembered files. sync updates from the parent, refuses active, staged or unintegrated work and other runtime owners, and closes the target idle runtime before preflight; a later refusal may leave it closed. Child session memory may be stale after either choice." })),
@@ -367,7 +369,13 @@ ${receiptText(state)}`;
         if (hasFailure(state)) throw new Error(`${result}\nInspect the instance before retrying; work may already have run.`);
         return content(state.receipt?.status === "accepted" || state.receipt?.status === "queued" ? `${result}\n${REPORT_GUIDANCE}` : result);
       }
-      if (args.action !== "stop" && args.action !== "interrupt") throw new Error("Unknown subagent action; use start, send, interrupt, stop, workspace_create or workspace_integrate");
+      if (args.action === "reclaim") {
+        checkFields(args, ["action", "id", "runtimeId"]);
+        const state = await parentManager(ctx, launch).reclaim(args.id!, args.runtimeId!);
+        return content(`${receiptText(state)}
+${view(state)}`);
+      }
+      if (args.action !== "stop" && args.action !== "interrupt") throw new Error("Unknown subagent action; use start, send, interrupt, stop, reclaim, workspace_create or workspace_integrate");
       checkFields(args, ["action", "id"]);
       const manager = parentManager(ctx, launch);
       if (args.action === "stop") {

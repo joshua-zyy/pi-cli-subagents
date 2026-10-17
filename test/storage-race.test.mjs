@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
-import { writeJson } from '../dist/storage.js';
+import { writeJson, writeJsonExclusive } from '../dist/storage.js';
 import { tempDir } from './helpers/tmp.mjs';
 
 test('atomic writes survive a concurrent reader instead of losing state to a Windows rename conflict', { timeout: 30_000 }, async (t) => {
@@ -20,4 +20,13 @@ test('atomic writes survive a concurrent reader instead of losing state to a Win
   assert.equal(failures, 0, 'a concurrent read must not lose a state write');
   assert.equal(JSON.parse(fs.readFileSync(file, 'utf8')).index, 299);
   assert.deepEqual(fs.readdirSync(path.dirname(file)), ['state.json'], 'no temporary files may be left behind');
+});
+
+test('an exclusive claim is created once and never overwritten', { timeout: 15000 }, async () => {
+  const dir = tempDir('claim-create'), file = path.join(dir, 'claims', 'runtime.json');
+  assert.equal(writeJsonExclusive(file, { at: 1, evidence: 'first' }), true);
+  const first = fs.readFileSync(file, 'utf8');
+  assert.equal(writeJsonExclusive(file, { at: 2, evidence: 'second' }), false, 'the second create must report the existing claim');
+  assert.equal(fs.readFileSync(file, 'utf8'), first, 'the first observation is the one that stays');
+  assert.deepEqual(fs.readdirSync(path.dirname(file)), ['runtime.json'], 'no temporary files may be left behind');
 });
