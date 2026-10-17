@@ -508,3 +508,15 @@ test('a released record whose runtime is still owned keeps its slot', { timeout:
     await complete(manager, next.id);
   });
 });
+
+test('a start that fails before creating anything returns the slot', { timeout: 30_000 }, async t => {
+  const { cwd, manager } = setup(t);
+  await withCap('1', async () => {
+    // This cwd check runs before the instance directory exists, so the failure leaves nothing on disk.
+    const file = path.join(cwd, 'not-a-directory.txt');
+    fs.writeFileSync(file, 'x');
+    await assert.rejects(manager.spawn('worker', defaultRoles.worker, file, 'DO NOT START'), /cwd must be an existing directory/);
+    const next = await manager.spawn('worker', defaultRoles.worker, cwd, 'REMEMBER after a failed start');
+    await complete(manager, next.id);
+  });
+});
