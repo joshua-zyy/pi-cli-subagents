@@ -72,7 +72,17 @@ Do not introduce an ambiguous `success: true` that collapses all states:
 
 The existing `AgentState.accepted` describes receipt of the run's initial task, not an independent receipt for every send. An existing true value cannot prove delivery of a new message, and false cannot prove that no prompt was written. Each operation returns a transient `receipt` with `operation`, `status`, affected `runId` and known `runtimeId`; it is not persisted into state/results or synthesized by queries. `accepted` requires the corresponding native acknowledgement; otherwise startup/legacy uncertainty is `unconfirmed`. Current adapters do not emit queue/injection claims merely from a delivery mode. `settled` confirms that the captured turn ended, including a natural-completion race; `not_running` confirms no captured active turn and does not cancel pending startup; `released` requires matching-runtime release proof. Errors retain known identity and no automatic retry. This follows the distinction between acceptance and applied notification in [Lody's pinned acknowledged-steer design](https://github.com/LodyAI/Lody/blob/6dc434952ab2e942291cc8392316bf760afbdaf0/apps/cli/src/agent/acknowledged-steer.ts), without importing ACP/Core or inventing an applied signal.
 
-### 2.3 Examples
+### 2.3 Runtime admission cap（`PI_CLI_SUBAGENTS_MAX_RUNTIMES`）
+
+一个父会话可以用环境变量 `PI_CLI_SUBAGENTS_MAX_RUNTIMES=<n>`（正整数）限定自己同时持有多少个**托管 runtime**；跨角色统一计数，作用域是这个父进程（不是机器级、不是全局）。
+
+- **占用口径**：runtime 从创建那一刻起占一个名额，直到**释放被确认**（`phase=closed` 且 `runtimeClosed=true`）才归还。具体：`starting/running/waiting/stopping/idle` 全占；`closed` 但缺 `runtimeClosed` 的未确认释放**仍占**；记录不可读（`unreachable`）**仍占**——unknown ownership 不能当作已释放。
+- **计数来源**：每次准入都从磁盘重算（`manager.list()`），因此**跨 controller/跨工具调用**都一致；不依赖某个 manager 对象的内存计数。
+- **准入点**：只有"新建占用"的两条路径——`subagent` 的 `start`（`spawn` 顶部，校验参数之后、建目录之前）与对**已释放实例**的 `send` 恢复。对 `starting/running/waiting/idle` 实例的 `send`（新 run 或 steer）**不新增占用**，不受此上限影响。
+- **拒绝语义**：**显式拒绝**，不排队、不抢占；拒绝发生在任何目录/进程/人工动作记录之前。错误消息给出 `占用数 of 上限` 与变量名，并提示可用动作（先 `interrupt` 再 `stop`，或等其完成）——不会建议不存在的 `keep`。
+- **未配置 / 非法值**：变量**缺失** = 不启用上限（与此前行为完全一致）；变量**存在但不是正整数**（含空字符串）= 显式报错并拒绝派发，避免"看着设了限其实没设"。
+
+### 2.4 Examples
 
 ```json
 {"action":"start","role":"implementer","task":"Complete the specified change","workspace":"<workspace-id>"}

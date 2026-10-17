@@ -18,6 +18,14 @@ import { directories, jsonFiles, processAlive, readJson, shorten, waitUntil, wri
 import type { AgentSpec, AgentState, AgentView, Control, ControlResult, Delivery, Endpoint, Launch, NativeSession, OperationReceipt, Report, Role, SessionHandle, StartRequest, TaskRun } from "./types.js";
 
 const workerFile = fileURLToPath(new URL("./worker.js", import.meta.url));
+
+/**
+ * A managed runtime keeps its admission slot until its release is confirmed: idle children still hold a
+ * resident process, a stopping one may still be winding down, and an unknown record may still own one.
+ */
+export function occupiesRuntime(view: Pick<AgentView, "phase" | "runtimeClosed">): boolean {
+  return !(view.phase === "closed" && view.runtimeClosed === true);
+}
 const idPattern = /^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/;
 /** Enough recent assignments to choose a reusable instance without pasting a whole work history. */
 const HISTORY_LIMIT = 5;
@@ -207,6 +215,29 @@ export class AgentManager {
     return [...new Set(logs)];
   }
 
+  /**
+   * One parent session, counted across roles: the cap exists so a parent cannot turn one delegation
+   * decision into an unbounded number of resident CLI processes. Unset keeps the previous behavior.
+   */
+  private maxRuntimes(): number | undefined {
+    const raw = process.env.PI_CLI_SUBAGENTS_MAX_RUNTIMES;
+    // Only an absent variable means "no cap"; a present but empty value must not read as unlimited.
+    if (raw === undefined) return undefined;
+    const value = Number(raw.trim());
+    if (!Number.isSafeInteger(value) || value < 1)
+      throw new Error(`PI_CLI_SUBAGENTS_MAX_RUNTIMES must be a positive integer; got ${JSON.stringify(raw)}. Refusing to dispatch so the limit is not silently ignored.`);
+    return value;
+  }
+
+  /** Refuse before anything is written or started; the count comes from disk so every controller agrees. */
+  private admit(): void {
+    const cap = this.maxRuntimes();
+    if (cap === undefined) return;
+    const occupied = this.list().filter(occupiesRuntime).length;
+    if (occupied < cap) return;
+    throw new Error(`${occupied} of ${cap} managed runtimes are already occupied in this parent session (PI_CLI_SUBAGENTS_MAX_RUNTIMES); a runtime keeps its slot until its release is confirmed. Interrupt a running child and then stop it, or wait for it to finish, before starting or resuming another.`);
+  }
+
   async spawn(roleName: string, role: Role, cwd: string, message: string, workspace?: string): Promise<AgentView> {
     if (!message.trim()) throw new Error("Task must not be empty");
     if (role.cli !== undefined && !["pi", "codex", "claude"].includes(role.cli)) throw new Error("Unsupported CLI");
@@ -216,6 +247,7 @@ export class AgentManager {
     if (role.cli === "codex" && (role.provider || role.thinking)) throw new Error("Codex role does not accept Pi provider/thinking fields");
     if (role.cli !== "codex" && role.effort) throw new Error("Codex effort requires cli: codex");
     if (role.mode !== undefined) { const invalid = modeError(role.cli, role.mode); if (invalid) throw new Error(invalid); }
+    this.admit();
     const id = randomUUID(), dir = this.directory(id);
     const start = async (directory: string, baseline?: AgentSpec["workspaceBaseline"], notice?: string): Promise<AgentView> => {
       directory = path.resolve(directory);
@@ -344,6 +376,8 @@ export class AgentManager {
       if (!session || session.cli !== (spec.cli ?? "pi")) throw new Error("No resumable original session; will not silently create a new session");
       if (session.cli === "codex" && session.codexHome !== spec.codexHome) throw new Error("Codex native home changed; refusing to resume a different session store");
       if (session.cli === "claude") inspectClaudeSession(spec, session);
+      // Resuming a released instance starts a new runtime, so it needs a free slot like spawn does.
+      this.admit();
       return this.start(id, prompt, session, "send");
     };
     try {

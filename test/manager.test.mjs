@@ -389,3 +389,81 @@ test('a resident runtime writes each run to its own raw log', { timeout: 30_000 
   assert.equal(fs.readFileSync(firstLog, 'utf8'), before, 'the first run log keeps its bytes');
   assert.equal(second.logFile, secondLog, 'the instance points at the current run log');
 });
+
+const capKey = 'PI_CLI_SUBAGENTS_MAX_RUNTIMES';
+/** Run one case with a specific cap; every case restores the inherited value. */
+const withCap = async (value, body) => {
+  const saved = process.env[capKey];
+  if (value === undefined) delete process.env[capKey]; else process.env[capKey] = value;
+  try { return await body(); } finally { if (saved === undefined) delete process.env[capKey]; else process.env[capKey] = saved; }
+};
+
+test('a full parent session refuses a new runtime without dispatching', { timeout: 30_000 }, async t => {
+  const { cwd, manager } = setup(t);
+  await withCap('1', async () => {
+    const first = await manager.spawn('worker', defaultRoles.worker, cwd, 'REMEMBER first');
+    await complete(manager, first.id);
+    await assert.rejects(manager.spawn('worker', defaultRoles.worker, cwd, 'DO NOT START'), (error) => {
+      assert.match(error.message, /1 of 1/, 'the refusal names the occupied slots and the cap');
+      assert.match(error.message, new RegExp(capKey), 'the refusal names the setting that produced the cap');
+      assert.doesNotMatch(error.message, /\bkeep\b/, 'the refusal must not suggest an action that does not exist');
+      return true;
+    });
+    assert.equal(manager.list().length, 1, 'a refused admission creates no instance directory or process');
+    // A confirmed release returns the slot to the same parent session.
+    await manager.close(first.id);
+    const second = await manager.spawn('worker', defaultRoles.worker, cwd, 'REMEMBER second');
+    await complete(manager, second.id);
+    assert.equal(manager.list().length, 2);
+  });
+});
+
+test('the cap counts runtimes another manager owns', { timeout: 30_000 }, async t => {
+  const { cwd, parent, manager } = setup(t);
+  // Another tool call constructs its own manager over the same root; the count must come from disk.
+  const other = new AgentManager(parent, launch);
+  await withCap('1', async () => {
+    const first = await manager.spawn('worker', defaultRoles.worker, cwd, 'REMEMBER owner');
+    await complete(manager, first.id);
+    await assert.rejects(other.spawn('worker', defaultRoles.worker, cwd, 'DO NOT START'), /1 of 1/);
+    await manager.close(first.id);
+    const second = await other.spawn('worker', defaultRoles.worker, cwd, 'REMEMBER after release');
+    await complete(manager, second.id);
+  });
+});
+
+test('a full session still steers existing children but cannot resume a released one', { timeout: 40_000 }, async t => {
+  const { cwd, manager } = setup(t);
+  await withCap('1', async () => {
+    const started = await manager.spawn('worker', defaultRoles.worker, cwd, 'REMEMBER released');
+    const released = await release(manager, started.id);
+    const occupied = await manager.spawn('worker', defaultRoles.worker, cwd, 'REMEMBER idle');
+    await complete(manager, occupied.id);
+    // A new run inside the resident runtime adds no occupancy, so the cap must not block it.
+    const run = await manager.send(occupied.id, 'REMEMBER second run');
+    assert.equal(run.id, occupied.id);
+    await complete(manager, occupied.id);
+    // Resuming the released instance would create a second runtime while the only slot is taken.
+    await assert.rejects(manager.send(released.id, 'RECALL'), /1 of 1/);
+    await manager.close(occupied.id);
+    const resumed = await manager.send(released.id, 'RECALL');
+    await complete(manager, resumed.id);
+    assert.equal(resumed.sessionId, released.sessionId, 'the resumed run keeps the original native session');
+  });
+});
+
+test('an invalid cap value refuses to dispatch instead of ignoring the limit', { timeout: 30_000 }, async t => {
+  const { cwd, manager } = setup(t);
+  for (const value of ['0', '-1', 'abc', '1.5', '  ']) {
+    await withCap(value, async () => {
+      await assert.rejects(manager.spawn('worker', defaultRoles.worker, cwd, 'DO NOT START'), new RegExp(capKey), `value ${JSON.stringify(value)} must be refused`);
+    });
+  }
+  assert.equal(manager.list().length, 0, 'a refused configuration creates no instance');
+  await withCap(undefined, async () => {
+    const first = await manager.spawn('worker', defaultRoles.worker, cwd, 'REMEMBER one');
+    const second = await manager.spawn('worker', defaultRoles.worker, cwd, 'REMEMBER two');
+    await complete(manager, first.id); await complete(manager, second.id);
+    assert.equal(manager.list().length, 2, 'without the setting the previous behavior is unchanged');
+  });
+});
