@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { AgentManager } from '../dist/manager.js';
-import { defaultRoles, skillsError, toolTrimError, validateRoleFile } from '../dist/roles.js';
+import { defaultRoles, mcpError, skillsError, toolTrimError, validateRoleFile } from '../dist/roles.js';
 import { trimArgs } from '../dist/pi-adapter.js';
 import { tempDir } from './helpers/tmp.mjs';
 
@@ -80,5 +80,39 @@ test('spawning a non-Pi role with skills refuses before creating anything', asyn
   const manager = new AgentManager(parent, launch);
   await assert.rejects(manager.spawn('worker', { ...defaultRoles.worker, cli: 'claude', skills: false }, cwd, 'DO NOT START'),
     /skills requires a Pi role/);
+  assert.equal(fs.existsSync(manager.root), false, 'a refused role must not create even the instance root');
+});
+
+test('a false mcp flag disables MCP and composes with the other switches', () => {
+  assert.deepEqual(trimArgs({ mcp: false }), ['--no-mcp']);
+  assert.deepEqual(trimArgs({ mcp: true }), [], 'true means inherit, so no flag is passed');
+  assert.deepEqual(trimArgs({ tools: { allow: ['read'] }, skills: false, mcp: false }),
+    ['--tools', 'read', '--no-skills', '--no-mcp'], 'all three switches append independently');
+});
+
+test('the mcp switch is Pi-only and boolean', () => {
+  assert.equal(mcpError(undefined, false), undefined);
+  assert.match(mcpError('codex', false), /mcp requires a Pi role/);
+  assert.match(mcpError('claude', false), /mcp requires a Pi role/);
+  assert.match(mcpError('pi', 'false'), /must be true or false/);
+  assert.match(mcpError('pi', 0), /must be true or false/);
+});
+
+test('the role file loader keeps mcp and refuses it for other backends', () => {
+  const roles = validateRoleFile({ worker: { description: 'd', instructions: 'i', mcp: false } }, 'probe');
+  assert.equal(roles.worker.mcp, false);
+  assert.throws(() => validateRoleFile({ worker: { description: 'd', instructions: 'i', mcp: false, cli: 'codex' } }, 'probe'),
+    /mcp requires a Pi role/);
+  assert.throws(() => validateRoleFile({ worker: { description: 'd', instructions: 'i', mcp: 'off' } }, 'probe'),
+    /must be true or false/);
+});
+
+test('spawning a non-Pi role with mcp refuses before creating anything', async () => {
+  const cwd = tempDir('mcp');
+  const parent = path.join(cwd, 'parent.jsonl');
+  fs.writeFileSync(parent, '{}\n');
+  const manager = new AgentManager(parent, launch);
+  await assert.rejects(manager.spawn('worker', { ...defaultRoles.worker, cli: 'codex', mcp: false }, cwd, 'DO NOT START'),
+    /mcp requires a Pi role/);
   assert.equal(fs.existsSync(manager.root), false, 'a refused role must not create even the instance root');
 });
