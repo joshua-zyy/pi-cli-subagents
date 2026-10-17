@@ -29,7 +29,7 @@ const admitting = new Map<string, Reservation>();
 let nextReservation = 0;
 
 /** One in-flight admission: the run it reserves, and the run the instance showed beforehand. */
-export interface Reservation { id: string; priorRunId?: string }
+export interface Reservation { id: string; priorRunId?: string; newRuntime: boolean }
 
 /** Steps that still execute: `stopping` is set before the CLI is asked to stop (worker.ts:95-107). */
 const ACTIVE_PHASES = new Set(["starting", "running", "waiting", "stopping"]);
@@ -82,19 +82,21 @@ export function occupiesRuntime(view: Pick<AgentView, "phase" | "runtimeClosed">
 }
 
 /**
- * Drop the reservations the disk can already account for, and return how many still count.
- * A new instance is accounted once it exists; a reused one only once a run it did not have is visible,
- * because an idle instance is always visible and would otherwise release its reservation immediately.
+ * Drop the reservations the disk can already account for, and report how many still count in each
+ * dimension. A new instance is accounted once it exists; a reused one only once a run it did not have
+ * is visible, because an idle instance is always visible and would otherwise release its reservation
+ * immediately. Only a reservation that creates a runtime holds a resident slot.
  */
-export function pruneVisibleReservations(reservations: Map<string, Reservation>, prefix: string, views: Iterable<Pick<AgentView, "id" | "runId">>): number {
+export function pruneVisibleReservations(reservations: Map<string, Reservation>, prefix: string, views: Iterable<Pick<AgentView, "id" | "runId">>): { active: number; resident: number } {
   const runById = new Map([...views].map((view) => [view.id, view.runId]));
-  let pending = 0;
+  let active = 0, resident = 0;
   for (const [token, reservation] of [...reservations]) {
     if (!token.startsWith(prefix)) continue;
-    if (runById.has(reservation.id) && runById.get(reservation.id) !== reservation.priorRunId) reservations.delete(token);
-    else pending++;
+    if (runById.has(reservation.id) && runById.get(reservation.id) !== reservation.priorRunId) { reservations.delete(token); continue; }
+    active++;
+    if (reservation.newRuntime) resident++;
   }
-  return pending;
+  return { active, resident };
 }
 
 const idPattern = /^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/;
@@ -307,20 +309,22 @@ export class AgentManager {
     for (const [token, reservation] of [...admitting]) if (reservation.id === id) admitting.delete(token);
     const pending = pruneVisibleReservations(admitting, prefix, views);
     const occupied = views.filter(occupiesRuntime);
-    const residentTotal = occupied.length + pending;
+    const residentTotal = occupied.length + pending.resident;
     if (newRuntime && resident !== undefined && residentTotal >= resident)
       throw new Error(`${residentTotal} of ${resident} managed runtimes are already occupied in this parent session (${this.residentCapName()}); a runtime keeps its slot until its release is confirmed. This dispatch was refused.`);
-    const activeTotal = occupied.filter(countsAsActive).length + pending;
+    const activeTotal = occupied.filter(countsAsActive).length + pending.active;
     if (active !== undefined && activeTotal >= active)
       throw new Error(`${activeTotal} of ${active} concurrent turns are already active in this parent session (PI_CLI_SUBAGENTS_MAX_ACTIVE); this dispatch was refused.`);
     const token = `${prefix}${id}\0${++nextReservation}`;
-    admitting.set(token, { id, ...(options.priorRunId !== undefined ? { priorRunId: options.priorRunId } : {}) });
+    admitting.set(token, { id, newRuntime, ...(options.priorRunId !== undefined ? { priorRunId: options.priorRunId } : {}) });
     return token;
   }
 
   /** Name the variable that produced the resident cap, so a refusal stays actionable. */
   private residentCapName(): string {
-    return process.env.PI_CLI_SUBAGENTS_MAX_RESIDENT !== undefined ? "PI_CLI_SUBAGENTS_MAX_RESIDENT" : "PI_CLI_SUBAGENTS_MAX_RUNTIMES";
+    // The legacy name only applies when it is the one configured; an unconfigured cap names the default's variable.
+    return process.env.PI_CLI_SUBAGENTS_MAX_RUNTIMES !== undefined && process.env.PI_CLI_SUBAGENTS_MAX_RESIDENT === undefined
+      ? "PI_CLI_SUBAGENTS_MAX_RUNTIMES" : "PI_CLI_SUBAGENTS_MAX_RESIDENT";
   }
 
   /**

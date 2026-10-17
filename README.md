@@ -87,15 +87,16 @@ Pi children can ask the parent a single task question through `subagent_ask_pare
 - **One parent session caps concurrency and runtimes.** Two independent limits apply to a parent
   session, counted across roles: `PI_CLI_SUBAGENTS_MAX_ACTIVE` (default **4**) limits turns that may
   still be executing, and `PI_CLI_SUBAGENTS_MAX_RESIDENT` (default **12**) limits managed runtimes
-  whose release is not confirmed yet. Each accepts `0` to disable that dimension; disabling both
-  restores uncapped dispatch. `PI_CLI_SUBAGENTS_MAX_RUNTIMES` still names the resident cap (by itself;
+  whose release is not confirmed yet. Each accepts `0` to disable that dimension; setting both to `0`
+  (`MAX_ACTIVE=0` and `MAX_RESIDENT=0`) restores uncapped dispatch. `PI_CLI_SUBAGENTS_MAX_RUNTIMES` still names the resident cap (by itself;
   naming it together with `PI_CLI_SUBAGENTS_MAX_RESIDENT` is refused), and a value that is not a
   non-negative integer is refused instead of being read as unlimited.
 - **These defaults are a behavior change.** Earlier versions treated a missing setting as no cap;
   a parent session now starts at 4 concurrent turns and 12 resident runtimes. Reaching a limit refuses
   the dispatch; nothing is queued or preempted and no instance directory or process is created.
   A new run inside an already-resident child takes a turn slot but no runtime slot, so steering and
-  follow-ups on resident children keep working while the resident cap is full.
+  follow-ups on resident children keep working while the resident cap is full, as long as the turn cap
+  has room.
 
 ## In the session
 

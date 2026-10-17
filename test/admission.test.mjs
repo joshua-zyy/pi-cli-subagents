@@ -30,20 +30,20 @@ test('only a step that may still execute takes a turn slot', () => {
 
 test('a reservation survives until the run it reserved is visible', () => {
   const reservations = new Map([
-    [key('root', 'a', '1'), { id: 'a' }],                    // new instance, no record yet
-    [key('root', 'b', '2'), { id: 'b', priorRunId: 'r1' }],  // resident instance, old run only
-    [key('root', 'c', '3'), { id: 'c', priorRunId: 'r1' }],  // resident instance, new run visible
-    [key('other', 'e', '4'), { id: 'e' }],                   // another parent root
+    [key('root', 'a', '1'), { id: 'a', newRuntime: true }],                    // new instance, no record yet
+    [key('root', 'b', '2'), { id: 'b', priorRunId: 'r1', newRuntime: false }],  // resident instance, old run only
+    [key('root', 'c', '3'), { id: 'c', priorRunId: 'r1', newRuntime: true }],   // resident instance, new run visible
+    [key('other', 'e', '4'), { id: 'e', newRuntime: true }],                    // another parent root
   ]);
   const views = [{ id: 'b', runId: 'r1' }, { id: 'c', runId: 'r2' }];
-  assert.equal(pruneVisibleReservations(reservations, key('root', ''), views), 2,
-    'the invisible new instance and the unchanged resident instance still count');
+  assert.deepEqual(pruneVisibleReservations(reservations, key('root', ''), views), { active: 2, resident: 1 },
+    'the invisible new instance counts in both dimensions; the reused resident instance only as a turn');
   assert.deepEqual([...reservations.keys()], [key('root', 'a', '1'), key('root', 'b', '2'), key('other', 'e', '4')],
     'only the reservation whose new run is visible is dropped; another root is untouched');
   // The instance is visible but still idle with its old run: a visible record alone must not retire it.
   // Only `a` (invisible new instance) and `b` (unchanged run) still count here.
-  assert.equal(pruneVisibleReservations(reservations, key('root', ''), [{ id: 'b', runId: 'r1' }]), 2);
-  assert.equal(pruneVisibleReservations(reservations, key('root', ''), [{ id: 'b', runId: 'r7' }]), 1);
+  assert.deepEqual(pruneVisibleReservations(reservations, key('root', ''), [{ id: 'b', runId: 'r1' }]), { active: 2, resident: 1 });
+  assert.deepEqual(pruneVisibleReservations(reservations, key('root', ''), [{ id: 'b', runId: 'r7' }]), { active: 1, resident: 1 });
 });
 
 test('the caps resolve from the environment with documented defaults', () => {

@@ -518,6 +518,52 @@ test('a new run inside a resident instance takes a turn slot but no runtime slot
   });
 });
 
+test('two concurrent sends to idle instances cannot both take the last turn slot', { timeout: 60_000 }, async t => {
+  const { cwd, manager } = setup(t);
+  // Two residents allowed, so the runtime dimension can never be the reason for a refusal here.
+  await withCaps({ active: '1', resident: '3' }, async () => {
+    const left = await manager.spawn('worker', defaultRoles.worker, cwd, 'REMEMBER left');
+    await complete(manager, left.id);
+    const right = await manager.spawn('worker', defaultRoles.worker, cwd, 'REMEMBER right');
+    await complete(manager, right.id);
+    const results = await Promise.allSettled([manager.send(left.id, 'RACE left'), manager.send(right.id, 'RACE right')]);
+    const fulfilled = results.filter((result) => result.status === 'fulfilled');
+    const rejected = results.filter((result) => result.status === 'rejected');
+    assert.equal(fulfilled.length, 1, 'exactly one new run may take the only turn slot');
+    assert.equal(rejected.length, 1, 'the other new run must be refused');
+    assert.match(rejected[0].reason.message, /concurrent turns/);
+    await complete(manager, fulfilled[0].value.id);
+  });
+});
+
+test('a turn held by one child refuses a new run on an idle child', { timeout: 60_000 }, async t => {
+  const { cwd, manager } = setup(t);
+  await withCaps({ active: '1', resident: '3' }, async () => {
+    const idle = await manager.spawn('worker', defaultRoles.worker, cwd, 'REMEMBER idle');
+    await complete(manager, idle.id);
+    const running = await manager.spawn('worker', defaultRoles.worker, cwd, 'REMEMBER running');
+    await assert.rejects(manager.send(idle.id, 'DO NOT START'), /concurrent turns/);
+    await complete(manager, running.id);
+    // Once the turn is free the same resident child accepts work, so no phantom slot remains.
+    const next = await manager.send(idle.id, 'REMEMBER after settle');
+    assert.equal(next.id, idle.id);
+    await complete(manager, idle.id);
+  });
+});
+
+test('conflicting cap names are refused and two explicit zeros lift both defaults', { timeout: 90_000 }, async t => {
+  const { cwd, manager } = setup(t);
+  await withCaps({ legacy: '2', resident: '2' }, async () => {
+    await assert.rejects(manager.spawn('worker', defaultRoles.worker, cwd, 'DO NOT START'), /both set the resident cap/i);
+    assert.equal(manager.list().length, 0, 'a conflicting configuration creates no instance');
+  });
+  await withCaps({ active: '0', resident: '0' }, async () => {
+    const spawned = await Promise.all([1, 2, 3, 4, 5].map((n) => manager.spawn('worker', defaultRoles.worker, cwd, `REMEMBER fan ${n}`)));
+    assert.equal(spawned.length, 5, 'both zeros lift the default turn cap');
+    for (const child of spawned) await complete(manager, child.id);
+  });
+});
+
 test('concurrent resumes cannot exceed the cap', { timeout: 60_000 }, async t => {
   const { cwd, manager } = setup(t);
   await withCap('1', async () => {

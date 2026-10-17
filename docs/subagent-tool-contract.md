@@ -84,7 +84,7 @@ The existing `AgentState.accepted` describes receipt of the run's initial task, 
 - **`0` 的含义**：每个维度可单独用 `0` 关闭；**两个维度都写 `0`** 才完全恢复不限。只写 `RESIDENT=0` 不会解除 active 上限。
 - **旧变量**：`PI_CLI_SUBAGENTS_MAX_RUNTIMES` 继续表示 **resident**；它的 `0` 由非法变为合法。旧变量与新 `MAX_RESIDENT` 同时出现即**拒绝**（即使数值相同），避免隐含优先级；旧变量与新 `MAX_ACTIVE` 可以同时配置。
 - **破坏性变更（必须显式声明）**：旧合同为「变量缺失 = 不启用上限」，现改为「未配置即 4 / 12」。要恢复旧行为须同时设置 `MAX_ACTIVE=0` 与 `MAX_RESIDENT=0`。
-- **占用口径（resident）**：runtime 从创建那一刻起占一个名额，直到**释放被确认**（`phase=closed` 且 `runtimeClosed=true`）才归还。`starting/running/waiting/stopping/idle` 全占；`closed` 但缺 `runtimeClosed` 的未确认释放**仍占**；记录不可读（`unreachable`）**仍占**。
+- **占用口径（resident）**：runtime 从创建那一刻起占一个名额，直到**释放被确认**（`phase=closed` 且 `runtimeClosed=true`）才归还。`starting/running/waiting/stopping/idle` 与带终态的 `completed/failed/stopped` 全占；`closed` 但缺 `runtimeClosed` 的未确认释放**仍占**；记录不可读（`unreachable`）**仍占**。
 - **计数来源**：每次准入都从磁盘重算（`manager.list()`），因此跨 controller / 跨工具调用一致。
 - **准入点**（三条）：新建实例（`start`）、对**已释放实例**的 `send` 恢复、以及**对 `idle` 实例开启新 run 的 `send`**。最后一条只判 active、不判 resident——该实例已经占着 runtime 名额，新 run 不新增 runtime。
 - **并发**：每次准入成功先做一次**进程内轮次预留**，直到该轮次的 runId 对磁盘可见；预留按「实例 + 前一个 runId」判定撤销，所以「实例已在列表中可见」本身**不会**撤销预留（`idle` 实例天然可见）。无法确认结果（超时等）不因 `finally` 就归还名额，须等磁盘出现该轮次或该实例可被证明未启动。
