@@ -36,6 +36,8 @@ export interface Role {
   tools?: RoleToolTrim;
   /** false disables skill discovery for this Pi role; other backends have no switch and reject it. */
   skills?: boolean;
+  /** false disables MCP for this Pi role; other backends have no switch and reject it. */
+  mcp?: boolean;
 }
 
 // An argv launch, not a shell command. Injectable for protocol tests.

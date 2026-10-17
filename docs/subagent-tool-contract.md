@@ -296,3 +296,15 @@ Next step: reload the extension to inspect the tools and role catalog; real coll
 - 与 §2.5 的 `tools` 可同时存在，互不影响（`--tools … --no-skills` 并列下发）。
 - **不做**技能白名单：pi 的 `--skill <path>` 需要先定义路径解析基准与跨机器可移植性，属单独契约；且每加载一个技能都会把 name/description/path 加进该子代理的系统提示（按 token 计费），白名单反而增加成本。
 - 生效范围同 §2.5：写入 `spec.json`，随该实例每次启动/恢复生效；改角色只影响新实例。
+
+### 2.7 MCP 开关（仅 Pi 角色，H6 第三片）
+
+角色 JSON 可带 `mcp: false`，子进程加 `--no-mcp`：不连接任何 MCP 服务器、不提供 MCP 工具。
+
+- `mcp: false` → 不连接；`mcp: true` → **不传任何 flag**（与省略等价）。
+- **仅 Pi**：`cli: "codex"`/`"claude"` 带该字段 → 创建时**显式拒绝**（"Codex 与 Claude 没有 MCP 开关，角色会静默保留全部服务器"）。
+- 非布尔值 → 显式报错。
+- 与 §2.5 `tools`、§2.6 `skills` 三者互不影响，按 `--tools … --no-skills --no-mcp` 顺序并列下发。
+- **不做 MCP 服务器级白名单**：pi 只有"全禁"（`--no-mcp`），没有"只允许某几个"的 flag；Codex 0.162.1 的 `-c mcp_servers.*` 在本机探针中被 `--strict-config` 接受（该记录不随包分发），但**运行效果未验证**，因此本片不接。
+- **限制**：本片只依据 `pi --help` 的措辞接入 `--no-mcp`，**未做真机验收**（未验证服务器确实未连接、MCP 工具确实不可见）；要断言这一点需要一次带 MCP 服务器的真实会话。
+- 生效范围同前：写入 `spec.json`，随该实例每次启动/恢复生效；改角色只影响新实例。
