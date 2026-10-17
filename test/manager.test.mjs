@@ -391,11 +391,22 @@ test('a resident runtime writes each run to its own raw log', { timeout: 30_000 
 });
 
 const capKey = 'PI_CLI_SUBAGENTS_MAX_RUNTIMES';
+const activeKey = 'PI_CLI_SUBAGENTS_MAX_ACTIVE';
+const residentKey = 'PI_CLI_SUBAGENTS_MAX_RESIDENT';
 /** Run one case with a specific cap; every case restores the inherited value. */
 const withCap = async (value, body) => {
   const saved = process.env[capKey];
   if (value === undefined) delete process.env[capKey]; else process.env[capKey] = value;
   try { return await body(); } finally { if (saved === undefined) delete process.env[capKey]; else process.env[capKey] = saved; }
+};
+/** Set any subset of the three cap variables; every case restores the inherited values. */
+const withCaps = async (values, body) => {
+  const keys = [capKey, activeKey, residentKey], saved = keys.map((key) => process.env[key]);
+  for (const key of keys) {
+    const value = key === capKey ? values.legacy : key === activeKey ? values.active : values.resident;
+    if (value === undefined) delete process.env[key]; else process.env[key] = value;
+  }
+  try { return await body(); } finally { keys.forEach((key, index) => { const value = saved[index]; if (value === undefined) delete process.env[key]; else process.env[key] = value; }); }
 };
 
 test('a full parent session refuses a new runtime without dispatching', { timeout: 30_000 }, async t => {
@@ -454,17 +465,56 @@ test('a full session still steers existing children but cannot resume a released
 
 test('an invalid cap value refuses to dispatch instead of ignoring the limit', { timeout: 30_000 }, async t => {
   const { cwd, manager } = setup(t);
-  for (const value of ['', '0', '-1', 'abc', '1.5', '  ']) {
+  for (const value of ['', '-1', 'abc', '1.5', '  ']) {
     await withCap(value, async () => {
       await assert.rejects(manager.spawn('worker', defaultRoles.worker, cwd, 'DO NOT START'), new RegExp(capKey), `value ${JSON.stringify(value)} must be refused`);
     });
   }
   assert.equal(manager.list().length, 0, 'a refused configuration creates no instance');
-  await withCap(undefined, async () => {
+  // `0` used to be rejected; it now disables the dimension, so it must dispatch rather than refuse.
+  await withCap('0', async () => {
     const first = await manager.spawn('worker', defaultRoles.worker, cwd, 'REMEMBER one');
     const second = await manager.spawn('worker', defaultRoles.worker, cwd, 'REMEMBER two');
     await complete(manager, first.id); await complete(manager, second.id);
-    assert.equal(manager.list().length, 2, 'without the setting the previous behavior is unchanged');
+    assert.equal(manager.list().length, 2, 'an explicit 0 leaves the resident dimension uncapped');
+  });
+  await withCap(undefined, async () => {
+    const first = await manager.spawn('worker', defaultRoles.worker, cwd, 'REMEMBER three');
+    const second = await manager.spawn('worker', defaultRoles.worker, cwd, 'REMEMBER four');
+    await complete(manager, first.id); await complete(manager, second.id);
+    assert.equal(manager.list().length, 4, 'the documented defaults allow ordinary parallel work');
+  });
+});
+
+test('a full session refuses a fifth concurrent turn and the refusal suggests no workaround', { timeout: 40_000 }, async t => {
+  const { cwd, manager } = setup(t);
+  await withCaps({ active: '1' }, async () => {
+    const running = await manager.spawn('worker', defaultRoles.worker, cwd, 'REMEMBER running');
+    await assert.rejects(manager.spawn('worker', defaultRoles.worker, cwd, 'DO NOT START'), (error) => {
+      assert.match(error.message, /1 of 1 concurrent turns/, 'the refusal names the active dimension');
+      assert.match(error.message, new RegExp(activeKey), 'the refusal names the setting');
+      assert.doesNotMatch(error.message, /release|free|stop one|instead/i, 'the refusal must not coach an eviction');
+      return true;
+    });
+    // The active cap must lift once the turn ends, even though the runtime is still resident.
+    await complete(manager, running.id);
+    const next = await manager.spawn('worker', defaultRoles.worker, cwd, 'REMEMBER settled');
+    await complete(manager, next.id);
+  });
+});
+
+test('a new run inside a resident instance takes a turn slot but no runtime slot', { timeout: 40_000 }, async t => {
+  const { cwd, manager } = setup(t);
+  // Room for one more runtime, so the refusal below can only come from the turn slot.
+  await withCaps({ active: '1', resident: '2' }, async () => {
+    const idle = await manager.spawn('worker', defaultRoles.worker, cwd, 'REMEMBER idle');
+    await complete(manager, idle.id);
+    // The only resident slot is already this instance, so a new run inside it must not be refused.
+    const second = await manager.send(idle.id, 'REMEMBER second run');
+    assert.equal(second.id, idle.id);
+    // While that run is active, another dispatch must be refused by the active dimension.
+    await assert.rejects(manager.spawn('worker', defaultRoles.worker, cwd, 'DO NOT START'), /concurrent turns/);
+    await complete(manager, idle.id);
   });
 });
 
