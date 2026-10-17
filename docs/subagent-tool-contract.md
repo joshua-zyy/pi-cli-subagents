@@ -306,5 +306,5 @@ Next step: reload the extension to inspect the tools and role catalog; real coll
 - 非布尔值 → 显式报错。
 - 与 §2.5 `tools`、§2.6 `skills` 三者互不影响，按 `--tools … --no-skills --no-mcp` 顺序并列下发。
 - **不做 MCP 服务器级白名单**：pi 只有"全禁"（`--no-mcp`），没有"只允许某几个"的 flag；Codex 0.162.1 的 `-c mcp_servers.*` 在本机探针中被 `--strict-config` 接受（该记录不随包分发），但**运行效果未验证**，因此本片不接。
-- **限制**：本片只依据 `pi --help` 的措辞接入 `--no-mcp`，**未做真机验收**（未验证服务器确实未连接、MCP 工具确实不可见）；要断言这一点需要一次带 MCP 服务器的真实会话。
+- **真机验收**（2026-10-17，本机 pi 1.3.0 + 一个自建 stdio MCP 服务器作探针）：不带 `--no-mcp` 时该服务器**被启动**（探针写下了启动记录）；带 `--no-mcp` 时**未启动**；再加 `--no-tools` 亦未启动。结论限定为"服务器未连接"，**未**验证 MCP 工具在工具列表中的可见性。
 - 生效范围同前：写入 `spec.json`，随该实例每次启动/恢复生效；改角色只影响新实例。
