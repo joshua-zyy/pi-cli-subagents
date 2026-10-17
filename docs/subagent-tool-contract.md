@@ -271,7 +271,7 @@ At that four-tool migration baseline, no real models, real CLI collaboration or 
 
 Next step: reload the extension to inspect the tools and role catalog; real collaboration acceptance requires separate authorization.
 
-### 2.5 工具裁剪（仅 Pi 角色，H6 最小切片）
+### 2.5 工具裁剪（Pi 支持白/黑名单，Claude 仅黑名单）
 
 角色 JSON 可带一个可选字段，直通 Pi 原生开关：
 
@@ -283,7 +283,8 @@ Next step: reload the extension to inspect the tools and role catalog; real coll
 - 校验：只接受 `allow`/`deny` 两个键；数组元素必须是**无首尾空格的非空字符串**；空数组=显式报错（`--tools ""` 会打开全部工具，不能当作"不裁剪"）。
 - **仅 Pi**：
   - `cli: "codex"` 带该字段 → 创建时**显式拒绝**：Codex 实测（`--help`/`exec --help`/`mcp --help`，且 `-c tools.*` 不被 `--strict-config` 校验）**没有**工具白/黑名单，接受字段会静默保留全部工具。
-  - `cli: "claude"` 带该字段 → 同样拒绝，但**理由不同**：Claude Code 2.1.296 **确实有** `--allowedTools` / `--disallowedTools`（帮助与真实会话工具清单均证实，`--disallowedTools Agent` 会让 `Agent` 工具消失），只是**本扩展还没接线**。拒绝文案说的是“尚未接线”，不是“没有这个能力”。接线属单独一片。
+  - `cli: "claude"` 支持 `tools.deny`（→ `--disallowedTools`），**不支持 `tools.allow`**：真机实测 `--allowedTools Read` 之后工具清单仍是全部 24 个，说明它是“预批准”而不是“只允许”；按它实现会让角色保留全部工具，因此在创建时显式拒绝并说明。
+  - claude 的 deny 会与 §2.8 的默认“禁止再派”**合并成一个 flag**（`--disallowedTools Bash,Agent`），因为该参数是可变长的，重复下发有吞参风险。
 - 生效范围：写入实例 `spec.json`，随该实例每次原生启动/恢复生效（与 `defaultModeQuestions` 同样"创建时固化"）；改角色只影响新实例。
 - **不做**：MCP 集合限制、技能预加载/禁用、以及 Codex `agents.enabled` 一类"限制再派"的运行时开关 —— 这三项按 oracle 要求分别裁决，本片不含。
 - 角色摘要（工具描述里的 compact catalog）不重复该字段，避免每轮字节膨胀；字段只在 role JSON 与 spec 中可见。

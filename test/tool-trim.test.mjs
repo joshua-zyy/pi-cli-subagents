@@ -6,7 +6,7 @@ import { AgentManager } from '../dist/manager.js';
 import { defaultRoles, mcpError, skillsError, toolTrimError, validateRoleFile } from '../dist/roles.js';
 import { trimArgs } from '../dist/pi-adapter.js';
 import { subagentArgs as codexSubagentArgs } from '../dist/codex-adapter.js';
-import { subagentArgs as claudeSubagentArgs } from '../dist/claude-adapter.js';
+import { toolDenyArgs as claudeToolDenyArgs } from '../dist/claude-adapter.js';
 import { tempDir } from './helpers/tmp.mjs';
 
 const launch = { command: process.execPath, args: [] };
@@ -33,16 +33,17 @@ test('allowing subagents is explicit and can also come from the tool list', () =
 test('codex and claude deny their own spawn tool by default', () => {
   assert.deepEqual(codexSubagentArgs({}), ['-c', 'agents.enabled=false']);
   assert.deepEqual(codexSubagentArgs({ allowSubagents: true }), []);
-  assert.deepEqual(claudeSubagentArgs({}), ['--disallowedTools', 'Agent']);
-  assert.deepEqual(claudeSubagentArgs({ allowSubagents: true }), []);
+  assert.deepEqual(claudeToolDenyArgs({}), ['--disallowedTools', 'Agent']);
+  assert.deepEqual(claudeToolDenyArgs({ allowSubagents: true }), []);
 });
 
 test('tool trimming is Pi-only and its shape is checked', () => {
   assert.equal(toolTrimError(undefined, { allow: ['read'] }), undefined, 'an unset cli means Pi');
   assert.equal(toolTrimError('pi', { deny: ['write'] }), undefined);
   assert.match(toolTrimError('codex', { allow: ['read'] }), /Codex exposes no tool allow\/deny list/);
-  assert.match(toolTrimError('claude', { allow: ['read'] }), /not wired for Claude yet/,
-    'the message no longer claims Claude lacks a list');
+  assert.match(toolTrimError('claude', { allow: ['read'] }), /pre-approves tools, it does not restrict them/,
+    'an exclusive allow list would be a pre-approval list in disguise');
+  assert.equal(toolTrimError('claude', { deny: ['Bash'] }), undefined, 'denial is expressible on Claude');
   assert.match(toolTrimError('pi', []), /must be an object/);
   assert.match(toolTrimError('pi', {}), /needs allow and\/or deny/);
   assert.match(toolTrimError('pi', { allow: [] }), /non-empty array/);
@@ -112,4 +113,19 @@ test('spawning a non-Pi role with a Pi-only field refuses before creating anythi
   await assert.rejects(manager.spawn('worker', { ...defaultRoles.worker, allowSubagents: 'yes' }, cwd, 'DO NOT START'),
     /allowSubagents must be a boolean/, 'spawn validates the shape too, not just the role loader');
   assert.equal(fs.existsSync(manager.root), false, 'a refused role must not create even the instance root');
+});
+
+test('claude denial merges the role list with the no-respawn default', () => {
+  assert.deepEqual(claudeToolDenyArgs({ tools: { deny: ['Bash'] } }), ['--disallowedTools', 'Bash,Agent'],
+    'one flag carries both, because a second --disallowedTools could swallow what follows');
+  assert.deepEqual(claudeToolDenyArgs({ tools: { deny: ['Agent'] } }), ['--disallowedTools', 'Agent'], 'no duplicate');
+  assert.deepEqual(claudeToolDenyArgs({ tools: { deny: ['Bash'] }, allowSubagents: true }), ['--disallowedTools', 'Bash'],
+    'allowing subagents drops only the default Agent denial, not the role list');
+});
+
+test('a claude role may deny tools but not claim an exclusive allow list', () => {
+  const roles = validateRoleFile({ worker: { description: 'd', instructions: 'i', cli: 'claude', tools: { deny: ['Bash'] } } }, 'probe');
+  assert.deepEqual(roles.worker.tools, { deny: ['Bash'] });
+  assert.throws(() => validateRoleFile({ worker: { description: 'd', instructions: 'i', cli: 'claude', tools: { allow: ['Read'] } } }, 'probe'),
+    /pre-approves tools, it does not restrict them/);
 });

@@ -7,7 +7,7 @@ import path from "node:path";
 import type { AdapterEvent, AdapterOptions, CliAdapter, InteractionReply } from "./cli-adapter.js";
 import { childEnvironment, type Exit } from "./pi-process.js";
 import { claudeEnvironment } from "./claude-launch.js";
-import type { AgentSpec, NativeSession, Delivery, QuestionField } from "./types.js";
+import type { AgentSpec, NativeSession, Delivery, QuestionField, RoleToolTrim } from "./types.js";
 import { claudeQuestionAnswers, readClaudeQuestionFields } from "./claude-question.js";
 
 // Legacy RPC envelope; a typed decoder migration is separate from task-question support.
@@ -93,9 +93,15 @@ export function inspectClaudeSession(spec: AgentSpec, session: ClaudeSession): s
 
 type Approval = { id: string; requestId: string; toolId: string; input: Json; messageId: string; attempted: boolean; fields?: QuestionField[] };
 /** Native stream-json stays inside this adapter; the worker retains ownership and audit. */
-/** Delegation must not amplify itself. --disallowedTools takes names, and the spawn tool is Agent. */
-export function subagentArgs(role: { allowSubagents?: boolean }): string[] {
-  return role.allowSubagents === true ? [] : ["--disallowedTools", "Agent"];
+/**
+ * Tool denial for a Claude role, in one flag: --disallowedTools takes a list, and a second flag could
+ * swallow whatever follows it. The no-respawn default joins the role's own deny list here, so neither
+ * can replace the other.
+ */
+export function toolDenyArgs(role: { tools?: RoleToolTrim; allowSubagents?: boolean }): string[] {
+  const deny = [...(role.tools?.deny ?? [])];
+  if (role.allowSubagents !== true && !deny.includes("Agent")) deny.push("Agent");
+  return deny.length ? ["--disallowedTools", deny.join(",")] : [];
 }
 
 export class ClaudeAdapter implements CliAdapter {
@@ -150,7 +156,7 @@ export class ClaudeAdapter implements CliAdapter {
     this.child = spawn(spec.launch.command, [...spec.launch.args, "-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
       "--include-partial-messages", "--replay-user-messages", "--permission-prompt-tool", "stdio", "--await-initialize",
       session ? "--resume" : "--session-id", this.session.sessionId, ...(spec.role.model ? ["--model", spec.role.model] : []),
-      ...(spec.role.thinking ? ["--effort", spec.role.thinking] : []), ...(spec.role.mode ? ["--permission-mode", spec.role.mode] : []), ...subagentArgs(spec.role)], {
+      ...(spec.role.thinking ? ["--effort", spec.role.thinking] : []), ...(spec.role.mode ? ["--permission-mode", spec.role.mode] : []), ...toolDenyArgs(spec.role)], {
       cwd: spec.cwd, env, stdio: ["pipe", "pipe", "pipe"], shell: false, windowsHide: true, detached: process.platform !== "win32",
     });
     this.child.stderr.pipe(this.log.errorStream);
