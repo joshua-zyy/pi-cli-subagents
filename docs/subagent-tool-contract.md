@@ -285,3 +285,14 @@ Next step: reload the extension to inspect the tools and role catalog; real coll
 - 生效范围：写入实例 `spec.json`，随该实例每次原生启动/恢复生效（与 `defaultModeQuestions` 同样"创建时固化"）；改角色只影响新实例。
 - **不做**：MCP 集合限制、技能预加载/禁用、以及 Codex `agents.enabled` 一类"限制再派"的运行时开关 —— 这三项按 oracle 要求分别裁决，本片不含。
 - 角色摘要（工具描述里的 compact catalog）不重复该字段，避免每轮字节膨胀；字段只在 role JSON 与 spec 中可见。
+
+### 2.6 技能开关（仅 Pi 角色，H6 第二片）
+
+角色 JSON 可带 `skills: false`，子进程加 `--no-skills`：不发现、不加载任何技能。
+
+- `skills: false` → 不加载；`skills: true` → **不传任何 flag**（与省略等价，仅让"显式开启"可表达，风格与 `defaultModeQuestions` 一致）。
+- **仅 Pi**：`cli: "codex"`/`"claude"` 带该字段 → 创建时**显式拒绝**（"Codex 与 Claude 没有技能开关，角色会静默保留全部技能"）。依据：`codex 0.162.1` 帮助里无技能通道；`claude` 本机未安装，未验证。
+- 非布尔值（`"false"`、`0`、`{}`）→ 显式报错，不做隐式转换。
+- 与 §2.5 的 `tools` 可同时存在，互不影响（`--tools … --no-skills` 并列下发）。
+- **不做**技能白名单：pi 的 `--skill <path>` 需要先定义路径解析基准与跨机器可移植性，属单独契约；且每加载一个技能都会把 name/description/path 加进该子代理的系统提示（按 token 计费），白名单反而增加成本。
+- 生效范围同 §2.5：写入 `spec.json`，随该实例每次启动/恢复生效；改角色只影响新实例。
