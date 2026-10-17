@@ -795,7 +795,8 @@ ${view(state, args.action === "interrupt")}`);
       if (epoch !== sessionEpoch) return "stop";
       return discard ? "stop" : "next";
     }
-    // A different scope holds a different role set, so start it from the top.
+    // Both scopes list the merged role set, so only the edited document and the overrides change here;
+    // the cursor is cleared so the newly selected scope still starts from the top of the list.
     if (action.kind === "scope") { session.scope = action.scope; session.cursor = {}; return "next"; }
     if (action.kind === "save") {
       const file = writeScope(scope, agentDir, cwd, draft[scope], disk[scope]);
