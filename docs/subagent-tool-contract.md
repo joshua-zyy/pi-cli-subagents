@@ -77,7 +77,7 @@ The existing `AgentState.accepted` describes receipt of the run's initial task, 
 一个父会话可以用环境变量 `PI_CLI_SUBAGENTS_MAX_RUNTIMES=<n>`（正整数）限定自己同时持有多少个**托管 runtime**；跨角色统一计数，作用域是这个父进程（不是机器级、不是全局）。
 
 - **占用口径**：runtime 从创建那一刻起占一个名额，直到**释放被确认**（`phase=closed` 且 `runtimeClosed=true`）才归还。具体：`starting/running/waiting/stopping/idle` 全占；`closed` 但缺 `runtimeClosed` 的未确认释放**仍占**；记录不可读（`unreachable`）**仍占**——unknown ownership 不能当作已释放。
-- **计数来源**：每次准入都从磁盘重算（`manager.list()`），因此**跨 controller/跨工具调用**都一致；不依赖某个 manager 对象的内存计数。
+- **计数来源**：每次准入都从磁盘重算（`manager.list()`），因此**跨 controller/跨工具调用**都一致；内存里只保留**在途预留**（见下条「并发」），它不作为权威计数，只覆盖状态可见之前的窗口。
 - **准入点**：只有"新建占用"的两条路径——`subagent` 的 `start`（`spawn` 顶部，校验参数之后、建目录之前）与对**已释放实例**的 `send` 恢复。对 `starting/running/waiting/idle` 实例的 `send`（新 run 或 steer）**不新增占用**，不受此上限影响。
 - **拒绝语义**：**显式拒绝**，不排队、不抢占；拒绝发生在任何目录/进程/人工动作记录之前（`spawn` 在参数校验之后、建目录之前；恢复路径在释放等待与会话前置检查之后、真正启动 runtime 之前）。错误消息给出 `占用数 of 上限` 与变量名，并提示可用动作（先 `interrupt` 再 `stop`，或等其完成）——不会建议不存在的 `keep`。
 - **窗口与顺序**（易误解处）：恢复路径会先 `waitForRelease`（最长约 15s）并跑该后端的会话前置检查（如 Codex/Claude 的 session preflight），**之后**才判名额——所以恢复被拒可能发生在数秒之后，而不是立即；若前置检查先失败，会先报那个错误。TUI 里的同类动作（roster/viewer 的 send）把拒绝作为通知显示，不改变实例状态。
