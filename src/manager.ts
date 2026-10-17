@@ -28,12 +28,14 @@ const workerFile = fileURLToPath(new URL("./worker.js", import.meta.url));
 const admitting = new Set<string>();
 
 /**
- * A managed runtime keeps its admission slot until its release is confirmed: idle children still hold a
- * resident process, a stopping one may still be winding down, and an unknown record may still own one.
+ * A managed runtime keeps its admission slot until its release is confirmed: an idle child still owns
+ * its runtime (whether that keeps a resident process depends on the backend), a stopping one may still
+ * be winding down, and an unknown record may still own one.
  */
 export function occupiesRuntime(view: Pick<AgentView, "phase" | "runtimeClosed">): boolean {
   return !(view.phase === "closed" && view.runtimeClosed === true);
 }
+
 const idPattern = /^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/;
 /** Enough recent assignments to choose a reusable instance without pasting a whole work history. */
 const HISTORY_LIMIT = 5;
