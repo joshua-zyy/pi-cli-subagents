@@ -12,7 +12,7 @@ import { inspectPiSession } from "./pi-adapter.js";
 import { claudeLaunch } from "./claude-launch.js";
 import { inspectClaudeSession } from "./claude-adapter.js";
 import { nativeSession } from "./cli-adapter.js";
-import { modeError } from "./roles.js";
+import { modeError, toolTrimError } from "./roles.js";
 import { WorkspaceDecisionRequired, WorkspaceStore, type ResumeOptions } from "./workspace.js";
 import { directories, jsonFiles, processAlive, readJson, shorten, waitUntil, writeJson } from "./storage.js";
 import type { AgentSpec, AgentState, AgentView, Control, ControlResult, Delivery, Endpoint, Launch, NativeSession, OperationReceipt, Report, Role, SessionHandle, StartRequest, TaskRun } from "./types.js";
@@ -282,6 +282,7 @@ export class AgentManager {
     if (role.cli === "codex" && (role.provider || role.thinking)) throw new Error("Codex role does not accept Pi provider/thinking fields");
     if (role.cli !== "codex" && role.effort) throw new Error("Codex effort requires cli: codex");
     if (role.mode !== undefined) { const invalid = modeError(role.cli, role.mode); if (invalid) throw new Error(invalid); }
+    if (role.tools !== undefined) { const invalid = toolTrimError(role.cli, role.tools); if (invalid) throw new Error(invalid); }
     const id = randomUUID(), dir = this.directory(id);
     this.admit(id);
     const start = async (directory: string, baseline?: AgentSpec["workspaceBaseline"], notice?: string): Promise<AgentView> => {

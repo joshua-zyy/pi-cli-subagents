@@ -1,6 +1,6 @@
 import path from "node:path";
 import { readJson } from "./storage.js";
-import type { ClaudeMode, Cli, CodexMode, Effort, Mode, Role, Thinking } from "./types.js";
+import type { ClaudeMode, Cli, CodexMode, Effort, Mode, Role, RoleToolTrim, Thinking } from "./types.js";
 
 /** Built-ins run on Pi; a role that needs Codex or Claude Code opts in with an explicit `cli`. */
 export const defaultRoles: Record<string, Role> = {
@@ -47,13 +47,34 @@ export const CODEX_MODE_PRESETS: Record<CodexMode, { approvalPolicy: "untrusted"
   "full-access": { approvalPolicy: "never", sandbox: "danger-full-access" },
 };
 export const CODEX_MODES = Object.keys(CODEX_MODE_PRESETS) as CodexMode[];
-export const ROLE_FIELDS = ["description", "instructions", "provider", "model", "thinking", "cli", "effort", "mode", "defaultModeQuestions"] as const;
+export const ROLE_FIELDS = ["description", "instructions", "provider", "model", "thinking", "cli", "effort", "mode", "defaultModeQuestions", "tools"] as const;
 
 const levels = new Set<Thinking>(PI_THINKING_LEVELS);
 const claudeLevels = new Set<Thinking>(CLAUDE_THINKING_LEVELS);
 
-/** Why `mode` cannot be used for this CLI, or `undefined` when it is valid. Shared with `AgentManager.spawn`. */
-export function modeError(cli: Cli | undefined, mode: string): string | undefined {
+/**
+ * Why `tools` cannot be used for this CLI, or `undefined` when it is valid. Shared with
+ * `AgentManager.spawn`: the field is Pi-only, so any other backend must refuse it instead of silently
+ * keeping every tool.
+ */
+export function toolTrimError(cli: Cli | undefined, tools: unknown): string | undefined {
+  if (cli !== undefined && cli !== "pi") return "tools requires a Pi role: Codex and Claude expose no tool allow/deny list, so the role would silently keep every tool";
+  if (!tools || typeof tools !== "object" || Array.isArray(tools)) return "tools must be an object with allow and/or deny";
+  const unknown = Object.keys(tools).filter((key) => key !== "allow" && key !== "deny");
+  if (unknown.length) return `tools contains unknown fields: ${unknown.join(", ")}`;
+  const record = tools as Record<string, unknown>;
+  for (const key of ["allow", "deny"] as const) {
+    const value = record[key];
+    if (value === undefined) continue;
+    if (!Array.isArray(value) || !value.length) return `tools.${key} must be a non-empty array of tool names`;
+    if (value.some((name) => typeof name !== "string" || !name.trim() || name !== name.trim()))
+      return `tools.${key} must contain non-empty tool names without surrounding spaces`;
+  }
+  if (!record.allow && !record.deny) return "tools needs allow and/or deny";
+  return undefined;
+}
+
+/** Why `mode` cannot be used for this CLI, or `undefined` when it is valid. Shared with `AgentManager.spawn`. */export function modeError(cli: Cli | undefined, mode: string): string | undefined {
   if (cli === "claude") return CLAUDE_MODES.includes(mode as ClaudeMode) ? undefined : `Claude mode must be one of ${CLAUDE_MODES.join(", ")}`;
   if (cli === "codex") return CODEX_MODES.includes(mode as CodexMode) ? undefined : `Codex mode must be one of ${CODEX_MODES.join(", ")}`;
   return "mode requires cli: claude or codex";
@@ -78,6 +99,10 @@ export function validateRoleFile(value: unknown, source: string): Record<string,
     if (role.thinking !== undefined && !levels.has(role.thinking as Thinking)) throw new Error(`${source}: invalid thinking level`);
     if (role.cli !== undefined && !CLI_CHOICES.includes(role.cli as Cli)) throw new Error(`${source}: ${name}.cli must be pi, codex or claude`);
     if (role.defaultModeQuestions !== undefined && (role.cli !== "codex" || typeof role.defaultModeQuestions !== "boolean")) throw new Error(`${source}: ${name}.defaultModeQuestions requires cli: codex and a boolean`);
+    if (role.tools !== undefined) {
+      const invalid = toolTrimError(role.cli as Cli | undefined, role.tools);
+      if (invalid) throw new Error(`${source}: ${name} ${invalid}`);
+    }
     if (role.cli === "claude" && role.provider) throw new Error(`${source}: ${name} Claude role does not accept a Pi provider`);
     if (role.cli === "claude" && role.thinking !== undefined && !claudeLevels.has(role.thinking as Thinking)) throw new Error(`${source}: ${name} Claude thinking must be low, medium, high, xhigh or max`);
     if (role.cli === "codex" && (role.provider || role.thinking)) throw new Error(`${source}: ${name} Codex role does not accept Pi provider/thinking fields`);
@@ -96,6 +121,7 @@ export function validateRoleFile(value: unknown, source: string): Record<string,
       ...(role.thinking ? { thinking: role.thinking as Thinking } : {}),
       ...(role.mode ? { mode: role.mode as Mode } : {}),
       ...(role.defaultModeQuestions !== undefined ? { defaultModeQuestions: role.defaultModeQuestions as boolean } : {}),
+      ...(role.tools !== undefined ? { tools: role.tools as RoleToolTrim } : {}),
     };
   }
   return roles;

@@ -25,6 +25,7 @@
     "role-settings-lifecycle.test.mjs",
     "role-settings.test.mjs",
     "tool-contract.test.mjs",
+    "tool-trim.test.mjs",
     "transcript-cache.test.mjs",
     "transcript-recent.test.mjs",
     "transcript-seek.test.mjs",

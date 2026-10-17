@@ -15,6 +15,11 @@ export type ClaudeMode = "acceptEdits" | "auto" | "manual" | "dontAsk" | "plan" 
 export type CodexMode = "read-only" | "workspace-write" | "full-access";
 export type Mode = ClaudeMode | CodexMode;
 
+/** Native tool trimming. Only Pi exposes an allow/deny list; other backends must refuse it, never ignore it. */
+export interface RoleToolTrim {
+  allow?: string[];
+  deny?: string[];
+}
 export interface Role {
   cli?: Cli;
   effort?: Effort;
@@ -27,6 +32,8 @@ export interface Role {
   mode?: Mode;
   /** Codex experimental Default-mode question gate; omitted inherits native config, not permissions. */
   defaultModeQuestions?: boolean;
+  /** Pi's own tool allow/deny list; Codex and Claude have no equivalent and reject this field. */
+  tools?: RoleToolTrim;
 }
 
 // An argv launch, not a shell command. Injectable for protocol tests.
