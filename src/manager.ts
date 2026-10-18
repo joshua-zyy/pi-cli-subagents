@@ -625,10 +625,12 @@ export class AgentManager {
     }, timeout);
   }
 
-  async interrupt(id: string): Promise<AgentView> {
+  async interrupt(id: string, expected?: { runId: string; runtimeId?: string }): Promise<AgentView> {
     const state = this.get(id);
     try {
       if (state.protocolVersion !== 3) throw new Error(state.error);
+      if (expected && (state.runId !== expected.runId || state.runtimeId !== expected.runtimeId))
+        throw new Error(`Captured run ${expected.runId}, runtime ${expected.runtimeId ?? "missing"} no longer matches; it was not interrupted`);
       if (state.phase === "unreachable") throw new Error(state.error);
       if (["completed", "failed", "stopped", "closed"].includes(state.phase)) {
         await this.waitForRelease(state, "Interrupt closed runtime", 15_000);
@@ -637,7 +639,7 @@ export class AgentManager {
       }
       // Even an observed idle runtime can become busy. The worker decides against
       // its serialized, captured run; do not manufacture a verdict from this view.
-      const result = await this.request(id, { type: "interrupt" });
+      const result = await this.request(id, { type: "interrupt" }, state);
       return this.view(id, result, result.receipt);
     } catch (error) { throw this.diagnostic(id, "interrupt", error, state); }
   }

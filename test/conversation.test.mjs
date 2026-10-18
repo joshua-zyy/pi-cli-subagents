@@ -233,7 +233,7 @@ test('viewer offers t for v3 Pi/Codex/Claude active runs, including while histor
         await new Promise(setImmediate);
         assert.equal(h.viewer.render(160).join('\n').includes('t interrupt'), allowed, JSON.stringify(agent));
         h.viewer.handleInput('t');
-        assert.deepEqual(h.actions, allowed ? [{ kind: 'interrupt', id: state.id }] : []);
+        assert.deepEqual(h.actions, allowed ? [{ kind: 'interrupt', id: state.id, expected: { runId: agent.runId, runtimeId: agent.runtimeId } }] : []);
         h.viewer.handleInput('t'); assert.equal(h.actions.length, allowed ? 1 : 0);
       } finally { h.viewer.dispose(); }
     }

@@ -42,7 +42,7 @@ function harness(t, beforePhase = 'completed', decision = 'none') {
     ui:{theme, notify:(message,type)=>notices.push({message,type}), setWidget(){}, setStatus(){ticks++;},
       onTerminalInput(fn){listener=fn;return()=>{listener=undefined;};},
       editor:async()=> 'FOLLOW_UP', select:async()=> 'sync — update workspace from parent', confirm:async()=>true,
-      custom(factory){return new Promise(resolve=>{viewer=factory({terminal:{rows:35,columns:400},requestRender(){}},theme,{},resolve);});},
+      custom(factory){return new Promise(resolve=>{viewer=factory({terminal:{rows:35,columns:400},requestRender(){}},theme,{ matches: () => false },resolve);});},
     }};
   extension({on:(name,handler)=>events.set(name,handler), registerTool(){}, registerCommand:(name,command)=>commands.set(name,command), registerShortcut(){}, registerMessageRenderer(){},
     sendMessage:(message,options)=>{messages.push({message,options,parent});entriesByParent.get(parent).push({type:'custom_message',customType:message.customType,details:message.details});}});
@@ -311,6 +311,32 @@ test('human t action interrupts rather than releases and records the actual rece
     assert.equal(calls,1);assert.match(h.messages[0].message.content,/captured turn has ended/);
     assert.equal(h.messages[0].options.triggerTurn,false);
   } finally {close.mock.restore();interrupt.mock.restore();await h.close();}
+});
+
+test('human interrupt keeps its captured target when confirmation outlives the run', async t => {
+  for (const inline of [false, true]) {
+    const h = harness(t, 'running'), calls = [];
+    h.before.runtimeId = randomUUID();
+    const expected = { runId: h.before.runId, runtimeId: h.before.runtimeId };
+    const replacement = { ...h.before, runId: randomUUID() };
+    h.ctx.ui.confirm = async () => {
+      t.mock.method(AgentManager.prototype, 'get', () => replacement);
+      return true;
+    };
+    const interrupt = t.mock.method(AgentManager.prototype, 'interrupt', async (id, captured) => {
+      calls.push({ id, captured });
+      throw Error('Captured run no longer matches');
+    });
+    try {
+      h.open();
+      if (inline) { h.press('v'); await waitUntil('viewer', () => h.viewer(), 2000); await new Promise(setImmediate); h.viewer().handleInput('t'); }
+      else h.press('t');
+      await waitUntil('interrupt refusal recorded', () => h.messages.length === 1, 2000);
+      assert.deepEqual(calls, [{ id: h.before.id, captured: expected }]);
+      assert.equal(h.messages[0].message.details.runId, expected.runId, 'the refused action belongs to the old target');
+      assert.match(h.messages[0].message.content, /Interrupt request unconfirmed/);
+    } finally { interrupt.mock.restore(); await h.close(); }
+  }
 });
 
 test('human task answers collect custom text locally and submit one logical reply', async t => {

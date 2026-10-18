@@ -214,6 +214,30 @@ test('v3 rejects retired control and stale runtime/run identities without stoppi
   assert.equal(m.get(child.id).phase, 'running');
 });
 
+test('captured interrupt refuses changed run/runtime before contacting the worker', async t => {
+  const h = await peer(t, 3, (res, state, input) => res.end(JSON.stringify({ ...state,
+    receipt: { operation: 'interrupt', status: 'settled', runId: input.expectedRunId, runtimeId: state.runtimeId } })));
+  for (const expected of [{ runId: randomUUID(), runtimeId: h.state.runtimeId },
+    { runId: h.state.runId, runtimeId: randomUUID() }]) {
+    await assert.rejects(h.m.interrupt(h.id, expected), /captured.*no longer matches/i);
+  }
+  assert.equal(h.calls.length, 0);
+  assert.equal(h.m.get(h.id).phase, 'running');
+});
+
+test('interrupt keeps its checked snapshot when the endpoint advances before the request', async t => {
+  const h = await peer(t, 3, (res, state, input) => res.end(JSON.stringify({ ...state, runId: input.expectedRunId,
+    receipt: { operation: 'interrupt', status: 'settled', runId: input.expectedRunId, runtimeId: state.runtimeId } }))), request = h.m.request.bind(h.m);
+  t.mock.method(h.m, 'request', (id, input, captured) => {
+    const next = { ...h.state, runId: randomUUID() };
+    writeJson(path.join(h.m.root, id, 'state.json'), next);
+    writeJson(path.join(h.m.root, id, 'endpoint.json'), { ...h.endpoint, runId: next.runId });
+    return request(id, input, captured);
+  });
+  await assert.rejects(h.m.interrupt(h.id), /stale|identity/i);
+  assert.equal(h.calls.length, 0, 'a later run must not inherit this interrupt');
+});
+
 test('captured idle release refuses a newer run or runtime and preserves completed reports', { timeout: 20000 }, async t => {
   const { cwd, m } = setup(t); const child = await m.spawn('worker', role, cwd, 'REMEMBER original');
   const first = await idle(m, child.id), expected = { runId: first.runId, runtimeId: first.runtimeId };

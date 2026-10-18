@@ -660,8 +660,8 @@ ${view(state, args.action === "interrupt")}`);
   async function interruptOrRelease(ctx: ExtensionContext, manager: AgentManager, epoch: number,
     action: Extract<PanelAction, { kind: "stop" | "interrupt" | "release-uncertain" }>, state: AgentView): Promise<PanelStep> {
     const release = action.kind !== "interrupt", uncertain = action.kind === "release-uncertain";
-    if (action.kind !== "interrupt" && (!(uncertain ? canReleaseUncertain(state) : canRelease(state)) || state.runId !== action.expected.runId || state.runtimeId !== action.expected.runtimeId)) {
-      ctx.ui.notify(`${state.role} is no longer the captured ${uncertain ? "uncertain" : "idle"} runtime; nothing was released.`, "warning"); return "next";
+    if (state.runId !== action.expected.runId || state.runtimeId !== action.expected.runtimeId || release && !(uncertain ? canReleaseUncertain(state) : canRelease(state))) {
+      ctx.ui.notify(`${state.role} is no longer the captured ${release ? `${uncertain ? "uncertain" : "idle"} runtime` : "turn"}; nothing was ${release ? "released" : "interrupted"}.`, "warning"); return "next";
     }
     const confirmed = await ctx.ui.confirm(uncertain ? "Release uncertain subagent?" : release ? "Release idle subagent?" : "Interrupt the current subagent turn?", uncertain
       ? `${state.role} ${action.id.slice(0, 8)}, runtime ${state.runtimeId}: request release of this uncertain runtime. This may end active work and discard unreported output; it does not prove whether the input executed or undo file changes. Keep the native session and recorded results. Changed ownership or a known accepted turn is refused.`
@@ -670,11 +670,9 @@ ${view(state, args.action === "interrupt")}`);
       : `${state.role} ${action.id.slice(0, 8)}: end only the current turn, retaining the runtime and native session. This does not undo file changes.`);
     if (!confirmed || epoch !== sessionEpoch) return "next";
     let result: AgentView;
-    try { result = action.kind === "interrupt" ? await manager.interrupt(action.id) : await manager.close(action.id, !uncertain, action.expected, uncertain); }
+    try { result = action.kind === "interrupt" ? await manager.interrupt(action.id, action.expected) : await manager.close(action.id, !uncertain, action.expected, uncertain); }
     catch (error) {
-      let observed = state;
-      if (!release) try { observed = manager.get(action.id); } catch { /* Preserve the pre-request identity. */ }
-      recordHumanAction(ctx, manager, observed, `${release ? "Release" : "Interrupt"} request unconfirmed: ${(error as Error).message}\nInspect before retrying.`, epoch);
+      recordHumanAction(ctx, manager, state, `${release ? "Release" : "Interrupt"} request unconfirmed: ${(error as Error).message}\nInspect before retrying.`, epoch);
       throw error;
     }
     recordHumanAction(ctx, manager, result, receiptText(result), epoch);

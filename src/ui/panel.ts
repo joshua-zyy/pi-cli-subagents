@@ -8,7 +8,7 @@ export type PanelAction =
   | { kind: "stop"; id: string; expected: { runId: string; runtimeId: string } }
   | { kind: "release-uncertain"; id: string; expected: { runId: string; runtimeId: string } }
   | { kind: "close-idle"; targets: AgentView[] }
-  | { kind: "interrupt"; id: string }
+  | { kind: "interrupt"; id: string; expected: { runId: string; runtimeId?: string } }
   | { kind: "reply"; id: string; questionId: string };
 
 export const PANEL_MAX_ROWS = 8;
@@ -115,7 +115,7 @@ export class AgentsPanel {
   handleInput(data: string): void {
     if (this.settled) return;
     const agent = this.agents[this.index];
-    if (agent && matchesKey(data, "t") && canInterrupt(agent)) { this.finish({ kind: "interrupt", id: agent.id }); return; }
+    if (agent && matchesKey(data, "t") && canInterrupt(agent)) { this.finish({ kind: "interrupt", id: agent.id, expected: { runId: agent.runId, runtimeId: agent.runtimeId } }); return; }
     if (this.view === "list") {
       if (matchesKey(data, "c") && this.idleTargets.length) { this.finish({ kind: "close-idle", targets: this.idleTargets }); return; }
       if (matchesKey(data, "h")) {

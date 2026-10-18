@@ -401,7 +401,7 @@ export class ConversationViewer {
     }
     else if (agent && !this.sending && matchesKey(data, "s") && canMessage(agent)) {
       this.finish({ kind: "message", id: agent.id, resume: canResume(agent.phase) }); return;
-    } else if (agent && matchesKey(data, "t") && canInterrupt(agent)) { this.finish({ kind: "interrupt", id: agent.id }); return; }
+    } else if (agent && matchesKey(data, "t") && canInterrupt(agent)) { this.finish({ kind: "interrupt", id: agent.id, expected: { runId: agent.runId, runtimeId: agent.runtimeId } }); return; }
     else if (agent && matchesKey(data, "x") && canRelease(agent)) { this.finish({ kind: "stop", id: agent.id, expected: { runId: agent.runId, runtimeId: agent.runtimeId } }); return; }
     else if (agent && matchesKey(data, "x") && canReleaseUncertain(agent)) { this.finish({ kind: "release-uncertain", id: agent.id, expected: { runId: agent.runId, runtimeId: agent.runtimeId } }); return; }
     if (direction === "newer" && this.follow && (this.pagingInFlight === "older" || this.history.readerWindow?.atEnd === false)) this.requestPage("latest");
