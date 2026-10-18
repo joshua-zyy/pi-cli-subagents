@@ -378,6 +378,25 @@ test('human form display escapes controls while preserving native field IDs and 
   } finally {reply.mock.restore();await h.close();}
 });
 
+test('unchanged editor prefill returns the original native value', async t => {
+  for (const prefill of ['Text\x1b[2J\u202e\u2069', '', undefined]) {
+    const h = harness(t, 'waiting'), replies = [];
+    h.before.questions = [{ id: 'native-editor', method: 'editor', title: 'Edit', prefill }];
+    t.mock.method(AgentManager.prototype, 'reply', async (_id, _q, answer) => { replies.push(answer); return h.before; });
+    h.ctx.ui.editor = async (_title, shown) => {
+      if (shown !== undefined) assert.doesNotMatch(shown, /[\x1b\u202e\u2069]/u);
+      if (prefill) assert.notEqual(shown, prefill, 'the visible prefill is escaped');
+      return shown;
+    };
+    try {
+      h.open(); h.press('i'); h.press('r');
+      await waitUntil('unchanged editor reply', () => h.messages.length === 1, 2000);
+      assert.deepEqual(replies, [prefill === undefined ? { cancelled: true } : { value: prefill }]);
+      assert.equal(h.before.questions[0].prefill, prefill);
+    } finally { await h.close(); }
+  }
+});
+
 test('all native dialog displays escape controls and preserve exact response values', async t => {
   const poison = '\x1b[2J\u202e\u2069', displays = [];
   for (const method of ['confirm', 'select', 'input', 'editor']) {
