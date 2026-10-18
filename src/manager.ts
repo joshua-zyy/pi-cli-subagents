@@ -12,7 +12,7 @@ import { inspectPiSession } from "./pi-adapter.js";
 import { claudeLaunch } from "./claude-launch.js";
 import { inspectClaudeSession } from "./claude-adapter.js";
 import { nativeSession } from "./cli-adapter.js";
-import { mcpError, modeError, skillsError, subagentsError, toolTrimError } from "./roles.js";
+import { validateRoleFile } from "./roles.js";
 import { WorkspaceDecisionRequired, WorkspaceStore, type ResumeOptions } from "./workspace.js";
 import { directories, jsonFiles, processAbsent, processAlive, readJson, shorten, waitUntil, writeJson, writeJsonExclusive } from "./storage.js";
 import type { AgentSpec, AgentState, AgentView, Control, ControlResult, Delivery, Endpoint, Launch, NativeSession, OperationReceipt, ReclaimRecord, Report, Role, SessionHandle, StartRequest, TaskRun } from "./types.js";
@@ -452,19 +452,7 @@ export class AgentManager {
 
   async spawn(roleName: string, role: Role, cwd: string, message: string, workspace?: string): Promise<AgentView> {
     if (!message.trim()) throw new Error("Task must not be empty");
-    if (role.cli !== undefined && !["pi", "codex", "claude"].includes(role.cli)) throw new Error("Unsupported CLI");
-    if (role.defaultModeQuestions !== undefined && (role.cli !== "codex" || typeof role.defaultModeQuestions !== "boolean")) throw new Error("defaultModeQuestions requires cli: codex and a boolean");
-    if (role.cli === "claude" && role.provider) throw new Error("Claude does not accept a Pi provider");
-    if (role.cli === "claude" && role.thinking !== undefined && !["low", "medium", "high", "xhigh", "max"].includes(role.thinking)) throw new Error("Claude thinking must be low, medium, high, xhigh or max");
-    if (role.cli === "codex" && (role.provider || role.thinking)) throw new Error("Codex role does not accept Pi provider/thinking fields");
-    if (role.cli !== "codex" && role.effort) throw new Error("Codex effort requires cli: codex");
-    if (role.mode !== undefined) { const invalid = modeError(role.cli, role.mode); if (invalid) throw new Error(invalid); }
-    if (role.tools !== undefined) { const invalid = toolTrimError(role.cli, role.tools); if (invalid) throw new Error(invalid); }
-    if (role.skills !== undefined) { const invalid = skillsError(role.cli, role.skills); if (invalid) throw new Error(invalid); }
-    if (role.mcp !== undefined) { const invalid = mcpError(role.cli, role.mcp); if (invalid) throw new Error(invalid); }
-    // Same shape rule as the role loader: a non-boolean here would silently mean "deny", so refuse it.
-    const subagents = subagentsError(role.cli, role.allowSubagents, role.tools);
-    if (subagents) throw new Error(subagents);
+    role = validateRoleFile({ launch: role }, "Subagent role").launch;
     const id = randomUUID(), dir = this.directory(id);
     const admission = this.admit(id, { newRuntime: true });
     const start = async (directory: string, baseline?: AgentSpec["workspaceBaseline"], notice?: string): Promise<AgentView> => {

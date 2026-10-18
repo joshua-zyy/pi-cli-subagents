@@ -117,6 +117,18 @@ test('spawning a non-Pi role with a Pi-only field refuses before creating anythi
   assert.equal(fs.existsSync(manager.root), false, 'a refused role must not create even the instance root');
 });
 
+test('direct manager role validation matches file validation before creating records', async () => {
+  const cwd = tempDir('role-boundary'), manager = new AgentManager(path.join(cwd, 'parent.jsonl'), launch);
+  for (const extra of [{ provider: 42 }, { model: '' }, { thinking: 'bogus' }, { description: '' }, { instructions: '' }, { effort: '' }]) {
+    const role = { ...defaultRoles.worker, ...extra };
+    let expected;
+    try { validateRoleFile({ launch: role }, 'Subagent role'); } catch (error) { expected = error.message; }
+    assert(expected, 'the role file must reject this shape');
+    await assert.rejects(manager.spawn('worker', role, cwd, 'DO NOT START'), error => error.message === expected);
+  }
+  assert.equal(fs.existsSync(manager.root), false);
+});
+
 test('claude denial merges the role list with the no-respawn default', () => {
   assert.deepEqual(claudeToolDenyArgs({ tools: { deny: ['Bash'] } }), ['--disallowedTools', 'Bash,Agent'],
     'one flag carries both, because a second --disallowedTools could swallow what follows');
