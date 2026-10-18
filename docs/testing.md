@@ -1,8 +1,8 @@
-# Local Test Tiers and Verification Costs
+# 本地测试分层与验证成本
 
 问题、尝试过的方法、对应分支、失败证据和当前结论统一维护在插件迭代记录（本地保留，不进仓库、不随包发布）；本页保留测试入口、分层与验证边界。
 
-## Entry points and boundaries
+## 测试入口与边界
 
 复用现有 Node 测试入口；`scripts/test.mjs` 在导入前隔离环境并按文件串行执行。当前有四层，精确文件集合以 manifest 为准，测试数量与耗时以当次输出为准。
 
@@ -15,20 +15,20 @@
 | `npm test` | 上述四层的并集，不包含真实模型验收 |
 | `npm run test:list` | 仅列出全部本地测试，并明确未运行真实验收 |
 
-Execution entry points build `dist/` first; `test:list` does not build. With a current build, run `node scripts/test.mjs fast` directly.
+执行入口会先构建 `dist/`，`test:list` 除外。已有最新构建时，可直接运行 `node scripts/test.mjs fast`。
 
-File classification is defined in [`scripts/test-tiers.json`](../scripts/test-tiers.json). Every formal `.test.mjs` file must belong to exactly one tier. Duplicates, omissions, missing files and non-test entries fail before test imports rather than being silently skipped.
+文件分类定义在 [`scripts/test-tiers.json`](../scripts/test-tiers.json)。每个正式的 `.test.mjs` 文件必须且只能属于一层；重复、遗漏、缺失文件或非测试条目都会在导入测试前失败，不会静默跳过。
 
 ```bash
-# List a tier without executing it
+# 仅列出某一层，不执行
 node scripts/test.mjs domain --list
 
-# Run only the specified files in that tier (no implicit fast-tier run)
+# 仅运行该层的指定文件，不隐式运行 fast 层
 npm run test:domain -- workspace.test.mjs
 npm run test:acceptance:local -- extension.test.mjs tool-receipts.test.mjs
 ```
 
-Files from other tiers, unknown tiers, arbitrary paths and `real-smoke.mjs` are rejected. Real-model scripts such as `test/real-smoke.mjs` are excluded from these entry points and explicitly reported as **NOT_RUN**. Their existing standalone invocation remains unchanged and still requires explicit user authorization. A local PASS does not establish acceptance of real CLIs, models, OS crashes or the human TUI experience.
+入口拒绝其他层的文件、未知层、任意路径和 `real-smoke.mjs`。`test/real-smoke.mjs` 等真实模型脚本不在这些入口内，输出明确标为 **NOT_RUN**；原有独立调用方式不变，仍须用户明确授权。本地 PASS 不代表真实 CLI、模型、系统崩溃场景或人工 TUI 体验已验收。
 
 ## 真实验收证据的只读审计器
 
@@ -44,32 +44,28 @@ node test/acceptance/audit.mjs .test-output/manual-acceptance/<case>/case.mjs
 - 父会话是只追加的：轮次结束后的人工操作会追加自己的记录。不要断言"会话中不存在更晚的行"，而应按行号把该断言限定在本轮通知窗口内。
 - 该审计器取代 2026-10-12 之前每轮手写的 `-audit.mjs`；旧脚本保留在各自 case 目录作为历史记录。首轮以 2026-10-11/10-12 的 8 个真实轮次回放验证，8/8 PASS，其中产物已清理的轮次逐项列出 `unavailable`。回放不构成新的真实模型验收。
 
-## Tiers, gates and known flakes
+## 分层、门禁与已知偶发失败
 
-Four local tiers, all selected from `scripts/test-tiers.json` (every `*.test.mjs` must be classified exactly once):
+四个本地层均从 `scripts/test-tiers.json` 选取，每个 `*.test.mjs` 必须且只能归入一层：
 
-| Tier | What belongs here | Wall clock on 2026-10-18 |
+| 分层 | 范围 | 2026-10-18 的一次实测耗时 |
 | --- | --- | --- |
-| `fast` | pure logic, record-level stubs, no child process | ~27s |
-| `domain` | local git/persistence/adapters against fixtures | ~94s |
-| `acceptance-local` | closed-loop manager/UI rounds with the local CLI fixture | ~125s |
-| `acceptance-slow` | the three heavy real-process files (`manager`, `residency`, `workspace-manager`) | ~165s |
+| `fast` | 纯逻辑与记录替身，不启动子进程 | ~27s |
+| `domain` | 本地 Git、持久化和 adapter 的夹具验证 | ~94s |
+| `acceptance-local` | 使用本地 CLI 夹具的 manager/UI 闭环 | ~125s |
+| `acceptance-slow` | 三个重型进程验收文件：`manager`、`residency`、`workspace-manager` | ~165s |
 
-`npm run gates` builds once and runs check, fast, domain and acceptance-local in order, printing a
-per-gate wall clock and a single exit code; `npm run gates -- --slow` adds acceptance-slow for a
-close-out run. Without `--slow` the same four gates used to rebuild `dist` four times (~4s each).
+`npm run gates` 只构建一次，依次运行 check、fast、domain、acceptance-local，并输出各门禁耗时和统一退出码。`npm run gates -- --slow` 增加 acceptance-slow，用于收尾验收。此前分开执行这些入口会重复构建四次，每次约 4 秒。
 
-`scripts/known-flakes.json` labels the failures already investigated (I-007 in `shutdown`, I-015 in
-`residency`). The label is printed before and after a run, but a hit is still a failure and still
-exits non-zero: it only saves a reader the diagnosis.
+`scripts/known-flakes.json` 标注已调查的偶发失败：`shutdown` 的 I-007 和 `residency` 的 I-015。运行前后都会输出标注，但命中仍算失败，退出码仍非零；标注只提供诊断线索。
 
-## Environment isolation
+## 环境隔离
 
-Each execution creates a temporary `PI_CODING_AGENT_DIR` and applies it before child-process module imports, preventing the user's worker-role configuration from redirecting a Pi fixture to real Codex/Claude. It also clears the inherited `PI_CLI_SUBAGENT` marker so extension registration does not return early. The real child-agent recursion guard remains intact; tests do not disable it.
+每次执行都会创建临时 `PI_CODING_AGENT_DIR`，在导入子进程模块前应用，避免用户的 worker 角色配置把 Pi 夹具重定向到真实 Codex/Claude。入口还会清除继承的 `PI_CLI_SUBAGENT`，避免测试宿主的扩展注册提前返回；真实子代理的递归保护仍保留，测试不关闭该保护。
 
-The Node runner uses `--test-concurrency=1` and does not modify the parent process environment or the user's global configuration. The temporary home is cleaned up on normal completion and failure, preserving the test exit code. This entry point is not an OS sandbox and does not guarantee temporary-directory cleanup after a force kill or power loss.
+Node 测试运行器使用 `--test-concurrency=1`，不修改父进程环境或用户全局配置。正常完成或失败后都会清理临时目录并保留测试退出码。该入口不提供操作系统沙箱，也不保证强制结束或断电后仍能清理目录。
 
-Launcher tests use independent miniature repositories to verify real process boundaries. Before starting the inner runner, they remove `NODE_TEST_CONTEXT` only in the fixture environment so Node does not mistake it for recursive execution of the outer test and silently skip it.
+运行器测试使用独立的小型仓库验证真实进程边界。启动内部运行器前，仅在夹具环境中移除 `NODE_TEST_CONTEXT`，避免 Node 将其误认为外层测试的递归执行而静默跳过。
 
 ## 开发 SDK 与安全依赖
 
@@ -82,6 +78,21 @@ Launcher tests use independent miniature repositories to verify real process bou
 ## 转录读取兼容性变更
 
 已删除 `TranscriptReader.readRecent()` 及其尾部预览、后台全量重放和交接状态。直接深度导入 `dist/transcript.js` 调用该方法的外部代码需要迁移；不保留兼容代理。顺序解析继续使用 `TranscriptReader.read()`，交互式历史查看继续使用现有 `TranscriptWindow` 的有界按需分页。相关旧 API 测试随行为退休；独立的 UI 暂停定位、合并绘制与通知保留测试迁入 `conversation.test.mjs`，分页、原生身份过滤及字节边界仍由现有 window/seek 测试覆盖。
+
+未使用的导出常量 `TEXT_FIELDS` 也已删除。深度导入 `dist/role-settings.js` 并依赖该常量的外部代码需要移除该依赖；不提供兼容导出。
+
+## 旧 worker 的清理边界
+
+旧 worker 不会被热替换。缺少 `protocolVersion` 的 v1 worker 不支持受保护的公共 stop、interrupt 或 UI 释放；本次不新增 legacy force-close。缺少 `preserveAccepted` 能力的旧 v2 worker 仍可先中断当前轮，再通过 idle-only UI 释放；该建议不适用于 v1。
+
+v1 需要人工清理时：
+
+1. 从 `subagent_query get` 及实例目录的 `state.json`、`owner.lock`、日志中记录原 `workerPid`、`cliPid`、运行目录与实例身份。
+2. 在操作系统进程详情中核对启动时间、命令行和父子关系，确认 PID 仍属于该实例。PID 可能复用；无法确认时不要按旧 PID 结束进程。
+3. 仅人工结束确认属于该实例的 worker 与 CLI 子进程树。这会中断工作，可能丢失尚未报告的输出，不会撤销文件修改；保留会话与诊断记录。
+4. 复查进程是否确实消失，不手工改写状态为 closed、不删除锁来伪造释放。v1 缺少 runtimeId，也不能使用现有的 v2 reclaim；人工结束后仍可能显示 unreachable 并占用原父会话配额，本版本不提供 v1 自动迁移或配额回收。
+
+Pi 的 `handled` 失败释放说明只指初始输入，以及 idle/原会话恢复后启动新轮的输入；运行中 steer 被扩展处理时，不会把既有轮次改成失败或伪造终态，其 accepted 回执也不代表模型执行。
 
 ## Claude 原会话恢复预检
 
@@ -116,23 +127,23 @@ Claude 驻留验收复用原 adapter/manager/workspace 替身：同 worker/CLI �
 
 人工操作记录默认一行折叠，使用 Pi 当前展开键查看完整正文。批量成功只弹出释放数量，部分失败仍显示各目标诊断；原正文、outbox、去重及 `triggerTurn:false` 保持不变。覆盖列表边界、历史恢复、忙碌/换代拒绝、真实本地 fixture 释放和无模型消息组件；不替代人工 TUI 与真实模型验收。
 
-## Tier selection rules
+## 测试分层选择规则
 
-1. For everyday changes, run the fast tier and relevant domain files. Changes to shared entry points such as `src/index.ts` or notifications/receipts also need the corresponding local acceptance checks.
-2. For native CLI adapter changes, run the relevant adapter domain tests and manager/workspace local acceptance checks. This does not automatically authorize real-model calls.
-3. Close-out without CI requires at least the complete fast and domain tiers. Use `npm test` for full local regression after changes to shared schemas, cross-tier contracts or test entry points.
-4. Update the manifest before adding tests. Classify by actual dependencies, not filenames. A few mixed-tier files remain, such as `core.test.mjs` and `tool-receipts.test.mjs`; do not refactor their contents just for tiering.
-5. Treat 20 seconds of fast-tier wall time as a review threshold, not a failure gate. If exceeded, check machine load, dependencies and tier assignment first; do not remove safety coverage to meet a time or test-count target. Removing or merging tests requires separate counterexample/mutation evidence.
+1. 日常修改运行 fast 层和相关 domain 文件；修改 `src/index.ts` 等共享入口或通知、回执时，还须运行对应本地验收。
+2. 修改原生 CLI adapter 时，运行相关 adapter 域测试及 manager/workspace 本地验收；这不自动授权真实模型调用。
+3. 无 CI 时，收尾至少运行完整 fast 和 domain 层。修改共享结构、跨层契约或测试入口后，用 `npm test` 执行全量本地回归。
+4. 新增测试前更新 manifest，按真实依赖分类，不按文件名分类。`core.test.mjs`、`tool-receipts.test.mjs` 等少数文件混合了多个层次，不应只为分类而重构内容。
+5. fast 层总耗时 20 秒是复核阈值，不是失败门禁。超出时先检查机器负载、依赖和分类；不为时间或数量目标删除保护性覆盖。删除或合并测试须有独立反例或变异验证证据。
 
-## Cost measurements
+## 历史成本测量
 
-These measurements were collected in one run per entry point on 2026-10-08 at `685b6c3` (Windows / Node 22.21.0); each entry point includes one build. All passed with skipped=0; real CLI/model acceptance was NOT_RUN throughout. The counts are the current suite, which is larger than the historical `b45f3a6` baseline in the tables above.
+以下是 2026-10-08 在 `685b6c3`（Windows / Node 22.21.0）上的历史测量，每个入口各运行一次，含一次构建。全部通过且 skipped=0，真实 CLI/模型始终为 NOT_RUN。当时测试数量高于更早的 `b45f3a6` 基线，不代表当前数量。
 
-| Entry point | Passed / total | Wall time including build | Node runner time |
+| 入口 | 通过 / 总数 | 含构建总耗时 | Node 测试耗时 |
 |---|---:|---:|---:|
 | `npm run test:fast` | 262 / 262 | 20.17 s | 16.09 s |
 | `npm run test:domain` | 65 / 65 | 70.72 s | 66.55 s |
 | `npm run test:acceptance:local` | 90 / 90 | 179.71 s | 175.25 s |
 | `npm test` | 417 / 417 | 248.29 s | 243.99 s |
 
-Tiering reduces the cost of selecting tests for everyday changes; it does not claim to accelerate the full suite. The full-suite 248.29 seconds came from an independent run, not the sum of the three tier times. The fast tier now carries 29 files and 262 tests (the baseline above had 26 and 239), which is why its 20.17 seconds including build sits at the review threshold in rule 5. Local logs are in the ignored `.test-output/tiers-*.log` and `tiers-timings.json`. Remeasure after environment or test changes; this table is not a continuing performance guarantee.
+分层降低日常选择测试的成本，不保证加速全量执行。表中的全量 248.29 秒来自独立运行，不是三层耗时相加。当时 fast 层有 29 个文件、262 项测试，更早基线为 26 个文件、239 项测试；含构建 20.17 秒达到规则 5 的复核阈值。本地历史日志位于忽略的 `.test-output/tiers-*.log` 和 `tiers-timings.json`。环境或测试变化后应重新测量，本表不提供持续性能保证。
