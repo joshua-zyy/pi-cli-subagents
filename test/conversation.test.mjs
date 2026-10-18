@@ -378,6 +378,17 @@ test('viewer disposal leaves host onSend completion intact without repainting or
   } finally { viewer.dispose(); }
 });
 
+test('viewer offers a captured uncertain release without offering interruption or messages', async t => {
+  const agent = { ...state, phase: 'unreachable', protocolVersion: 2, runtimeId: 'runtime', error: 'Input delivery uncertain' };
+  const h = harness(async () => ({ agent, entries: [], loading: false }));
+  t.after(() => h.viewer.dispose());
+  await new Promise(setImmediate);
+  const frame = h.viewer.render(160).join('\n');
+  assert.match(frame, /x release uncertain/); assert.doesNotMatch(frame, /t interrupt|Enter message/);
+  h.viewer.handleInput('x');
+  assert.deepEqual(h.actions, [{ kind: 'release-uncertain', id: agent.id, expected: { runId: agent.runId, runtimeId: agent.runtimeId } }]);
+});
+
 test('prepending history preserves paused position and does not erase a send notice', async t => {
   const frames = [], actions = [];
   const agent = { id: 'agent', role: 'worker', phase: 'running', runId: 'r' };

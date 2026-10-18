@@ -14,7 +14,7 @@ import { claudeDefaultValues, probeRoleDefaults, type NativeDefaults } from "./r
 import { addRole, deleteRole, FIELD_LABELS, fieldValue, readScope, roleRows, setField, writeScope, type Scope } from "./role-settings.js";
 import { AgentsPanel, paneRows, type PanelAction } from "./ui/panel.js";
 import { RoleSettingsPanel, SETTINGS_MAX_ROWS, type RoleSettingsAction, type RoleSettingsCursor } from "./ui/role-settings.js";
-import { canMessage, canResume, canSteer, canRelease, hasFailure, oneLine, viewStatus } from "./ui/format.js";
+import { canMessage, canResume, canSteer, canRelease, canReleaseUncertain, hasFailure, oneLine, viewStatus } from "./ui/format.js";
 import { StatusWidget } from "./ui/status.js";
 import { TranscriptWindow, WINDOW_MAX_BYTES } from "./transcript-window.js";
 import { TranscriptCache, TRANSCRIPT_CACHE_LIMITS, type TranscriptIdentity } from "./ui/transcript-cache.js";
@@ -656,19 +656,21 @@ ${view(state, args.action === "interrupt")}`);
     return "next";
   }
 
-  /** Interrupt one captured turn or release one captured idle runtime, after confirming that exact target. */
+  /** Confirm one captured interrupt, idle release, or uncertain-runtime recovery. */
   async function interruptOrRelease(ctx: ExtensionContext, manager: AgentManager, epoch: number,
-    action: Extract<PanelAction, { kind: "stop" | "interrupt" }>, state: AgentView): Promise<PanelStep> {
-    const release = action.kind === "stop";
-    if (action.kind === "stop" && (!canRelease(state) || state.runId !== action.expected.runId || state.runtimeId !== action.expected.runtimeId)) {
-      ctx.ui.notify(`${state.role} is no longer the captured idle runtime; nothing was released.`, "warning"); return "next";
+    action: Extract<PanelAction, { kind: "stop" | "interrupt" | "release-uncertain" }>, state: AgentView): Promise<PanelStep> {
+    const release = action.kind !== "interrupt", uncertain = action.kind === "release-uncertain";
+    if (action.kind !== "interrupt" && (!(uncertain ? canReleaseUncertain(state) : canRelease(state)) || state.runId !== action.expected.runId || state.runtimeId !== action.expected.runtimeId)) {
+      ctx.ui.notify(`${state.role} is no longer the captured ${uncertain ? "uncertain" : "idle"} runtime; nothing was released.`, "warning"); return "next";
     }
-    const confirmed = await ctx.ui.confirm(release ? "Release idle subagent?" : "Interrupt the current subagent turn?", release
+    const confirmed = await ctx.ui.confirm(uncertain ? "Release uncertain subagent?" : release ? "Release idle subagent?" : "Interrupt the current subagent turn?", uncertain
+      ? `${state.role} ${action.id.slice(0, 8)}, runtime ${state.runtimeId}: request release of this uncertain runtime. This may end active work and discard unreported output; it does not prove whether the input executed or undo file changes. Keep the native session and recorded results. Changed ownership or a known accepted turn is refused.`
+      : release
       ? `${state.role} ${action.id.slice(0, 8)}: release only this idle runtime. Keep the native session, last run outcome and results. Changed or busy targets are refused.`
       : `${state.role} ${action.id.slice(0, 8)}: end only the current turn, retaining the runtime and native session. This does not undo file changes.`);
     if (!confirmed || epoch !== sessionEpoch) return "next";
     let result: AgentView;
-    try { result = action.kind === "stop" ? await manager.close(action.id, true, action.expected) : await manager.interrupt(action.id); }
+    try { result = action.kind === "interrupt" ? await manager.interrupt(action.id) : await manager.close(action.id, !uncertain, action.expected, uncertain); }
     catch (error) {
       let observed = state;
       if (!release) try { observed = manager.get(action.id); } catch { /* Preserve the pre-request identity. */ }
@@ -770,7 +772,7 @@ ${view(state, args.action === "interrupt")}`);
             // Re-read state before acting: the list is a snapshot, not an authorization or lifecycle guarantee.
             const state = manager.get(pending.id);
             if (pending.kind === "reply") { await replyPrompt(ctx, manager, pending.id, pending.questionId); continue; }
-            if (pending.kind === "stop" || pending.kind === "interrupt") { if (await interruptOrRelease(ctx, manager, epoch, pending, state) === "stop") return; continue; }
+            if (pending.kind === "stop" || pending.kind === "interrupt" || pending.kind === "release-uncertain") { if (await interruptOrRelease(ctx, manager, epoch, pending, state) === "stop") return; continue; }
             if (await messageFromRoster(ctx, manager, epoch, pending, state) === "stop") return;
           } catch (error) { if (epoch !== sessionEpoch) return; ctx.ui.notify((error as Error).message, "error"); }
         }

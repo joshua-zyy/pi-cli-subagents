@@ -1,11 +1,12 @@
 import { matchesKey, stripTerminalSequences, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import type { AgentView } from "../types.js";
-import { canInterrupt, canMessage, canResume, canRelease, isReleased, formatElapsed, fitSelection, framePane, isActive, oneLine, rightAlign, shortId, viewElapsed, viewStatus, PANE_FRAME_COLS, PANE_FRAME_MIN_WIDTH, PANE_FRAME_ROWS, SPINNER, type UiColor, type UiTheme } from "./format.js";
+import { canInterrupt, canMessage, canResume, canRelease, canReleaseUncertain, isReleased, formatElapsed, fitSelection, framePane, isActive, oneLine, rightAlign, shortId, viewElapsed, viewStatus, PANE_FRAME_COLS, PANE_FRAME_MIN_WIDTH, PANE_FRAME_ROWS, SPINNER, type UiColor, type UiTheme } from "./format.js";
 
 export type PanelAction =
   | { kind: "view"; id: string }
   | { kind: "message"; id: string; resume: boolean; message?: string }
   | { kind: "stop"; id: string; expected: { runId: string; runtimeId: string } }
+  | { kind: "release-uncertain"; id: string; expected: { runId: string; runtimeId: string } }
   | { kind: "close-idle"; targets: AgentView[] }
   | { kind: "interrupt"; id: string }
   | { kind: "reply"; id: string; questionId: string };
@@ -137,6 +138,7 @@ export class AgentsPanel {
     else if (agent && matchesKey(data, "s") && canMessage(agent.phase)) this.finish({ kind: "message", id: agent.id, resume: canResume(agent.phase) });
     else if (agent && matchesKey(data, "v")) this.finish({ kind: "view", id: agent.id });
     else if (agent && matchesKey(data, "x") && canRelease(agent)) this.finish({ kind: "stop", id: agent.id, expected: { runId: agent.runId, runtimeId: agent.runtimeId } });
+    else if (agent && matchesKey(data, "x") && canReleaseUncertain(agent)) this.finish({ kind: "release-uncertain", id: agent.id, expected: { runId: agent.runId, runtimeId: agent.runtimeId } });
     else if (agent && question && matchesKey(data, "r")) this.finish({ kind: "reply", id: agent.id, questionId: question.id });
     else if (matchesKey(data, "q")) this.finish(undefined);
   }
@@ -283,6 +285,7 @@ export class AgentsPanel {
     const hint: [string, string][] = [["esc/←", "back"], ["↑↓", "scroll"], ["v", "conversation"]];
     if (canInterrupt(agent)) hint.unshift(["t", "interrupt"]);
     if (canRelease(agent)) hint.unshift(["x", "release"]);
+    else if (canReleaseUncertain(agent)) hint.unshift(["x", "release uncertain"]);
     if (canMessage(agent.phase)) hint.push(["s", canResume(agent.phase) ? "resume" : agent.phase === "idle" ? "new task" : "message"]);
     if (question) hint.push(["r", "reply"]);
     hint.push(["q", "close"]);

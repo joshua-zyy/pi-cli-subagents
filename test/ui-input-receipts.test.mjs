@@ -71,6 +71,38 @@ function idleBatch(t, count = 3) {
   return { h, targets, released };
 }
 
+test('uncertain runtime release requires explicit confirmation and preserves captured identity', { timeout: 10000 }, async t => {
+  for (const scenario of ['cancel', 'release', 'changed', 'refused']) {
+    const h = harness(t, 'unreachable'), calls = [];
+    Object.assign(h.before, { protocolVersion: 2, runtimeId: randomUUID(), accepted: true, error: 'Input delivery uncertain' });
+    const expected = { runId: h.before.runId, runtimeId: h.before.runtimeId };
+    h.ctx.ui.confirm = async (title, message) => {
+      assert.match(title, /uncertain/i); assert.match(message, /discard|end.*work/i);
+      assert(message.includes(expected.runtimeId));
+      if (scenario === 'changed') t.mock.method(AgentManager.prototype, 'get', () => ({ ...h.before, runId: randomUUID() }));
+      return scenario !== 'cancel';
+    };
+    t.mock.method(AgentManager.prototype, 'close', async (id, onlyIdle, captured, preserveAccepted) => {
+      calls.push({ id, onlyIdle, captured, preserveAccepted });
+      if (scenario === 'changed') throw Error('Captured run no longer matches');
+      if (scenario === 'refused') throw Error('Worker ownership is uncertain');
+      return { ...h.before, phase: 'closed', runtimeClosed: true, receipt: { operation: 'stop', status: 'released', ...captured } };
+    });
+    try {
+      h.open(); h.press('i'); h.press('x');
+      if (scenario === 'cancel') {
+        await new Promise(setImmediate); assert.deepEqual(calls, []); assert.deepEqual(h.messages, []);
+      } else {
+        await waitUntil('uncertain release record', () => h.messages.length === 1, 2000);
+        assert.deepEqual(calls, [{ id: h.before.id, onlyIdle: false, captured: expected, preserveAccepted: true }]);
+        assert.equal(h.messages[0].message.details.runId, expected.runId);
+        assert.equal(h.messages[0].options.triggerTurn, false);
+        assert.match(h.messages[0].message.content, scenario === 'release' ? /Native processes released/ : /unconfirmed.*Inspect/s);
+      }
+    } finally { await h.close(); }
+  }
+});
+
 test('idle batch cancellation performs no release and writes no action record', { timeout: 5000 }, async t => {
   const { h } = idleBatch(t); let confirms = 0, calls = 0;
   h.ctx.ui.confirm = async () => { confirms++; return false; };
@@ -79,6 +111,21 @@ test('idle batch cancellation performs no release and writes no action record', 
     h.open(); h.press('c'); await new Promise(setImmediate);
     assert.equal(confirms, 1); assert.equal(calls, 0); assert.equal(h.messages.length, 0);
   } finally { await h.close(); }
+});
+
+test('uncertain release refuses a recovered or replaced snapshot before confirmation', { timeout: 5000 }, async t => {
+  for (const changes of [{ phase: 'running' }, { runId: randomUUID() }, { runtimeId: randomUUID() }]) {
+    const h = harness(t, 'unreachable'); let confirms = 0, closes = 0;
+    Object.assign(h.before, { protocolVersion: 2, runtimeId: randomUUID(), accepted: true });
+    t.mock.method(AgentManager.prototype, 'get', () => ({ ...h.before, ...changes }));
+    t.mock.method(AgentManager.prototype, 'close', async () => { closes++; });
+    h.ctx.ui.confirm = async () => { confirms++; return true; };
+    try {
+      h.open(); h.press('i'); h.press('x');
+      await waitUntil('stale uncertain refusal', () => h.notices.some(n => /captured uncertain runtime/.test(n.message)), 2000);
+      assert.equal(confirms, 0); assert.equal(closes, 0); assert.deepEqual(h.messages, []);
+    } finally { await h.close(); }
+  }
 });
 
 test('idle batch reports partial failure per captured target without retrying successful releases', { timeout: 5000 }, async t => {

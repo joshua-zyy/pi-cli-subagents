@@ -89,14 +89,15 @@ test('released instances are hidden by default but remain available in explicit 
   assert.deepEqual(empty.actions,[{kind:'message',id:'released',resume:true}]);
 });
 
-test('x releases only a captured idle runtime with no questions, never an executing or unknown runtime', () => {
+test('x offers idle release or explicit uncertain release only for v2 runtime identities', () => {
   for(const phase of ['starting','running','waiting','stopping','idle','closed','completed','failed','stopped','unreachable'])
   for(const protocolVersion of [undefined,2]) for(const runtimeId of [undefined,'native-owner']) for(const questions of [[],[{id:'q',title:'Pending permission',method:'confirm'}]]){
     const agent=view({phase,protocolVersion,runtimeId,questions}),p=panel([agent]);
-    p.instance.handleInput('i');const allowed=phase==='idle'&&protocolVersion===2&&!!runtimeId&&questions.length===0;
+    p.instance.handleInput('i');const uncertain=phase==='unreachable'&&protocolVersion===2&&!!runtimeId;
+    const allowed=uncertain||(phase==='idle'&&protocolVersion===2&&!!runtimeId&&questions.length===0);
     assert.equal(text(p.render(180)).includes('x release'),allowed,JSON.stringify(agent));
     assert.doesNotMatch(text(p.render(180)),/x stop/);p.instance.handleInput('x');
-    assert.deepEqual(p.actions,allowed?[{kind:'stop',id:agent.id,expected:{runId:agent.runId,runtimeId}}]:[]);
+    assert.deepEqual(p.actions,allowed?[{kind:uncertain?'release-uncertain':'stop',id:agent.id,expected:{runId:agent.runId,runtimeId}}]:[]);
   }
 });
 
@@ -105,11 +106,20 @@ test('c captures only eligible idle runtimes even while an active row is selecte
   const agents = [view(), eligible, view({ phase: 'closed', protocolVersion: 2, runtimeId: 'closed' }),
     view({ phase: 'idle' }), view({ phase: 'idle', protocolVersion: 2 }),
     view({ phase: 'waiting', protocolVersion: 2, runtimeId: 'waiting' }),
+    view({ phase: 'unreachable', protocolVersion: 2, runtimeId: 'uncertain' }),
     view({ phase: 'idle', protocolVersion: 2, runtimeId: 'question', questions: [{ id: 'q', isBlocking: false }] })];
   const p = panel(agents);
   assert.match(text(p.render()), /c release idle/);
   p.instance.handleInput('c'); p.instance.handleInput('c'); p.instance.handleInput(keys.escape);
   assert.deepEqual(p.actions, [{ kind: 'close-idle', targets: [eligible] }]);
+});
+
+test('uncertain release excludes reclaimed accounting and already closed runtimes', () => {
+  for (const extra of [{ runtimeClosed: true }, { reclaimed: { at: 1, evidence: 'absent', nativeReleaseConfirmed: false, continuation: 'blocked' } }]) {
+    const p = panel([view({ phase: 'unreachable', protocolVersion: 2, runtimeId: 'runtime', ...extra })]);
+    p.instance.handleInput('i'); assert.doesNotMatch(text(p.render()), /x release/);
+    p.instance.handleInput('x'); assert.deepEqual(p.actions, []);
+  }
 });
 
 test('c is absent without eligible targets and never acts inside details', () => {
