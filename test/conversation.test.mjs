@@ -377,3 +377,63 @@ test('viewer disposal leaves host onSend completion intact without repainting or
     assert.deepEqual(records, [{ message: 'once', observed: response }]); assert.equal(records[0].observed, response);
   } finally { viewer.dispose(); }
 });
+
+test('prepending history preserves paused position and does not erase a send notice', async t => {
+  const frames = [], actions = [];
+  const agent = { id: 'agent', role: 'worker', phase: 'running', runId: 'r' };
+  const entries = Array.from({ length: 30 }, (_, i) => ({ id: String(i), kind: 'assistant', title: 'Assistant', text: `TAIL_MESSAGE_${i}` }));
+  let snapshot = { entries, loading: false, revision: 1, outputRevision: 1 };
+  const theme = { fg: (_c, text) => text, bold: text => text };
+  const tui = { terminal: { rows: 14, columns: 100 }, requestRender() { frames.push(viewer.render(100).join('\n')); } };
+  const viewer = new ConversationViewer(tui, theme, action => actions.push(action), async () => ({ agent, ...snapshot }),
+    { intervalMs: 10, onSend: async () => { throw Error('SEND_DENIED'); } });
+  t.after(() => viewer.dispose());
+  const waitFor = async check => { for (let i = 0; i < 100; i++) { if (check()) return; await new Promise(r => setTimeout(r, 5)); } assert.fail('viewer condition not reached'); };
+  await waitFor(() => frames.some(frame => frame.includes('TAIL_MESSAGE_29')));
+  viewer.handleInput('\x1b[5~'); // pause above the end
+  viewer.handleInput('\r'); viewer.handleInput('hello'); viewer.handleInput('\r');
+  await waitFor(() => frames.at(-1).includes('SEND_DENIED'));
+  const visible = frames.at(-1).match(/TAIL_MESSAGE_\d+/g);
+  const older = Array.from({ length: 20 }, (_, i) => ({ id: `old-${i}`, kind: 'assistant', title: 'Assistant', text: `OLDER_${i}` }));
+  snapshot = { entries: [...older, ...entries], loading: false, revision: 2, outputRevision: 1 };
+  await waitFor(() => frames.at(-1).includes('Paused'));
+  assert.deepEqual(frames.at(-1).match(/TAIL_MESSAGE_\d+/g), visible);
+  assert.match(frames.at(-1), /SEND_DENIED/);
+  viewer.handleInput('\x1b[F'); assert.match(frames.at(-1), /TAIL_MESSAGE_29/);
+  viewer.handleInput('\x1b'); assert.deepEqual(actions, [undefined]);
+});
+
+test('coalesced append and history prepends preserve the paused viewport', async t => {
+  const agent = { id: 'agent', role: 'worker', phase: 'running', runId: 'r' };
+  const entries = Array.from({ length: 30 }, (_, i) => ({ id: String(i), kind: 'assistant', title: 'Assistant', text: `COALESCED_${i}` }));
+  const pending = []; let calls = 0, renderRequests = 0;
+  const waitFor = async check => { for (let i = 0; i < 100; i++) { if (check()) return; await new Promise(r => setTimeout(r, 5)); } assert.fail('coalescing condition not reached'); };
+  const tui = { terminal: { rows: 14, columns: 100 }, requestRender() { renderRequests++; } };
+  const viewer = new ConversationViewer(tui, { fg: (_c, t) => t, bold: t => t }, () => {}, async () => {
+    if (++calls === 1) return { agent, entries, loading: false, revision: 1, outputRevision: 1 };
+    return new Promise(resolve => pending.push(resolve));
+  }, { intervalMs: 10 });
+  t.after(() => viewer.dispose());
+  await waitFor(() => renderRequests > 0); viewer.render(100);
+  viewer.handleInput('\x1b[5~');
+  const visible = viewer.render(100).join('\n').match(/COALESCED_\d+/g);
+  await waitFor(() => pending.length > 0);
+  const appended = [...entries, { id: 'new', kind: 'assistant', title: 'Assistant', text: 'LIVE_APPEND' }];
+  let before = renderRequests;
+  pending.shift()({ agent, entries: appended, loading: false, revision: 2, outputRevision: 2 });
+  await waitFor(() => renderRequests > before);
+  // Deliberately do NOT render the append frame, as a host may coalesce render requests.
+  await waitFor(() => pending.length > 0);
+  before = renderRequests;
+  const old = Array.from({ length: 20 }, (_, i) => ({ id: `old-${i}`, kind: 'assistant', title: 'Assistant', text: `OLD_${i}` }));
+  pending.shift()({ agent, entries: [...old, ...appended], loading: false, revision: 3, outputRevision: 2 });
+  await waitFor(() => renderRequests > before);
+  // A further append can also be coalesced after handoff; it is not part of the history prepend.
+  await waitFor(() => pending.length > 0);
+  before = renderRequests;
+  pending.shift()({ agent, entries: [...old, ...appended, { id: 'later', kind: 'assistant', title: 'Assistant', text: 'LATER_APPEND' }],
+    loading: false, revision: 4, outputRevision: 3 });
+  await waitFor(() => renderRequests > before);
+  assert.deepEqual(viewer.render(100).join('\n').match(/COALESCED_\d+/g), visible);
+  viewer.handleInput('\x1b[F'); assert.match(viewer.render(100).join('\n'), /LIVE_APPEND/);
+});

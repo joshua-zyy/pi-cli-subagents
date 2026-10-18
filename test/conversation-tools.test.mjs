@@ -95,12 +95,12 @@ test('toggle anchors a paused entry rather than its obsolete line index', async 
   assert.match(h.text(), /Following/);
 });
 
-test('expansion survives updates and historical handoff, but is local to each viewer', async t => {
+test('expansion survives updates and history prepends, but is local to each viewer', async t => {
   const h = await setup(t, [tool('first')]);
   h.viewer.handleInput('\x0f');
-  h.update({ historyLoading: true, entries: [tool('first'), tool('new', 'running')] });
+  h.update({ entries: [tool('first'), tool('new', 'running')] });
   await wait(); assert.match(h.text(), /OUTPUT_new/);
-  h.update({ historyLoading: false, entries: [tool('old'), tool('first'), tool('new', 'done')] });
+  h.update({ entries: [tool('old'), tool('first'), tool('new', 'done')] });
   await wait(); assert.match(h.text(), /OUTPUT_old/);
   const other = await setup(t, [tool('first')]);
   assert.doesNotMatch(other.text(), /OUTPUT_first/);
@@ -143,16 +143,16 @@ test('live revisions reuse unchanged blocks but invalidate on width, theme, mode
   assert.equal(counts.get('OUTPUT_stable'), 5, 'removed entries do not linger in the block cache');
 });
 
-test('coalesced append and historical handoff apply their pending offset exactly once before toggling', async t => {
+test('coalesced append and history prepends preserve their anchor when tools toggle', async t => {
   const entries = Array.from({ length: 25 }, (_, i) => tool(String(i)));
   const h = await setup(t, entries, {}, 14);
-  h.update({ historyLoading: true }); await wait(); h.text();
+  h.text();
   h.viewer.handleInput('\x1b[H');
   for (let i = 0; i < 12; i++) h.viewer.handleInput('\x1b[B');
   assert.match(h.text(), /tool_12/);
   const appended = [...entries, tool('25')];
   h.update({ entries: appended }); await wait(); // Publish, but deliberately do not render.
-  h.update({ historyLoading: false, entries: [tool('olderA'), tool('olderB'), ...appended] });
+  h.update({ entries: [tool('olderA'), tool('olderB'), ...appended] });
   await wait();
   h.viewer.handleInput('\x0f');
   assert.equal(h.text().match(/tool_\d+/)?.[0], 'tool_12');

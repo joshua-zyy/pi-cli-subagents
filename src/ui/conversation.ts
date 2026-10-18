@@ -68,7 +68,6 @@ export class ConversationViewer {
   private closed = false;
   private timer?: NodeJS.Timeout;
   private scroll = 0;
-  private pendingScrollAdjustment?: number;
   private contentWidth?: number;
   private follow = true;
   private totalLines = 0;
@@ -135,12 +134,8 @@ export class ConversationViewer {
     }
     if (this.closed) return;
     try { this.tui.requestRender(); } catch { this.finish(); return; }
-    // Tail catch-up stays fast; background history yields between bounded batches instead of spinning.
-    let delay = this.intervalMs;
-    if (!this.error) {
-      if (loading) delay = 0;
-      else if (this.snapshot?.historyLoading) delay = Math.min(this.intervalMs, 50);
-    }
+    // Catch up through bounded batches before returning to the normal polling interval.
+    const delay = !this.error && loading ? 0 : this.intervalMs;
     this.timer = setTimeout(() => { void this.refresh(); }, delay);
     this.timer.unref?.();
   }
@@ -161,24 +156,11 @@ export class ConversationViewer {
     const next = this.paging ? this.history.accept(incoming, kind, pinned) : incoming;
     const reset = !!this.snapshot && next.sourceEpoch !== this.snapshot.sourceEpoch;
     if (reset) {
-      this.scroll = 0; this.pendingScrollAdjustment = undefined; this.pendingUpRows = 0;
+      this.scroll = 0; this.pendingUpRows = 0;
     }
     const changed = reset || next.revision === undefined || next.revision !== this.snapshot?.revision;
     let anchor: ViewerAnchor | undefined;
-    let before: number | undefined;
-    let handoff = false;
-    if (this.snapshot && width !== undefined && changed) {
-      // A host may coalesce frames, so apply a pending adjustment before measuring the viewport.
-      if (this.pendingScrollAdjustment !== undefined) {
-        this.scroll = Math.max(0, this.scroll + this.pendingScrollAdjustment);
-        this.pendingScrollAdjustment = undefined;
-      }
-      if (!this.follow && !reset) {
-        before = this.content(width).length;
-        anchor = this.topVisibleEntry();
-        handoff = !!this.snapshot.historyLoading && !next.historyLoading;
-      }
-    }
+    if (this.snapshot && width !== undefined && changed && !this.follow && !reset) anchor = this.topVisibleEntry();
     // A log update invalidates layout, not unchanged per-entry renderings.
     // Host/theme invalidation still clears both caches via invalidate().
     if (changed) this.cache = undefined;
@@ -190,16 +172,12 @@ export class ConversationViewer {
       else if (outputRevision !== this.notice.revision && !this.sending) this.notice = undefined;
     }
     if (width === undefined || !changed) return;
-    const rebuilt = anchor || handoff ? (this.content(width), this.cache) : undefined;
+    const rebuilt = anchor ? (this.content(width), this.cache) : undefined;
     const entry = anchor && rebuilt ? rebuilt.entries.find(candidate => candidate.id === anchor.id) ?? this.spanFallback(rebuilt, anchor) : undefined;
     if (entry && anchor) {
       const removedHead = anchor.partial === "head" && this.snapshot.entries.find(item => item.id === entry.id)?.partial !== "head";
       const offset = Math.max(0, anchor.offset - (removedHead ? 1 : 0));
       this.scroll = entry.start + Math.min(offset, Math.max(0, entry.end - entry.start - 1));
-      this.pendingScrollAdjustment = undefined;
-    } else if (handoff && before !== undefined && rebuilt) {
-      // Legacy snapshots without stable ids fall back to the previous line-delta handoff.
-      this.pendingScrollAdjustment = rebuilt.lines.length - before;
     }
   }
 
@@ -310,8 +288,6 @@ export class ConversationViewer {
     let anchor: { id: string; offset: number } | undefined;
     if (!this.follow && width !== undefined) {
       this.content(width);
-      this.scroll = Math.max(0, this.scroll + (this.pendingScrollAdjustment ?? 0));
-      this.pendingScrollAdjustment = undefined;
       for (const entry of this.cache!.entries) {
         if (entry.start > this.scroll) break;
         anchor = { id: entry.id, offset: this.scroll - entry.start };
@@ -406,9 +382,9 @@ export class ConversationViewer {
     }
     // Scrolling the loading placeholder must not disable the initial follow-to-end position.
     if (this.snapshot && this.matches(data, "tui.altScreen.top", "home")) {
-      this.scroll = 0; this.follow = false; this.pendingScrollAdjustment = undefined; this.pendingUpRows = 0; direction = "older";
+      this.scroll = 0; this.follow = false; this.pendingUpRows = 0; direction = "older";
     } else if (this.snapshot && this.matches(data, "tui.altScreen.bottom", "end")) {
-      this.scroll = max; this.follow = true; this.pendingScrollAdjustment = undefined; this.pendingUpRows = 0;
+      this.scroll = max; this.follow = true; this.pendingUpRows = 0;
       // A pending page may move the reader away from the live tail even when the displayed
       // snapshot is still atEnd. End supersedes that result and restores the real tail.
       if (this.snapshot.window && (!this.snapshot.window.atEnd || !this.history.readerWindow?.atEnd || this.pagingInFlight)) this.requestPage("latest");
@@ -448,10 +424,6 @@ export class ConversationViewer {
     this.viewport = this.geometry().viewport;
     if (this.contentWidth === undefined) return;
     this.totalLines = this.content(this.contentWidth).length;
-    if (this.pendingScrollAdjustment !== undefined) {
-      this.scroll = Math.max(0, this.scroll + this.pendingScrollAdjustment);
-      this.pendingScrollAdjustment = undefined;
-    }
     const max = Math.max(0, this.totalLines - this.viewport);
     this.scroll = this.follow ? max : Math.min(max, this.scroll);
   }
@@ -499,10 +471,9 @@ export class ConversationViewer {
       ? this.theme.fg("error", oneLine(error, 120))
       : this.pagingError ? this.theme.fg("error", oneLine(this.pagingError, 120))
         : this.pagingInFlight ? this.theme.fg("dim", this.pagingInFlight === "older" ? "Loading older history..." : this.pagingInFlight === "newer" ? "Loading newer history..." : "Returning to the latest output...")
-          : this.snapshot?.historyLoading ? this.theme.fg(this.snapshot.notice ? "warning" : "dim", `Recent preview · loading history/totals${this.snapshot.notice ? ` · ${oneLine(this.snapshot.notice, 120)}` : ""}`)
-            : this.snapshot?.notice ? this.theme.fg("warning", oneLine(this.snapshot.notice, 120))
-              : !this.snapshot || this.snapshot.loading ? this.theme.fg("dim", "Loading history...")
-                : this.theme.fg("dim", `${this.follow ? "Following" : "Paused"} · ${body.length} lines · ${Math.min(100, percent)}%`);
+          : this.snapshot?.notice ? this.theme.fg("warning", oneLine(this.snapshot.notice, 120))
+            : !this.snapshot || this.snapshot.loading ? this.theme.fg("dim", "Loading history...")
+              : this.theme.fg("dim", `${this.follow ? "Following" : "Paused"} · ${body.length} lines · ${Math.min(100, percent)}%`);
     const hints: string[] = this.snapshot ? ["↑↓ scroll", "PgUp/PgDn", "Home/End"] : [];
     if (this.snapshot?.window && !this.snapshot.window.atStart) hints.push("PgUp older");
     if (this.snapshot?.window && !this.snapshot.window.atEnd) hints.push("End latest");

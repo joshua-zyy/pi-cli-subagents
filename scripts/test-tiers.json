@@ -28,7 +28,6 @@
     "tool-contract.test.mjs",
     "tool-trim.test.mjs",
     "transcript-cache.test.mjs",
-    "transcript-recent.test.mjs",
     "transcript-seek.test.mjs",
     "transcript-window-adversarial.test.mjs",
     "transcript-window.test.mjs",
