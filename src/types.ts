@@ -38,7 +38,7 @@ export interface Role {
   skills?: boolean | string[];
   /** false disables MCP for this Pi role; other backends have no switch and reject it. */
   mcp?: boolean;
-  /** Omitted or false keeps this child from spawning subagents; true allows it. */
+  /** Omitted or false disables delegation; true is supported only by Codex and Claude. */
   allowSubagents?: boolean;
 }
 

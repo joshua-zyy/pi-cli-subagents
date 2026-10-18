@@ -21,10 +21,11 @@ test('trim flags follow the role and keep the no-respawn default', () => {
   assert.deepEqual(trimArgs({ tools: { allow: ['read'], deny: ['write'] } }), ['--tools', 'read', '--exclude-tools', 'write,subagent']);
 });
 
-test('allowing subagents is explicit and can also come from the tool list', () => {
-  assert.deepEqual(trimArgs({ allowSubagents: true }), [], 'the switch alone removes the denial');
-  assert.deepEqual(trimArgs({ tools: { allow: ['read', 'subagent'] } }), ['--tools', 'read,subagent'],
-    'an allowlist that names subagent is the other way to say yes');
+test('Pi refuses unsupported nested delegation instead of silently accepting an ineffective switch', () => {
+  for (const settings of [{ allowSubagents: true }, { tools: { allow: ['read', 'subagent'] } }]) {
+    assert.throws(() => trimArgs(settings), /Pi nested delegation is unsupported/);
+    assert.throws(() => validateRoleFile({ worker: { description: 'd', instructions: 'i', ...settings } }, 'probe'), /Pi nested delegation is unsupported/);
+  }
   assert.deepEqual(trimArgs({ tools: { deny: ['subagent'] } }), ['--exclude-tools', 'subagent'],
     'an explicit denial is not duplicated');
   assert.deepEqual(trimArgs({ allowSubagents: false }), noSubagent, 'false means the same as omitted');
@@ -52,17 +53,17 @@ test('tool trimming is Pi-only and its shape is checked', () => {
 });
 
 test('the role file loader keeps tools and skills and mcp and the respawn switch', () => {
-  const roles = validateRoleFile({ worker: { description: 'd', instructions: 'i', tools: { allow: ['read'] }, skills: ['/s'], mcp: false, allowSubagents: true } }, 'probe');
+  const roles = validateRoleFile({ worker: { description: 'd', instructions: 'i', tools: { allow: ['read'] }, skills: ['/s'], mcp: false, allowSubagents: false } }, 'probe');
   assert.deepEqual(roles.worker.tools, { allow: ['read'] });
   assert.deepEqual(roles.worker.skills, ['/s']);
   assert.equal(roles.worker.mcp, false);
-  assert.equal(roles.worker.allowSubagents, true);
+  assert.equal(roles.worker.allowSubagents, false);
   assert.throws(() => validateRoleFile({ worker: { description: 'd', instructions: 'i', tools: { allow: ['read'] }, cli: 'codex' } }, 'probe'), /Codex exposes no tool allow\/deny list/);
   assert.throws(() => validateRoleFile({ worker: { description: 'd', instructions: 'i', skills: [] } }, 'probe'), /non-empty array of skill paths/);
   assert.throws(() => validateRoleFile({ worker: { description: 'd', instructions: 'i', mcp: 'off' } }, 'probe'), /must be true or false/);
   assert.throws(() => validateRoleFile({ worker: { description: 'd', instructions: 'i', allowSubagents: 'yes' } }, 'probe'), /allowSubagents must be a boolean/);
   assert.equal(validateRoleFile({ worker: { description: 'd', instructions: 'i', allowSubagents: true, cli: 'codex' } }, 'probe').worker.allowSubagents, true,
-    'every backend can enforce it now, so no backend is refused');
+    'Codex can express explicit delegation');
 });
 
 test('a false skills flag disables discovery and composes with the rest', () => {
@@ -112,6 +113,7 @@ test('spawning a non-Pi role with a Pi-only field refuses before creating anythi
     /mcp requires a Pi role/);
   await assert.rejects(manager.spawn('worker', { ...defaultRoles.worker, allowSubagents: 'yes' }, cwd, 'DO NOT START'),
     /allowSubagents must be a boolean/, 'spawn validates the shape too, not just the role loader');
+  await assert.rejects(manager.spawn('worker', { ...defaultRoles.worker, allowSubagents: true }, cwd, 'DO NOT START'), /Pi nested delegation is unsupported/);
   assert.equal(fs.existsSync(manager.root), false, 'a refused role must not create even the instance root');
 });
 

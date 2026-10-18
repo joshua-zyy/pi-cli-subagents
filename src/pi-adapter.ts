@@ -5,6 +5,7 @@ import { StringDecoder } from "node:string_decoder";
 import { fileURLToPath } from "node:url";
 import { PiProcess, type WireRecord, type Exit } from "./pi-process.js";
 import { ASK_PARENT_TOOL, parentQuestionDialog, readParentQuestion, type ParentQuestion } from "./pi-question.js";
+import { subagentsError } from "./roles.js";
 import type { AdapterEvent, AdapterOptions, CliAdapter, InteractionReply } from "./cli-adapter.js";
 import type { Delivery, NativeSession, Question, SessionHandle, RoleToolTrim } from "./types.js";
 
@@ -50,13 +51,13 @@ export async function inspectPiSession(session: SessionHandle): Promise<void> {
 
 /** Pi's native trimming flags. Validation already refused this field for Codex and Claude roles. */
 export function trimArgs(role: { tools?: RoleToolTrim; skills?: boolean | string[]; mcp?: boolean; allowSubagents?: boolean }): string[] {
+  const invalid = subagentsError("pi", role.allowSubagents, role.tools);
+  if (invalid) throw new Error(invalid);
   const args: string[] = [];
   if (role.tools?.allow?.length) args.push("--tools", role.tools.allow.join(","));
-  // Delegation must not amplify itself: a child cannot spawn grandchildren unless the role says so. It
-  // joins the role's own deny list rather than becoming a second flag, so neither list can replace the
-  // other. An explicit `subagent` in `allow` is the other way to say yes.
+  // Pi child delegation is unsupported. Keep both the registration guard and the tool denial.
   const deny = [...(role.tools?.deny ?? [])];
-  if (role.allowSubagents !== true && role.tools?.allow?.includes("subagent") !== true && !deny.includes("subagent")) deny.push("subagent");
+  if (!deny.includes("subagent")) deny.push("subagent");
   if (deny.length) args.push("--exclude-tools", deny.join(","));
   if (role.skills === false) args.push("--no-skills");
   else if (Array.isArray(role.skills)) {

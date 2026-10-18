@@ -52,6 +52,13 @@ export const ROLE_FIELDS = ["description", "instructions", "provider", "model", 
 const levels = new Set<Thinking>(PI_THINKING_LEVELS);
 const claudeLevels = new Set<Thinking>(CLAUDE_THINKING_LEVELS);
 
+export function subagentsError(cli: Cli | undefined, allowSubagents: unknown, tools?: RoleToolTrim): string | undefined {
+  if (allowSubagents !== undefined && typeof allowSubagents !== "boolean") return "allowSubagents must be a boolean";
+  if ((cli ?? "pi") === "pi" && (allowSubagents === true || tools?.allow?.includes("subagent")))
+    return "Pi nested delegation is unsupported: the child recursion guard disables this plugin's delegation tools; remove allowSubagents: true and subagent from tools.allow";
+  return undefined;
+}
+
 /**
  * Why `tools` cannot be used for this CLI, or `undefined` when it is valid. Shared with
  * `AgentManager.spawn`: the field is Pi-only, so any other backend must refuse it instead of silently
@@ -136,7 +143,8 @@ export function validateRoleFile(value: unknown, source: string): Record<string,
       const invalid = mcpError(role.cli as Cli | undefined, role.mcp);
       if (invalid) throw new Error(`${source}: ${name} ${invalid}`);
     }
-    if (role.allowSubagents !== undefined && typeof role.allowSubagents !== "boolean") throw new Error(`${source}: ${name}.allowSubagents must be a boolean`);
+    const subagents = subagentsError(role.cli as Cli | undefined, role.allowSubagents, role.tools as RoleToolTrim | undefined);
+    if (subagents) throw new Error(`${source}: ${name} ${subagents}`);
     if (role.cli === "claude" && role.provider) throw new Error(`${source}: ${name} Claude role does not accept a Pi provider`);
     if (role.cli === "claude" && role.thinking !== undefined && !claudeLevels.has(role.thinking as Thinking)) throw new Error(`${source}: ${name} Claude thinking must be low, medium, high, xhigh or max`);
     if (role.cli === "codex" && (role.provider || role.thinking)) throw new Error(`${source}: ${name} Codex role does not accept Pi provider/thinking fields`);

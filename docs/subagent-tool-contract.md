@@ -323,24 +323,24 @@ Next step: reload the extension to inspect the tools and role catalog; real coll
 - **真机验收**（2026-10-17，本机 pi 1.3.0 + 一个自建 stdio MCP 服务器作探针）：不带 `--no-mcp` 时该服务器**被启动**（探针写下了启动记录）；带 `--no-mcp` 时**未启动**；再加 `--no-tools` 亦未启动。结论限定为"服务器未连接"，**未**验证 MCP 工具在工具列表中的可见性。
 - 生效范围同前：写入 `spec.json`，随该实例每次启动/恢复生效；改角色只影响新实例。
 
-### 2.8 默认禁止再派（`allowSubagents`，三后端）
+### 2.8 默认禁止再派（`allowSubagents`）
 
-**默认行为**：子代理**不能再派子代理**。只有角色显式写 `allowSubagents: true` 才放行。
+**默认行为**：子代理**不能再派子代理**。Codex 与 Claude 角色可显式写 `allowSubagents: true`；Pi 暂不支持本插件的多级委派，配置 true 或在 tools.allow 中列入 subagent 会在创建实例前明确拒绝。
 
 ```jsonc
 { "cli": "codex", "allowSubagents": true }
 ```
 
-- 省略或 `false` = 禁止；`true` = 允许。非布尔 → 显式报错。
-- **三个后端都能兑现**（因此不像 `tools`/`skills`/`mcp` 那样对某后端拒绝）：
+- 省略或 `false` = 禁止；Codex/Claude 的 `true` = 允许。非布尔 → 显式报错。
+- Pi 的子身份标记同时控制问答工具注入和委派工具注册，不能通过删除标记来放开递归。旧实例不热更新；以下规则适用于新建实例。
 
 | 后端 | 下发 | 证据 |
 | --- | --- | --- |
-| pi | `--exclude-tools subagent`（与角色自己的 `deny` 合并为一个列表，不另起 flag） | `pi --help`；denylist 作用于所有工具 |
+| pi | 保留子身份注册保护与 `--exclude-tools subagent`；显式放开配置被拒绝 | 本地配置与注册契约测试 |
 | codex | `-c agents.enabled=false` | 真机工具清单对比：六个 `collaboration.*` 工具全部消失（**主要依据**）；同 prompt 下模型自报也从 `SPAWN-AVAILABLE` 转为 `SPAWN-UNAVAILABLE`（**仅作旁证**，自报不作为独立证据） |
 | claude | `--disallowedTools Agent` | 真机：`Agent` 工具从清单消失（prompt 必须走 stdin，否则会被当成工具名） |
 
-- **例外**：pi 角色若在 `tools.allow` 里显式写了 `subagent`，视为显式允许（不再追加拒绝）；若 `tools.deny` 已有 `subagent`，不重复追加。
+- Pi 的 `tools.deny` 已有 `subagent` 时不重复追加；不存在 tools.allow 放开的例外。
 - **为什么默认禁止**：父会话的容量上限（§2.3）只管本扩展创建的 runtime，孙代理不经过它；允许再派等于给出一条绕过容量边界的放大路径。
 - 生效范围同前：写入 `spec.json`，随实例每次启动/恢复生效；改角色只影响新实例。
 - **未覆盖**：本字段只约束"该子代理能不能再派"，不约束"孙代理的数量"（若显式允许，放大仍可能发生）。

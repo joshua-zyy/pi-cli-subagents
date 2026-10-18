@@ -12,7 +12,7 @@ import { inspectPiSession } from "./pi-adapter.js";
 import { claudeLaunch } from "./claude-launch.js";
 import { inspectClaudeSession } from "./claude-adapter.js";
 import { nativeSession } from "./cli-adapter.js";
-import { mcpError, modeError, skillsError, toolTrimError } from "./roles.js";
+import { mcpError, modeError, skillsError, subagentsError, toolTrimError } from "./roles.js";
 import { WorkspaceDecisionRequired, WorkspaceStore, type ResumeOptions } from "./workspace.js";
 import { directories, jsonFiles, processAbsent, processAlive, readJson, shorten, waitUntil, writeJson, writeJsonExclusive } from "./storage.js";
 import type { AgentSpec, AgentState, AgentView, Control, ControlResult, Delivery, Endpoint, Launch, NativeSession, OperationReceipt, ReclaimRecord, Report, Role, SessionHandle, StartRequest, TaskRun } from "./types.js";
@@ -463,7 +463,8 @@ export class AgentManager {
     if (role.skills !== undefined) { const invalid = skillsError(role.cli, role.skills); if (invalid) throw new Error(invalid); }
     if (role.mcp !== undefined) { const invalid = mcpError(role.cli, role.mcp); if (invalid) throw new Error(invalid); }
     // Same shape rule as the role loader: a non-boolean here would silently mean "deny", so refuse it.
-    if (role.allowSubagents !== undefined && typeof role.allowSubagents !== "boolean") throw new Error("allowSubagents must be a boolean");
+    const subagents = subagentsError(role.cli, role.allowSubagents, role.tools);
+    if (subagents) throw new Error(subagents);
     const id = randomUUID(), dir = this.directory(id);
     const admission = this.admit(id, { newRuntime: true });
     const start = async (directory: string, baseline?: AgentSpec["workspaceBaseline"], notice?: string): Promise<AgentView> => {
