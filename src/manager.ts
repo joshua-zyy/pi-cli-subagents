@@ -14,8 +14,8 @@ import { inspectClaudeSession } from "./claude-adapter.js";
 import { nativeSession } from "./cli-adapter.js";
 import { mcpError, modeError, skillsError, toolTrimError } from "./roles.js";
 import { WorkspaceDecisionRequired, WorkspaceStore, type ResumeOptions } from "./workspace.js";
-import { directories, jsonFiles, processAlive, readJson, shorten, waitUntil, writeJson } from "./storage.js";
-import type { AgentSpec, AgentState, AgentView, Control, ControlResult, Delivery, Endpoint, Launch, NativeSession, OperationReceipt, Report, Role, SessionHandle, StartRequest, TaskRun } from "./types.js";
+import { directories, jsonFiles, processAbsent, processAlive, readJson, shorten, waitUntil, writeJson, writeJsonExclusive } from "./storage.js";
+import type { AgentSpec, AgentState, AgentView, Control, ControlResult, Delivery, Endpoint, Launch, NativeSession, OperationReceipt, ReclaimRecord, Report, Role, SessionHandle, StartRequest, TaskRun } from "./types.js";
 
 const workerFile = fileURLToPath(new URL("./worker.js", import.meta.url));
 
@@ -34,7 +34,8 @@ export interface Reservation { id: string; priorRunId?: string; newRuntime: bool
 /** Steps that still execute: `stopping` is set before the CLI is asked to stop (worker.ts:95-107). */
 const ACTIVE_PHASES = new Set(["starting", "running", "waiting", "stopping"]);
 /** Unknown ownership may still execute, so it must not be mistaken for a free turn slot. */
-export function countsAsActive(view: Pick<AgentView, "phase">): boolean {
+export function countsAsActive(view: Pick<AgentView, "phase" | "reclaimed">): boolean {
+  if (view.reclaimed) return false;
   return ACTIVE_PHASES.has(view.phase) || view.phase === "unreachable";
 }
 
@@ -77,7 +78,9 @@ export function resolveCaps(env: NodeJS.ProcessEnv = process.env): AdmissionCaps
  * its runtime (whether that keeps a resident process depends on the backend), a stopping one may still
  * be winding down, and an unknown record may still own one.
  */
-export function occupiesRuntime(view: Pick<AgentView, "phase" | "runtimeClosed">): boolean {
+export function occupiesRuntime(view: Pick<AgentView, "phase" | "runtimeClosed" | "reclaimed">): boolean {
+  // A reclaim frees accounting for one runtime only; it proves neither result nor native release.
+  if (view.reclaimed) return false;
   return !(view.phase === "closed" && view.runtimeClosed === true);
 }
 
@@ -97,6 +100,14 @@ export function pruneVisibleReservations(reservations: Map<string, Reservation>,
     if (reservation.newRuntime) resident++;
   }
   return { active, resident };
+}
+
+/** `absent` only on an explicit ESRCH answer; anything else is unknown and may not free a slot. */
+function liveness(pid: number | undefined): "alive" | "absent" | "unknown" {
+  if (!Number.isInteger(pid) || !pid || pid <= 0) return "unknown";
+  // A failed query is unknown, never absent, and must not escape as a raw OS error.
+  try { if (processAlive(pid)) return "alive"; } catch { return "unknown"; }
+  return processAbsent(pid) ? "absent" : "unknown";
 }
 
 const idPattern = /^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/;
@@ -192,7 +203,7 @@ export class AgentManager {
   }
   private view(id: string, snapshot: AgentState | undefined, receipt?: OperationReceipt): AgentView {
     const spec = this.spec(id), dir = this.directory(id);
-    let state = snapshot ? { ...snapshot } : undefined;
+    let state: (AgentState & { reclaimed?: AgentView["reclaimed"] }) | undefined = snapshot ? { ...snapshot } : undefined;
     // Operation acknowledgements are response-local, never part of a query view.
     if (state) delete (state as ControlResult).receipt;
     if (!state) throw new Error(`Subagent ${id} has no runtime state yet; inspect ${dir}`);
@@ -200,20 +211,31 @@ export class AgentManager {
       || !Number.isInteger(state.workerPid) || state.workerPid < 0 || !Number.isFinite(state.updatedAt) || typeof state.accepted !== "boolean"
       || typeof state.logFile !== "string" || !Array.isArray(state.questions) || state.questions.some(q => !q || typeof q.id !== "string" || typeof q.title !== "string" || !["select", "confirm", "input", "editor", "form"].includes(q.method)))
       throw new Error(`Invalid runtime state for subagent ${id}; inspect ${dir}`);
+    let lockAbsent = false, lockMatches = false;
+    // A reclaim needs the file itself to be gone: an empty lock record still claims the instance.
+    const lockMissing = !existsSync(path.join(dir, "owner.lock"));
     if (state.protocolVersion !== undefined) {
       if (state.protocolVersion !== 2 || typeof state.runtimeId !== "string" || !idPattern.test(state.runtimeId) ||
         state.phase === "closed" && state.runtimeClosed !== true ||
         state.lastStatus !== undefined && !["completed", "failed", "stopped"].includes(state.lastStatus) ||
         state.runtimeClosed && !["completed", "failed", "stopped", "closed"].includes(state.phase))
         throw new Error(`Invalid runtime identity for subagent ${id}`);
-      const owner = readJson<{ pid: number; runtimeId?: string }>(path.join(dir, "owner.lock"));
-      if (state.runtimeClosed && !owner) state = { ...state, phase: "closed" };
-      else if (!owner || owner.runtimeId !== state.runtimeId || owner.pid !== state.workerPid)
+      const owner = this.readOwner(dir);
+      lockAbsent = lockMissing;
+      lockMatches = owner.kind === "ok" && owner.value.runtimeId === state.runtimeId && owner.value.pid === state.workerPid;
+      if (state.runtimeClosed && owner.kind === "absent") state = { ...state, phase: "closed" };
+      else if (!lockMatches)
         state = { ...state, phase: "unreachable", error: "Runtime ownership is uncertain; inspect owner.lock. Previous run results are unchanged." };
       else if (state.runtimeClosed) state = { ...state, phase: "stopping" };
     }
     if (["starting", "running", "waiting", "stopping", "idle"].includes(state.phase) && !processAlive(state.workerPid)) {
       state = { ...state, phase: "unreachable", error: "The worker exited and runtime status is uncertain. Previous run results are unchanged. Do not start duplicate work; inspect the logs and owner.lock." };
+    }
+    // A reclaim frees the accounting of one runtime only. It applies to an unreachable runtime
+    // whose ownership is absent or provably the same, never to a conflict or a newer runtime.
+    if (state.phase === "unreachable" && state.protocolVersion === 2 && (lockAbsent || lockMatches)) {
+      const reclaim = this.readReclaim(dir, id, state.runtimeId!);
+      if (reclaim) state = { ...state, reclaimed: { at: reclaim.observedAt, evidence: reclaim.evidence, nativeReleaseConfirmed: false, continuation: "blocked" } };
     }
     const candidate = state.resultFile ? this.report(state.resultFile) : undefined;
     const report = candidate?.runId === state.runId && candidate.agentId === id && candidate.parentFile === this.parentFile ? candidate : undefined;
@@ -236,8 +258,93 @@ export class AgentManager {
     return { ...state, cli: spec.cli ?? "pi", role: spec.roleName, cwd: spec.cwd, ...(spec.workspace ? { workspace: spec.workspace, workspaceBaseline: spec.workspaceBaseline } : {}), history, runCount: runs.length,
       ...(latest?.runId === current && latest.task ? { task: latest.task } : {}), ...(report ? { text: report.text, truncated: report.truncated } : {}), ...(receipt ? { receipt } : {}) };
   }
-  list(): AgentView[] {
-    return directories(this.root).filter((id) => idPattern.test(id)).map((id) => {
+  /** Preserves the existing projection: a missing or ownerless record means "no owner" for the phase. */
+  private readOwner(dir: string): { kind: "absent" } | { kind: "ok"; value: { pid: number; runtimeId?: string } } {
+    const file = path.join(dir, "owner.lock");
+    if (!existsSync(file)) return { kind: "absent" };
+    const value = readJson<{ pid: number; runtimeId?: string }>(file);
+    return value && typeof value === "object" ? { kind: "ok", value } : { kind: "absent" };
+  }
+  private reclaimFile(dir: string, runtimeId: string): string {
+    return path.join(dir, "reclaims", `${runtimeId}.json`);
+  }
+  /** A lock that cannot be read is an ownership conflict with a readable reason, not a raw JSON error. */
+  private readOwnership(dir: string): { kind: "absent" } | { kind: "ok"; value: { pid: number; runtimeId?: string } } {
+    try { return this.readOwner(dir); }
+    catch (error) {
+      throw new Error(`Ownership cannot be established: ${(error as Error).message} Nothing was reclaimed and no control request was sent.`);
+    }
+  }
+  /** A reclaim counts only when its content names this parent, this instance and this exact runtime. */
+  private readReclaim(dir: string, id: string, runtimeId: string): ReclaimRecord | undefined {
+    if (!idPattern.test(runtimeId)) return undefined;
+    let record: ReclaimRecord | undefined;
+    // A damaged claim must not make the instance unreadable: it simply does not count.
+    try { record = readJson<ReclaimRecord>(this.reclaimFile(dir, runtimeId)); } catch { return undefined; }
+    const absent = (entry: ReclaimRecord["evidence"]["worker"] | undefined) =>
+      !!entry && Number.isInteger(entry.pid) && entry.pid > 0 && entry.absent === true && entry.criterion === "ESRCH";
+    if (!record || record.version !== 1 || record.parentFile !== this.parentFile || record.id !== id || record.runtimeId !== runtimeId
+      || !absent(record.evidence?.worker) || !absent(record.evidence?.cli)
+      || record.nativeReleaseConfirmed !== false || record.continuation !== "blocked" || !Number.isFinite(record.observedAt)) return undefined;
+    return record;
+  }
+  private viewWithReclaim(view: AgentView, record: ReclaimRecord): AgentView {
+    return { ...view, receipt: { operation: "reclaim", status: "reclaimed", runId: view.runId, runtimeId: record.runtimeId,
+      accounting: { active: false, resident: false }, evidence: record.evidence, nativeReleaseConfirmed: false, continuation: "blocked" } };
+  }
+
+  /**
+   * Reclaim the accounting of one unreachable runtime whose worker and CLI are both reliably gone.
+   * This never claims a native release, never unblocks resuming the instance and never touches the
+   * lock: the worker's record stays the execution truth, and its absence is not re-read here.
+   */
+  async reclaim(id: string, runtimeId: string): Promise<AgentView> {
+    const dir = this.directory(id);
+    this.spec(id);
+    const raw = readJson<AgentState>(path.join(dir, "state.json"));
+    if (!raw) throw new Error(`Subagent ${id} has no runtime state; nothing was reclaimed. Inspect ${dir}`);
+    // Capture the target before observing anything: a later state, or a new runtime, must not
+    // inherit this decision.
+    const target = { runtimeId: raw.protocolVersion === 2 ? raw.runtimeId : undefined, workerPid: raw.workerPid, cliPid: raw.cliPid };
+    if (!idPattern.test(runtimeId) || target.runtimeId !== runtimeId)
+      throw new Error(`Runtime ${runtimeId} is not the runtime recorded for subagent ${id} (${target.runtimeId ?? "none"}); nothing was reclaimed. Query the instance for its current runtime ID.`);
+    const view = this.get(id);
+    // Identity is captured once and re-checked here: a runtime that replaced the target between the
+    // two reads must not inherit a decision made about its predecessor.
+    if (view.runtimeId !== runtimeId)
+      throw new Error(`Runtime identity changed to ${view.runtimeId ?? "none"} while reclaiming ${runtimeId}; nothing was reclaimed. Query the instance for its current runtime ID.`);
+    if (view.phase !== "unreachable")
+      throw new Error(`Runtime ${runtimeId} is ${view.phase}, not unreachable; stop a live runtime instead of reclaiming its accounting. Nothing was reclaimed.`);
+    const owner = this.readOwnership(dir);
+    // An unowned but present lock file still blocks the reclaim: only a missing file or a full match counts.
+    if (existsSync(path.join(dir, "owner.lock")) && !(owner.kind === "ok" && owner.value.runtimeId === runtimeId && owner.value.pid === target.workerPid))
+      throw new Error(`Owner conflict for runtime ${runtimeId}: owner.lock ${owner.kind === "ok" ? `records pid ${owner.value.pid} and runtime ${owner.value.runtimeId ?? "none"}` : "names no owner"}. Check state.json and owner.lock; nothing was reclaimed and no control request was sent.`);
+    // Idempotency is only valid while the checks above still hold, so it comes after them.
+    const existing = this.readReclaim(dir, id, runtimeId);
+    if (existing) return this.viewWithReclaim(view, existing);
+    const refuse = (name: string, pid: number | undefined, state: string): void => {
+      if (state === "absent") return;
+      const detail = state === "alive" ? `PID ${pid} still exists` : `the absence of PID ${pid} could not be verified`;
+      throw new Error(`${name} ${detail}; this operation does not terminate processes and unknown is not absent. Nothing was reclaimed. Inspect the logs and retry reclaim after that process exits.`);
+    };
+    refuse("Worker", target.workerPid, liveness(target.workerPid));
+    // Without a recorded CLI pid its absence cannot be established at all: refuse, do not guess.
+    if (!Number.isInteger(target.cliPid) || (target.cliPid ?? 0) <= 0)
+      throw new Error(`Subagent ${id} records no usable CLI PID, so its absence cannot be established; nothing was reclaimed. Inspect ${dir}`);
+    refuse("CLI", target.cliPid, liveness(target.cliPid));
+    const record: ReclaimRecord = {
+      version: 1, parentFile: this.parentFile, id, runtimeId, observedAt: Date.now(),
+      evidence: { worker: { pid: target.workerPid, absent: true, criterion: "ESRCH" }, cli: { pid: target.cliPid!, absent: true, criterion: "ESRCH" } },
+      nativeReleaseConfirmed: false, continuation: "blocked",
+    };
+    const file = this.reclaimFile(dir, runtimeId);
+    const written = writeJsonExclusive(file, record);
+    const effective = written ? record : this.readReclaim(dir, id, runtimeId);
+    if (!effective) throw new Error(`A reclaim record for runtime ${runtimeId} exists but is not usable; nothing was changed. Inspect ${file}`);
+    return this.viewWithReclaim(this.get(id), effective);
+  }
+
+  list(): AgentView[] {    return directories(this.root).filter((id) => idPattern.test(id)).map((id) => {
       try { return this.get(id); }
       catch (error) {
         // Inventory is not a control authorization. Keep the record visible without
@@ -546,6 +653,8 @@ export class AgentManager {
   async close(id: string, onlyIdle = false, expected?: { runId: string; runtimeId: string }): Promise<AgentView> {
     const state = this.get(id);
     try {
+      // A reclaim freed only the accounting; there is no native release left to confirm here.
+      if (state.reclaimed) throw new Error(`Runtime ${state.runtimeId} had its accounting reclaimed without a native release confirmation, so stop has nothing to confirm. This instance cannot be continued in this version; start a new instance for further work.`);
       if (state.phase === "unreachable" && (!state.runtimeId || !processAlive(state.workerPid))) throw new Error(state.error);
       if (expected && (!onlyIdle || state.protocolVersion !== 2 || state.runId !== expected.runId || state.runtimeId !== expected.runtimeId))
         throw new Error(`Captured idle run ${expected.runId}, runtime ${expected.runtimeId} no longer matches; it was not closed`);
