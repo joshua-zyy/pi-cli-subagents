@@ -62,13 +62,15 @@
     "extension.test.mjs",
     "manager-history.test.mjs",
     "manager-recovery.test.mjs",
-    "manager.test.mjs",
     "reclaim-lifecycle.test.mjs",
-    "residency.test.mjs",
     "shutdown.test.mjs",
     "tool-receipts.test.mjs",
     "ui-loop.test.mjs",
-    "workspace-history.test.mjs",
+    "workspace-history.test.mjs"
+  ],
+  "acceptance-slow": [
+    "manager.test.mjs",
+    "residency.test.mjs",
     "workspace-manager.test.mjs"
   ]
 }

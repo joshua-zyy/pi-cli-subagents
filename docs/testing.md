@@ -43,6 +43,25 @@ node test/acceptance/audit.mjs .test-output/manual-acceptance/<case>/case.mjs
 - 父会话是只追加的：轮次结束后的人工操作会追加自己的记录。不要断言"会话中不存在更晚的行"，而应按行号把该断言限定在本轮通知窗口内。
 - 该审计器取代 2026-10-12 之前每轮手写的 `-audit.mjs`；旧脚本保留在各自 case 目录作为历史记录。首轮以 2026-10-11/10-12 的 8 个真实轮次回放验证，8/8 PASS，其中产物已清理的轮次逐项列出 `unavailable`。回放不构成新的真实模型验收。
 
+## Tiers, gates and known flakes
+
+Four local tiers, all selected from `scripts/test-tiers.json` (every `*.test.mjs` must be classified exactly once):
+
+| Tier | What belongs here | Wall clock on 2026-10-18 |
+| --- | --- | --- |
+| `fast` | pure logic, record-level stubs, no child process | ~27s |
+| `domain` | local git/persistence/adapters against fixtures | ~94s |
+| `acceptance-local` | closed-loop manager/UI rounds with the local CLI fixture | ~125s |
+| `acceptance-slow` | the three heavy real-process files (`manager`, `residency`, `workspace-manager`) | ~165s |
+
+`npm run gates` builds once and runs check, fast, domain and acceptance-local in order, printing a
+per-gate wall clock and a single exit code; `npm run gates -- --slow` adds acceptance-slow for a
+close-out run. Without `--slow` the same four gates used to rebuild `dist` four times (~4s each).
+
+`scripts/known-flakes.json` labels the failures already investigated (I-007 in `shutdown`, I-015 in
+`residency`). The label is printed before and after a run, but a hit is still a failure and still
+exits non-zero: it only saves a reader the diagnosis.
+
 ## Environment isolation
 
 Each execution creates a temporary `PI_CODING_AGENT_DIR` and applies it before child-process module imports, preventing the user's worker-role configuration from redirecting a Pi fixture to real Codex/Claude. It also clears the inherited `PI_CLI_SUBAGENT` marker so extension registration does not return early. The real child-agent recursion guard remains intact; tests do not disable it.

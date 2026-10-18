@@ -11,7 +11,7 @@ function fixture(t, fail = false) {
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   fs.mkdirSync(path.join(root, 'scripts')); fs.mkdirSync(path.join(root, 'test'));
   fs.copyFileSync(new URL('../scripts/test.mjs', import.meta.url), path.join(root, 'scripts/test.mjs'));
-  const tiers = {fast:['probe.test.mjs'], domain:['domain.test.mjs'], 'acceptance-local':['acceptance.test.mjs']};
+  const tiers = {fast:['probe.test.mjs'], domain:['domain.test.mjs'], 'acceptance-local':['acceptance.test.mjs'], 'acceptance-slow':[]};
   const saveTiers = () => fs.writeFileSync(path.join(root, 'scripts/test-tiers.json'), JSON.stringify(tiers));
   saveTiers();
   for (const file of ['domain.test.mjs','acceptance.test.mjs']) fs.writeFileSync(path.join(root, 'test', file), `import test from 'node:test'; import fs from 'node:fs'; test('${file}', () => fs.appendFileSync('selected.txt', '${file}\\n'));`);
@@ -50,7 +50,7 @@ test('launcher isolates user configuration and child markers before import, then
 
 test('tier listings are disjoint and complete without executing fixtures; selected tiers run independently', t => {
   const h = fixture(t), names = [];
-  for (const tier of ['fast','domain','acceptance-local']) {
+  for (const tier of ['fast','domain','acceptance-local','acceptance-slow']) {
     const result = h.run([tier, '--list']);
     assert.equal(result.status, 0, result.stderr);
     const plan = JSON.parse(result.stdout); assert.equal(plan.tier, tier);
