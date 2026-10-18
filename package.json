@@ -42,7 +42,9 @@
     "test:domain": "npm run build && node scripts/test.mjs domain",
     "test:acceptance:local": "npm run build && node scripts/test.mjs acceptance-local",
     "test:list": "node scripts/test.mjs all --list",
-    "prepack": "npm run build"
+    "prepack": "npm run build",
+    "test:acceptance:slow": "npm run build && node scripts/test.mjs acceptance-slow",
+    "gates": "node scripts/gates.mjs"
   },
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",
