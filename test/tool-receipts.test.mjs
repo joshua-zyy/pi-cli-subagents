@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { request } from 'node:http';
 import { fileURLToPath } from 'node:url';
 import { getAgentDir } from '@earendil-works/pi-coding-agent';
 import extension from '../dist/index.js';
@@ -13,6 +14,36 @@ import { tempDir } from './helpers/tmp.mjs';
 
 const fixture = fileURLToPath(new URL('./fixtures/pi.mjs', import.meta.url));
 const launch = { command: process.execPath, args: [fixture] };
+
+test('worker control preserves split UTF-8 and limits raw request bytes', { timeout: 15000 }, async t => {
+  const { cwd, manager } = setup(t);
+  const child = await manager.spawn('worker', { description: 'fixture', instructions: 'fixture' }, cwd, 'HOLD');
+  const endpoint = readJson(path.join(manager.root, child.id, 'endpoint.json'));
+  const post = (message, split) => new Promise((resolve, reject) => {
+    const body = Buffer.from(JSON.stringify({ type: 'send', message, mode: 'steer', protocolVersion: 2,
+      runtimeId: endpoint.runtimeId, expectedRunId: endpoint.runId }));
+    const req = request({ hostname: '127.0.0.1', port: endpoint.port, method: 'POST', path: '/',
+      headers: { authorization: `Bearer ${endpoint.token}` } }, res => {
+      let text = ''; res.setEncoding('utf8'); res.on('data', chunk => text += chunk);
+      res.on('end', () => resolve({ code: res.statusCode, body: JSON.parse(text) }));
+    });
+    req.on('error', reject);
+    if (split === undefined) req.end(body);
+    else { req.write(body.subarray(0, split)); setTimeout(() => req.end(body.subarray(split)), 20); }
+  });
+  const message = 'HOLD 请审查😀';
+  const wire = Buffer.from(JSON.stringify({ type: 'send', message }));
+  for (const [character, offsets] of [['请', [1, 2]], ['😀', [1, 2, 3]]]) {
+    for (const offset of offsets) {
+      assert.equal((await post(message, wire.indexOf(Buffer.from(character)) + offset)).code, 200);
+      assert.equal(readJson(child.sessionFile).messages.at(-1).content, message);
+    }
+  }
+  const count = readJson(child.sessionFile).messages.length;
+  const oversized = await post('HOLD ' + '雪'.repeat(400000));
+  assert.equal(oversized.code, 400); assert.match(oversized.body.error, /too large/);
+  assert.equal(readJson(child.sessionFile).messages.length, count, 'oversized input must not reach native');
+});
 
 function setup(t) {
   const cwd = tempDir('tool-receipts');

@@ -265,8 +265,14 @@ async function run(dir: string, runId: string): Promise<void> {
         res.writeHead(403).end(JSON.stringify({ error: "forbidden" })); return;
       }
       try {
-        let body = "";
-        for await (const chunk of req) { body += chunk; if (body.length > 1024 * 1024) throw new Error("Control message is too large"); }
+        const chunks: Buffer[] = [];
+        let bytes = 0;
+        for await (const chunk of req) {
+          bytes += chunk.length;
+          if (bytes > 1024 * 1024) throw new Error("Control message is too large");
+          chunks.push(chunk);
+        }
+        const body = Buffer.concat(chunks, bytes).toString("utf8");
         const input = JSON.parse(body) as Control & { protocolVersion?: number; runtimeId?: string; expectedRunId?: string };
         const operation = commandQueue.then(() => {
           if (input.protocolVersion !== 2 || input.runtimeId !== runtimeId || input.expectedRunId !== runId)
