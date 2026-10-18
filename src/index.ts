@@ -582,8 +582,11 @@ ${view(state, args.action === "interrupt")}`);
   let catalogProbe: Promise<void> | undefined;
   let cliAvailability: ReturnType<typeof detectClis> | undefined;
   const discover = (cwd: string): void => {
+    const epoch = sessionEpoch;
     cliAvailability ??= detectClis();
-    catalogProbe ??= probeCatalog({ pi: launch, cwd, available: cliAvailability }).then((found) => { catalog = found; });
+    catalogProbe ??= probeCatalog({ pi: launch, cwd, available: cliAvailability }).then((found) => {
+      if (epoch === sessionEpoch) catalog = found;
+    });
   };
   /**
    * Show one instance's conversation in the overlay and return the action it produced, so a message
