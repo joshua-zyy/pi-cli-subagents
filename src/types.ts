@@ -15,7 +15,7 @@ export type ClaudeMode = "acceptEdits" | "auto" | "manual" | "dontAsk" | "plan" 
 export type CodexMode = "read-only" | "workspace-write" | "full-access";
 export type Mode = ClaudeMode | CodexMode;
 
-/** Native tool trimming. Only Pi exposes an allow/deny list; other backends must refuse it, never ignore it. */
+/** Native tool trimming: Pi supports allow/deny, Claude supports deny only, Codex rejects both. */
 export interface RoleToolTrim {
   allow?: string[];
   deny?: string[];
@@ -32,7 +32,7 @@ export interface Role {
   mode?: Mode;
   /** Codex experimental Default-mode question gate; omitted inherits native config, not permissions. */
   defaultModeQuestions?: boolean;
-  /** Pi's own tool allow/deny list. Codex has none; Claude has flags this extension does not wire yet. */
+  /** Pi allow/deny lists or Claude's deny list; Codex has no tool trimming switch. */
   tools?: RoleToolTrim;
   /** false disables skill discovery; a path list loads only those skills. Pi only, other backends reject it. */
   skills?: boolean | string[];

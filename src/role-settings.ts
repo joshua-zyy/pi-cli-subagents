@@ -9,8 +9,6 @@ export type Scope = "user" | "project";
 export type Origin = "built-in" | Scope;
 export type EditableField = "cli" | "provider" | "model" | "thinking" | "effort" | "mode" | "defaultModeQuestions" | "description" | "instructions";
 
-/** Text fields are edited in Pi's own dialogs; the rest are picked from a list. */
-export const TEXT_FIELDS: EditableField[] = ["provider", "model", "description", "instructions"];
 export const CHOICE_FIELDS: EditableField[] = ["cli", "thinking", "effort", "mode", "defaultModeQuestions"];
 export const FIELD_LABELS: Record<EditableField, string> = { cli: "cli", provider: "provider", model: "model", thinking: "thinking", effort: "effort", mode: "mode", defaultModeQuestions: "defaultModeQuestions", description: "description", instructions: "instructions" };
 /** Offered last in a discovered list, so a value the CLI did not publish stays reachable. */
