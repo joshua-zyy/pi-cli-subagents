@@ -115,6 +115,7 @@ function handle(cmd) {
     return;
   }
   if (cmd.message === 'REJECT') return emit({ type: 'response', id: cmd.id, success: false, error: 'rejected by fixture' });
+  if (cmd.message === 'HANDLED') return response(cmd, { disposition: 'handled' });
   if (active && !cmd.streamingBehavior) return emit({ type: 'response', id: cmd.id, success: false, error: 'already running' });
   session.messages.push({ role: 'user', content: cmd.message }); save();
   // Keep the actual baseline notice in the native transcript, then execute the fixture task.

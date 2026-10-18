@@ -7,6 +7,14 @@ import { PiAdapter } from '../dist/pi-adapter.js';
 import { waitUntil } from '../dist/storage.js';
 import { tempDir } from './helpers/tmp.mjs';
 const fixture = fileURLToPath(new URL('./fixtures/pi.mjs', import.meta.url));
+
+test('Pi handled initial input is reported without claiming model execution', async t => {
+  const { c, events } = setup(t); await c.ready();
+  await assert.rejects(c.start('HANDLED', 'handled'), /handled.*no native run/i);
+  assert.equal(events.some(e => e.type === 'settled'), false);
+  await c.start('after handled', 'next');
+  assert.equal((await settled(events, 'next')).status, 'completed');
+});
 function setup(t, flags = []) {
   const cwd = tempDir('pi-adapter'), events = [];
   fs.mkdirSync(path.join(cwd, 'runs', 'one'), { recursive: true });

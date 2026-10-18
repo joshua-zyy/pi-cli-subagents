@@ -211,7 +211,10 @@ export class PiAdapter implements CliAdapter {
     this.assistant = undefined;
     this.parentCalls.clear();
     this.active = true;
-    try { await this.rpc.request({ type: "prompt", message }); }
+    try {
+      const result = await this.rpc.request({ type: "prompt", message });
+      if (result.disposition === "handled") throw new Error("Pi input was handled by an extension; no native run started. Extension side effects may already have occurred; inspect before retrying.");
+    }
     catch (error) { this.active = false; throw error; }
   }
   async send(message: string, mode: Delivery): Promise<void> { await this.rpc.request({ type: "prompt", message, streamingBehavior: mode }); }

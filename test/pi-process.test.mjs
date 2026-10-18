@@ -8,6 +8,17 @@ import { waitUntil, readJson } from '../dist/storage.js';
 import { tempDir } from './helpers/tmp.mjs';
 const fixture = fileURLToPath(new URL('./fixtures/pi.mjs', import.meta.url));
 
+test('Pi initial handled input releases its run reservation without a terminal event', async t => {
+  const { rpc, records } = gated(t);
+  const handled = rpc.request({ type: 'prompt', message: 'HANDLED' }), captured = rpc.run;
+  assert.equal((await handled).disposition, 'handled');
+  assert.equal(rpc.run, undefined);
+  await Promise.race([captured.done, new Promise((_, reject) => setTimeout(() => reject(Error('handled run still reserved')), 100))]);
+  assert.equal(records.some(r => r.type === 'agent_settled'), false);
+  await rpc.request({ type: 'prompt', message: 'after handled' });
+  await waitUntil('next run settles', () => records.some(r => r.type === 'agent_settled'));
+});
+
 function gated(t) {
   const cwd = tempDir('pi-in-flight'), records = [];
   const rpc = new PiProcess({ command: process.execPath, args: [fixture] }, ['--session-dir', cwd], cwd, path.join(cwd, 'events.jsonl'), e => records.push(e), 1500);

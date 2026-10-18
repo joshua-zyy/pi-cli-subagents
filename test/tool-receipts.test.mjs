@@ -16,6 +16,21 @@ import { tempDir } from './helpers/tmp.mjs';
 const fixture = fileURLToPath(new URL('./fixtures/pi.mjs', import.meta.url));
 const launch = { command: process.execPath, args: [fixture] };
 
+test('handled Pi initial and resident inputs fail with no accepted turn and release the runtime', { timeout: 15000 }, async t => {
+  const { cwd, manager, invoke } = setup(t);
+  await assert.rejects(invoke('subagent', { action: 'start', role: 'worker', task: 'HANDLED' }), /handled.*no native run/i);
+  const first = manager.list()[0];
+  await waitUntil('handled startup release', () => manager.get(first.id).phase === 'closed');
+  assert.equal(manager.get(first.id).accepted, false);
+  assert.equal(manager.getResult(first.id, first.runId).status, 'failed');
+  const next = await manager.spawn('worker', { description: 'fixture', instructions: 'fixture' }, cwd, 'DONE');
+  await waitUntil('idle', () => manager.get(next.id).phase === 'idle');
+  await assert.rejects(invoke('subagent', { action: 'send', id: next.id, message: 'HANDLED' }), /handled.*no native run/i);
+  await waitUntil('handled resident release', () => manager.get(next.id).phase === 'closed');
+  const last = manager.get(next.id);
+  assert.equal(last.accepted, false); assert.equal(last.lastStatus, 'failed');
+});
+
 test('public stop refuses a new accepted run after its preflight', { timeout: 15000 }, async t => {
   const { cwd, manager, invoke } = setup(t);
   const first = await manager.spawn('worker', { description: 'fixture', instructions: 'fixture' }, cwd, 'DONE');

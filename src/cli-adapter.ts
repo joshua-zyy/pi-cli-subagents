@@ -22,6 +22,7 @@ export interface CliAdapter {
   readonly pid: number | undefined;
   readonly closed: Promise<Exit>;
   ready(): Promise<NativeSession>;
+  /** Resolves only for an acknowledged native run; extension-handled input rejects without claiming task execution. */
   start(message: string, runId?: string): Promise<void>;
   send(message: string, mode: Delivery): Promise<void>;
   reply(answer: InteractionReply): Promise<void>;

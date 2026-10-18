@@ -169,6 +169,12 @@ export class PiProcess {
       this.child.stdin.write(`${JSON.stringify({ ...command, id })}\n`, (error) => {
         if (error) { this.pending.get(id)?.reject(error); this.pending.delete(id); }
       });
+    }).then(value => {
+      if (command.type === "prompt" && !command.streamingBehavior && (value as WireRecord).disposition === "handled" && reserved && this.run === reserved) {
+        if (reserved.started) throw new Error("Pi reported handled after starting a native run; execution is uncertain");
+        this.run = undefined; reserved.resolve();
+      }
+      return value;
     }).catch(error => {
       if (command.type === "prompt") {
         // success:false is a preflight refusal for this input, not evidence that
