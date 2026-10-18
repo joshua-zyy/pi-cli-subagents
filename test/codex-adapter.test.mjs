@@ -28,6 +28,30 @@ function setup(t, overrides = {}) {
 const settled = events => waitUntil('adapter terminal event', () => events.find(e => e.type === 'settled'), 5000);
 const runSettled = (events, runId) => waitUntil('run terminal', () => events.find(e => e.type === 'settled' && e.runId === runId), 5000);
 
+for (const scenario of ['complete', 'fragments', 'normal-prefix']) test(`Codex rejects records over 4 MiB in UTF-8 bytes: ${scenario}`, async t => {
+  const { client } = setup(t), { c } = client(); await c.ready();
+  const oversized = JSON.stringify({ method: 'fixture/large', params: { text: '雪'.repeat(1_500_000) } });
+  const chunks = scenario === 'complete' ? [oversized + '\n'] : scenario === 'normal-prefix'
+    ? [JSON.stringify({ method: 'fixture/normal' }) + '\n' + oversized]
+    : [oversized.slice(0, 500_000), oversized.slice(500_000, 1_000_000), oversized.slice(1_000_000)];
+  for (const chunk of chunks) c.child.stdout.emit('data', chunk);
+  assert.match(c.exitError?.message ?? '', /Codex RPC record exceeds 4 MiB/);
+  await c.closed;
+  await assert.rejects(c.start('must not run'), /exceeds 4 MiB/);
+});
+
+test('Codex accepts a 4 MiB UTF-8 record and multiple legal records in one data chunk', async t => {
+  const { client } = setup(t), { c, events } = client(); await c.ready();
+  const row = JSON.stringify({ method: 'fixture/boundary', params: { text: '雪'.repeat(1_000_000) } });
+  const exact = row + ' '.repeat(4 * 1024 * 1024 - Buffer.byteLength(row));
+  let count = 0; const record = c.record.bind(c);
+  t.mock.method(c, 'record', value => { if (value.method === 'fixture/boundary') count++; record(value); });
+  c.child.stdout.emit('data', exact + '\n' + row + '\n');
+  assert.equal(c.exitError, undefined);
+  assert.equal(count, 2, 'the limit applies to records, not the total chunk');
+  await c.start('REMEMBER valid'); assert.equal((await settled(events)).text, 'OK');
+});
+
 test('Codex uncertain steer blocks later inputs and emits uncertainty without stopping the turn', async t => {
   const { client, requests } = setup(t), { c, events } = client(undefined, ['--no-steer-response']);
   await c.ready(); await c.start('HOLD', 'one'); c.timeout = 100;

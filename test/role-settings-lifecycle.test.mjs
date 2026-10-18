@@ -23,7 +23,7 @@ function harness(t, piModels = 'provider  model\nfixture  test-model\n') {
   Object.assign(process.env,{PI_CODING_AGENT_DIR:home,CLAUDE_CONFIG_DIR:home,CODEX_HOME:home,ProgramFiles:path.join(dir,'system'),PATH:bin});
   const probes = [], events = new Map(), commands = new Map(), listeners = [], widgets = [], notices = [], confirms = [], openings = [];
   const exec = t.mock.method(childProcess,'execFile',(_command,args,_options,callback)=>{
-    probes.push(()=>callback(null,args.includes('--list-models') ? piModels : '{"models":[]}'));
+    probes.push(output=>callback(null,output ?? (args.includes('--list-models') ? piModels : '{"models":[]}')));
     return {stdin:{end(){}}};
   });
   const config={model:'native-codex',model_reasoning_effort:'xhigh',sandbox_mode:'read-only',approval_policy:'on-request'};
@@ -45,7 +45,7 @@ function harness(t, piModels = 'provider  model\nfixture  test-model\n') {
       },
     }};
   extension({on:(name,handler)=>events.set(name,handler),registerCommand:(name,command)=>commands.set(name,command),registerTool(){},registerShortcut(){},registerMessageRenderer(){}});
-  const h = {ctx,events,listeners,widgets,notices,confirms,files,home,config,
+  const h = {ctx,events,listeners,widgets,notices,confirms,files,home,config,probes,
     open(){
       const before = widgets.length, opening = {finished:false};
       opening.running = commands.get('cli-agents-setting').handler('',ctx).then(()=>{opening.finished=true;});
@@ -69,6 +69,30 @@ function harness(t, piModels = 'provider  model\nfixture  test-model\n') {
   });
   return h;
 }
+
+test('a late previous-session catalog cannot replace the current model picker', {timeout:5000}, async t => {
+  const h = harness(t);
+  let parent = path.join(h.home, 'first-session.jsonl');
+  fs.writeFileSync(parent, '{}\n');
+  h.ctx.sessionManager.getSessionFile = () => parent;
+  h.events.get('session_start')({}, h.ctx);
+  const previous = h.probes.splice(0);
+  parent = path.join(h.home, 'second-session.jsonl'); fs.writeFileSync(parent, '{}\n');
+  h.events.get('session_start')({}, h.ctx);
+  const current = h.probes.splice(0);
+  assert.equal(previous.length, 2); assert.equal(current.length, 2);
+  current[0]('provider  model\nnew-provider  new-model\n'); current[1](); await turn();
+  const opening = h.open(); await h.finishProbes();
+  for (const key of ['\r', '\x1b[B', '\x1b[B', '\r']) h.press(key);
+  const render = () => opening.widget.component.render(180).join('\n');
+  assert.match(render(), /new-provider\/new-model/, 'the current probe still populates the picker');
+  const renders = opening.widget.renders;
+  previous[0]('provider  model\nold-provider  old-model\n'); previous[1](); await turn();
+  assert.match(render(), /new-provider\/new-model/);
+  assert.doesNotMatch(render(), /old-provider|old-model/);
+  assert.equal(opening.widget.renders, renders, 'an old probe must not repaint the current pane');
+  h.press(escape); h.press(escape); h.press(escape); await opening.running;
+});
 
 test('shutdown settles role settings in list, picker and rebuilt dirty views without saving or confirming', {timeout:5000}, async t => {
   const h = harness(t);

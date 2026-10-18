@@ -327,7 +327,7 @@ test('t interrupts v3 Pi/Codex/Claude active runs from the selected roster row o
         const rendered = text(p.render(140));
         assert.equal(rendered.includes('t interrupt'), allowed, JSON.stringify({ cli, protocolVersion, phase, detail }));
         p.instance.handleInput('t');
-        assert.deepEqual(p.actions, allowed ? [{ kind: 'interrupt', id: 'target' }] : []);
+        assert.deepEqual(p.actions, allowed ? [{ kind: 'interrupt', id: 'target', expected: { runId: 'r1', runtimeId: undefined } }] : []);
         p.instance.handleInput('t');
         assert.equal(p.actions.length, allowed ? 1 : 0, 'a settled panel cannot repeat the operation');
       }

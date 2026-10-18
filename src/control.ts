@@ -1,9 +1,12 @@
 import { request } from "node:http";
 import type { ControlResult, Control, Endpoint } from "./types.js";
 
+/** A completed worker rejection, not a lost response or proof that no side effects occurred. */
+export class ControlRejectedError extends Error {}
+
 // Local control transport only; credentials never appear in tool results.
 export function control(endpoint: Endpoint, input: Control): Promise<ControlResult> {
-  const diagnostic = (error: unknown) => error instanceof Error && error.message.startsWith("Subagent ") ? error :
+  const diagnostic = (error: unknown) => error instanceof ControlRejectedError || error instanceof Error && error.message.startsWith("Subagent ") ? error :
     new Error(`Control ${input.type}, run ${endpoint.runId}, runtime ${endpoint.runtimeId ?? "missing"}: ${error instanceof Error ? error.message : String(error)}`);
   if (endpoint.protocolVersion !== 3)
     return Promise.reject(diagnostic("Unsupported worker protocol; only v3 is supported. Old records are read-only; manually stop verified old processes. No migration or forced takeover."));
@@ -19,7 +22,7 @@ export function control(endpoint: Endpoint, input: Control): Promise<ControlResu
       res.on("end", () => {
         try {
           const value = JSON.parse(body);
-          if (res.statusCode !== 200) reject(new Error(value.error ?? `Control endpoint HTTP ${res.statusCode}`));
+          if (res.statusCode !== 200) reject(new ControlRejectedError(diagnostic(value.error ?? `Control endpoint HTTP ${res.statusCode}`).message));
           else {
             if (value.protocolVersion !== 3 || value.runtimeId !== endpoint.runtimeId) throw new Error("Invalid worker response identity; outcome is uncertain. Inspect before retrying.");
             if (!["status", "reply"].includes(input.type) || value.receipt !== undefined) {
