@@ -487,6 +487,81 @@ test('P3 invalid or stale worker receipts are rejected without replay', async t 
   assert.equal(calls.length, 1);
 });
 
+test('an idle start with a lost response keeps its turn reservation until the new run is visible', async t => {
+  const held = Promise.withResolvers(), applied = Promise.withResolvers();
+  const h = await peer(t, 3, (res, state) => {
+    res.destroy();
+    void held.promise.then(() => {
+      const next = { ...state, runId: randomUUID(), phase: 'running' };
+      writeJson(path.join(h.m.root, h.id, 'state.json'), next);
+      applied.resolve(next);
+    });
+  });
+  writeJson(path.join(h.m.root, h.id, 'state.json'), { ...h.state, phase: 'idle' });
+  const old = process.env.PI_CLI_SUBAGENTS_MAX_ACTIVE;
+  process.env.PI_CLI_SUBAGENTS_MAX_ACTIVE = '1';
+  try {
+    await assert.rejects(h.m.send(h.id, 'received but not visible'), /socket hang up/);
+    assert.throws(() => h.m.admit(randomUUID()), /1 of 1 concurrent turns/);
+    await assert.rejects(h.m.send(h.id, 'must not replace an uncertain reservation'), /earlier.*unconfirmed|pending.*input/i);
+    assert.equal(h.calls.length, 1, 'the uncertain input is not retried');
+    assert.throws(() => h.m.admit(randomUUID()), /1 of 1 concurrent turns/, 'a refused retry must not retire the original reservation');
+    held.resolve(); await applied.promise;
+    assert.throws(() => h.m.admit(randomUUID()), /1 of 1 concurrent turns/, 'the visible run replaces, not duplicates, its reservation');
+  } finally {
+    held.resolve(); await applied.promise;
+    if (old === undefined) delete process.env.PI_CLI_SUBAGENTS_MAX_ACTIVE; else process.env.PI_CLI_SUBAGENTS_MAX_ACTIVE = old;
+  }
+});
+
+test('confirmed release retires a lost idle input even when no new run became visible', async t => {
+  const h = await peer(t, 3, (res, state, input) => {
+    if (input.type === 'start') { res.destroy(); return; }
+    assert.equal(input.type, 'close');
+    const closed = { ...state, phase: 'closed', runtimeClosed: true };
+    writeJson(path.join(h.m.root, h.id, 'state.json'), closed);
+    fs.unlinkSync(path.join(h.m.root, h.id, 'owner.lock'));
+    res.end(JSON.stringify({ ...closed, receipt: { operation: 'stop', status: 'released', runId: state.runId, runtimeId: state.runtimeId } }));
+  });
+  writeJson(path.join(h.m.root, h.id, 'state.json'), { ...h.state, phase: 'idle' });
+  const old = process.env.PI_CLI_SUBAGENTS_MAX_ACTIVE;
+  process.env.PI_CLI_SUBAGENTS_MAX_ACTIVE = '1';
+  try {
+    await assert.rejects(h.m.send(h.id, 'lost input'), /socket hang up/);
+    receipt(await h.m.close(h.id), 'stop', 'released');
+    const token = h.m.admit(randomUUID());
+    h.m.settleAdmission(token);
+    assert.equal(h.calls.length, 2);
+  } finally { if (old === undefined) delete process.env.PI_CLI_SUBAGENTS_MAX_ACTIVE; else process.env.PI_CLI_SUBAGENTS_MAX_ACTIVE = old; }
+});
+
+test('a completed HTTP refusal of an idle start returns its turn reservation', async t => {
+  const h = await peer(t, 3, (res, state) => res.writeHead(400).end(JSON.stringify({
+    error: 'fixture refused before start',
+  })));
+  writeJson(path.join(h.m.root, h.id, 'state.json'), { ...h.state, phase: 'idle' });
+  const old = process.env.PI_CLI_SUBAGENTS_MAX_ACTIVE;
+  process.env.PI_CLI_SUBAGENTS_MAX_ACTIVE = '1';
+  try {
+    for (let i = 0; i < 2; i++) await assert.rejects(h.m.send(h.id, 'not accepted'), error => {
+      for (const value of [h.id, h.state.runId, h.state.runtimeId, 'fixture refused before start']) assert(error.message.includes(value));
+      return true;
+    });
+    assert.equal(h.calls.length, 2, 'a known refusal must not leak a slot');
+  } finally { if (old === undefined) delete process.env.PI_CLI_SUBAGENTS_MAX_ACTIVE; else process.env.PI_CLI_SUBAGENTS_MAX_ACTIVE = old; }
+});
+
+test('a local endpoint refusal returns an idle turn reservation without sending input', async t => {
+  const h = await peer(t, 3, (res, state) => res.writeHead(400).end(JSON.stringify({ error: `Subagent ${state.id}: fixture refusal` })));
+  writeJson(path.join(h.m.root, h.id, 'state.json'), { ...h.state, phase: 'idle' });
+  const endpointFile = path.join(h.m.root, h.id, 'endpoint.json');
+  fs.unlinkSync(endpointFile);
+  await assert.rejects(h.m.send(h.id, 'no endpoint'), /connection record is stale/);
+  writeJson(endpointFile, h.endpoint);
+  await assert.rejects(h.m.send(h.id, 'endpoint restored'), /fixture refusal/);
+  assert.equal(h.calls.length, 1);
+});
+
 test('P3 lost control response retains known identity diagnostics and is never replayed', async t => {
   const { m, id, state, calls } = await peer(t, 3, res => res.destroy());
   await assert.rejects(m.send(id, 'one side effect'), error => {

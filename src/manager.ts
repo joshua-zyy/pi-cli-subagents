@@ -4,7 +4,7 @@ import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import os from "node:os";
-import { control } from "./control.js";
+import { control, ControlRejectedError } from "./control.js";
 import { readActivity } from "./activity.js";
 import { codexHome, codexLaunch } from "./codex-launch.js";
 import { CodexAdapter } from "./codex-adapter.js";
@@ -29,7 +29,7 @@ const admitting = new Map<string, Reservation>();
 let nextReservation = 0;
 
 /** One in-flight admission: the run it reserves, and the run the instance showed beforehand. */
-export interface Reservation { id: string; priorRunId?: string; newRuntime: boolean }
+export interface Reservation { id: string; priorRunId?: string; newRuntime: boolean; submitted?: boolean }
 
 /** Steps that still execute: `stopping` is set before the CLI is asked to stop (worker.ts:95-107). */
 const ACTIVE_PHASES = new Set(["starting", "running", "waiting", "stopping"]);
@@ -90,12 +90,13 @@ export function occupiesRuntime(view: Pick<AgentView, "phase" | "runtimeClosed" 
  * is visible, because an idle instance is always visible and would otherwise release its reservation
  * immediately. Only a reservation that creates a runtime holds a resident slot.
  */
-export function pruneVisibleReservations(reservations: Map<string, Reservation>, prefix: string, views: Iterable<Pick<AgentView, "id" | "runId">>): { active: number; resident: number } {
-  const runById = new Map([...views].map((view) => [view.id, view.runId]));
+export function pruneVisibleReservations(reservations: Map<string, Reservation>, prefix: string, views: Iterable<Pick<AgentView, "id" | "runId"> & Partial<Pick<AgentView, "phase" | "runtimeClosed">>>): { active: number; resident: number } {
+  const byId = new Map([...views].map((view) => [view.id, view]));
   let active = 0, resident = 0;
   for (const [token, reservation] of [...reservations]) {
     if (!token.startsWith(prefix)) continue;
-    if (runById.has(reservation.id) && runById.get(reservation.id) !== reservation.priorRunId) { reservations.delete(token); continue; }
+    const view = byId.get(reservation.id);
+    if (view && (view.runId !== reservation.priorRunId || !reservation.newRuntime && view.phase === "closed" && view.runtimeClosed === true)) { reservations.delete(token); continue; }
     active++;
     if (reservation.newRuntime) resident++;
   }
@@ -414,10 +415,9 @@ export class AgentManager {
     const prefix = `${this.root}\0`;
     const views = this.list();
     const newRuntime = options.newRuntime !== false;
-    // One reservation per instance: a second run on one instance is already impossible, and replacing
-    // the older token keeps an uncertain attempt from accumulating slots.
-    for (const [token, reservation] of [...admitting]) if (reservation.id === id) admitting.delete(token);
     const pending = pruneVisibleReservations(admitting, prefix, views);
+    if ([...admitting].some(([token, reservation]) => token.startsWith(prefix) && reservation.id === id))
+      throw new Error("An earlier input is still unconfirmed; inspect the instance before sending another task. No input was sent.");
     const occupied = views.filter(occupiesRuntime);
     const residentTotal = occupied.length + pending.resident;
     if (newRuntime && resident !== undefined && residentTotal >= resident)
@@ -437,20 +437,15 @@ export class AgentManager {
       ? "PI_CLI_SUBAGENTS_MAX_RUNTIMES" : "PI_CLI_SUBAGENTS_MAX_RESIDENT";
   }
 
-  /**
-   * Drop a reservation once the disk accounts for the attempt. A missing or old run id on a settled
-   * phase proves no run started; an unreadable record keeps the slot while a runtime claim remains,
-   * because a lost response does not prove the run failed.
-   */
-  private settleAdmission(token: string): void {
+  /** Retire unsubmitted attempts, visible new runs, or completed refusals on a settled old run. */
+  private settleAdmission(token: string, rejected = false): void {
     const reservation = admitting.get(token);
     if (!reservation) return;
+    if (!reservation.submitted) { admitting.delete(token); return; }
     try {
       const view = this.get(reservation.id);
-      if (view.runId !== reservation.priorRunId || ["idle", "completed", "failed", "stopped", "closed"].includes(view.phase)) admitting.delete(token);
-    } catch {
-      if (!existsSync(path.join(this.directory(reservation.id), "owner.lock"))) admitting.delete(token);
-    }
+      if (view.runId !== reservation.priorRunId || rejected && ["idle", "completed", "failed", "stopped", "closed"].includes(view.phase)) admitting.delete(token);
+    } catch { /* A submitted input with unreadable state remains unconfirmed, even without a lock. */ }
   }
 
   async spawn(roleName: string, role: Role, cwd: string, message: string, workspace?: string): Promise<AgentView> {
@@ -469,7 +464,7 @@ export class AgentManager {
         launch: selected?.launch ?? this.launch, createdAt: Date.now(), ...(workspace ? { workspace, workspaceBaseline: baseline } : {}) };
       mkdirSync(dir, { recursive: true, mode: 0o700 });
       writeJson(path.join(dir, "spec.json"), spec);
-      return this.start(id, notice ? `${message}\n\n[Workspace baseline]\n${notice}` : message);
+      return this.start(id, notice ? `${message}\n\n[Workspace baseline]\n${notice}` : message, admission);
     };
     try {
       if (workspace !== undefined) return await this.workspaces.runAgent(workspace, id, (ws, notice) => start(ws.cwd, { commit: ws.baseCommit, revision: ws.revision }, notice));
@@ -478,7 +473,7 @@ export class AgentManager {
     } finally { this.settleAdmission(admission); }
   }
 
-  private async start(id: string, message: string, session?: NativeSession, operation: "start" | "send" = "start"): Promise<AgentView> {
+  private async start(id: string, message: string, admission: string, session?: NativeSession, operation: "start" | "send" = "start"): Promise<AgentView> {
     const dir = this.directory(id);
     if (existsSync(path.join(dir, "owner.lock"))) throw new Error("The previous worker still owns this session or a stale lock remains. Inspect it before resuming; concurrent owners are not allowed.");
     if (session && "sessionFile" in session && !existsSync(session.sessionFile)) throw new Error(`Original session file is missing: ${session.sessionFile}; will not silently create a new session.`);
@@ -493,6 +488,8 @@ export class AgentManager {
       child = spawn(process.execPath, [workerFile, dir, runId], {
         detached: true, windowsHide: true, stdio: ["ignore", fd, fd],
       });
+      const reservation = admitting.get(admission);
+      if (reservation && child.pid) reservation.submitted = true;
       child.on("error", (error) => writeJson(path.join(runDir, "error.json"), { error: error.message }));
       child.unref();
     } finally { closeSync(fd); }
@@ -526,18 +523,24 @@ export class AgentManager {
     // Transport/server errors may already carry the actual captured identity.
     if (error instanceof Error && (error.message.startsWith(`Subagent ${id},`) || error.message.includes(`for subagent ${id},`))) return error;
     if (!state) { try { state = this.get(id); } catch { /* Do not hide the original failure with a diagnostic read. */ } }
-    return new Error(`${operation} for subagent ${id}${state ? `, run ${state.runId}, runtime ${state.runtimeId ?? "missing"}` : ""}: ${error instanceof Error ? error.message : String(error)}`);
+    const Failure = error instanceof ControlRejectedError ? ControlRejectedError : Error;
+    return new Failure(`${operation} for subagent ${id}${state ? `, run ${state.runId}, runtime ${state.runtimeId ?? "missing"}` : ""}: ${error instanceof Error ? error.message : String(error)}`);
   }
 
   private async request(id: string, input: Control, state: AgentView = this.get(id)): Promise<ControlResult> {
+    let dispatched = false;
     try {
       if (state.protocolVersion !== 3) throw new Error(state.error);
       if (!processAlive(state.workerPid)) throw new Error("Worker has exited; inspect the final state");
       const endpoint = readJson<Endpoint>(path.join(this.directory(id), "endpoint.json"));
       if (!endpoint || endpoint.runId !== state.runId || endpoint.protocolVersion !== 3 || endpoint.runtimeId !== state.runtimeId)
         throw new Error("Worker is not ready, or the connection record is stale");
+      dispatched = true;
       return await control(endpoint, input);
-    } catch (error) { throw this.diagnostic(id, input.type, error, state); }
+    } catch (error) {
+      const diagnostic = this.diagnostic(id, input.type, error, state);
+      throw dispatched ? diagnostic : new ControlRejectedError(diagnostic.message);
+    }
   }
 
   async send(id: string, message: string, mode: Delivery = "steer", options: ResumeOptions = {}): Promise<AgentView> {
@@ -573,11 +576,15 @@ export class AgentManager {
         // A new run on a resident instance takes a turn slot too; the instance is already visible, so
         // the reservation is settled against its new run id instead of its existence.
         const admission = this.admit(id, { priorRunId: state.runId, newRuntime: false });
+        let rejected = false;
         try {
-          const result = await this.request(id, { type: "start", message: prompt });
+          const reservation = admitting.get(admission);
+          if (reservation) reservation.submitted = true;
+          const result = await this.request(id, { type: "start", message: prompt }, state);
           return this.view(id, result, result.receipt && { ...result.receipt, operation: "send" });
         }
-        finally { this.settleAdmission(admission); }
+        catch (error) { rejected = error instanceof ControlRejectedError; throw error; }
+        finally { this.settleAdmission(admission, rejected); }
       }
       if (["starting", "running", "waiting"].includes(state.phase)) {
         if (spec.cli === "codex" && mode === "followUp") throw new Error("Codex followUp while running is not supported; wait for this run to finish");
@@ -592,7 +599,7 @@ export class AgentManager {
       if (session.cli === "claude") inspectClaudeSession(spec, session);
       // Resuming a released instance starts a new runtime, so it needs a free slot like spawn does.
       const admission = this.admit(id, { priorRunId: state.runId, newRuntime: true });
-      try { return await this.start(id, prompt, session, "send"); }
+      try { return await this.start(id, prompt, admission, session, "send"); }
       finally { this.settleAdmission(admission); }
     };
     try {

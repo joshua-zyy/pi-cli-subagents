@@ -91,7 +91,7 @@ The existing `AgentState.accepted` describes receipt of the run's initial task, 
 - **唯一例外：`reclaim`**。不可达 runtime 只有在**显式** `reclaim` 且 worker 与 CLI 两个记录 PID 都得到 `ESRCH` 观察后，才停止计入 active/resident。凭据写在实例目录的 `reclaims/<runtimeId>.json`（一 runtime 一份，**创建后不覆盖**；重复调用仅在身份与所有权仍匹配时返回原证据，否则拒绝）。生效条件（同时满足）：记录内容绑定当前父会话、实例与**同一个** `runtimeId`；证据结构完整且判据为 `ESRCH`；`owner.lock` **不存在**或 runtimeId 与 pid 均与记录一致。以下情形**回收记录不生效**且该 runtime 继续占位：当前 `owner.lock` 属于另一个 runtime（所有权冲突）、`phase` 不是 `unreachable`、内容无效或不可解析。回收不影响未结算的准入预留，也不解除 workspace 写入排他或允许恢复原会话。**证据边界**：`reclaim` 只处理记录中的 `workerPid` 与 `cliPid`；CLI 派生的孙进程（后台 server、长跑任务）既不在记录里也不在证据范围内，所以"账目已回收"不等于"该 runtime 启动的所有工作都已停止"。`subagent_query` 的 `get`/`list` 会返回 `reclaimed: { at, evidence, nativeReleaseConfirmed:false, continuation:"blocked" }`（`at` 为观察时间；`evidence` 含两个 PID 与 `ESRCH` 判据），因此回收后的实例在查询里仍可辨别，而不会看起来像已正常关闭。
 - **计数来源**：每次准入都从磁盘重算（`manager.list()`），因此跨 controller / 跨工具调用一致。
 - **准入点**（三条）：新建实例（`start`）、对**已释放实例**的 `send` 恢复、以及**对 `idle` 实例开启新 run 的 `send`**。最后一条只判 active、不判 resident——该实例已经占着 runtime 名额，新 run 不新增 runtime。
-- **并发**：每次准入成功先做一次**进程内轮次预留**，直到该轮次的 runId 对磁盘可见；预留按「实例 + 前一个 runId」判定撤销，所以「实例已在列表中可见」本身**不会**撤销预留（`idle` 实例天然可见）。无法确认结果（超时等）不因 `finally` 就归还名额，须等磁盘出现该轮次或该实例可被证明未启动。
+- **并发**：每次准入成功先做一次**进程内轮次预留**，直到该轮次的 runId 对磁盘可见；预留按「实例 + 前一个 runId」判定撤销，所以「实例已在列表中可见」本身**不会**撤销预留（`idle` 实例天然可见）。无法确认结果（超时、丢回执等）不因 `finally` 或旧 idle 状态就归还名额，也不接受同实例的替换输入；须等磁盘出现该轮次、原 runtime 确认释放，或有完整拒绝/未提交证据。完整 HTTP 拒绝且旧轮仍为已结算状态时归还预留，但拒绝本身不证明没有文件等副作用。
 - **拒绝语义**：**显式拒绝**，不排队、不抢占，且发生在任何目录/进程/人工动作记录之前。错误消息给出 `占用数 of 上限` 与产生该上限的变量名；**不建议任何驱逐动作**（不提示「去释放一个」）。
 - **非法值**：空字符串、空白、负数、非整数（含小数、字母）= 显式报错并拒绝派发，避免「看着设了限其实没设」；空字符串**不会**被读成 `0`。
 
