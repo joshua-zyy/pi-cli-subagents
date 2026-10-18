@@ -15,8 +15,9 @@ const lines = (agents, options = {}) => statusLines(agents, { now: 11000, frame:
 
 test('token counts stay compact and messageability excludes unreachable instances', () => {
   for (const [input, expected] of [[0, '0'], [512, '512'], [999, '999'], [1000, '1.0k'], [12345, '12.3k'], [1_234_567, '1.2M'], [-5, '0'], [NaN, '0']]) assert.equal(formatTokens(input), expected);
-  for (const phase of ['starting', 'running', 'completed', 'failed', 'stopped', 'idle', 'closed']) assert.equal(canMessage(phase), true, phase);
-  for (const phase of ['waiting', 'stopping', 'unreachable']) assert.equal(canMessage(phase), false, phase);
+  for (const phase of ['starting', 'running', 'completed', 'failed', 'stopped', 'idle', 'closed']) assert.equal(canMessage({ phase, protocolVersion: 3 }), true, phase);
+  for (const phase of ['waiting', 'stopping', 'unreachable']) assert.equal(canMessage({ phase, protocolVersion: 3 }), false, phase);
+  for (const protocolVersion of [undefined, 2]) for (const phase of ['running', 'idle', 'closed']) assert.equal(canMessage({ phase, protocolVersion }), false);
 });
 
 test('idle resources remain visible after linger and expose failure and release without busy semantics', () => {
@@ -34,7 +35,7 @@ test('idle resources remain visible after linger and expose failure and release 
 });
 
 test('confirmed released runtimes disappear immediately without hiding unconfirmed failures', () => {
-  const released=view({phase:'closed',protocolVersion:2,runtimeClosed:true,updatedAt:11000,lastStatus:'completed'});
+  const released=view({phase:'closed',protocolVersion:3,runtimeClosed:true,updatedAt:11000,lastStatus:'completed'});
   assert.deepEqual(lines([released]),[]);
   const unconfirmed={...released,phase:'unreachable',lastStatus:'failed',error:'release uncertainty'};
   assert.match(lines([unconfirmed]).join('\n'),/Failed|uncertainty/);

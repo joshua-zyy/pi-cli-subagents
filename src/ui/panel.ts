@@ -135,11 +135,11 @@ export class AgentsPanel {
     if (matchesKey(data, "escape") || matchesKey(data, "left") || matchesKey(data, "h")) this.view = "list";
     else if (matchesKey(data, "up")) this.scroll = Math.max(0, this.scroll - 1);
     else if (matchesKey(data, "down")) this.scroll = Math.min(Math.max(0, this.bodyLines - this.pageLines), this.scroll + 1);
-    else if (agent && matchesKey(data, "s") && canMessage(agent.phase)) this.finish({ kind: "message", id: agent.id, resume: canResume(agent.phase) });
+    else if (agent && matchesKey(data, "s") && canMessage(agent)) this.finish({ kind: "message", id: agent.id, resume: canResume(agent.phase) });
     else if (agent && matchesKey(data, "v")) this.finish({ kind: "view", id: agent.id });
     else if (agent && matchesKey(data, "x") && canRelease(agent)) this.finish({ kind: "stop", id: agent.id, expected: { runId: agent.runId, runtimeId: agent.runtimeId } });
     else if (agent && matchesKey(data, "x") && canReleaseUncertain(agent)) this.finish({ kind: "release-uncertain", id: agent.id, expected: { runId: agent.runId, runtimeId: agent.runtimeId } });
-    else if (agent && question && matchesKey(data, "r")) this.finish({ kind: "reply", id: agent.id, questionId: question.id });
+    else if (agent && agent.protocolVersion === 3 && question && matchesKey(data, "r")) this.finish({ kind: "reply", id: agent.id, questionId: question.id });
     else if (matchesKey(data, "q")) this.finish(undefined);
   }
 
@@ -286,8 +286,8 @@ export class AgentsPanel {
     if (canInterrupt(agent)) hint.unshift(["t", "interrupt"]);
     if (canRelease(agent)) hint.unshift(["x", "release"]);
     else if (canReleaseUncertain(agent)) hint.unshift(["x", "release uncertain"]);
-    if (canMessage(agent.phase)) hint.push(["s", canResume(agent.phase) ? "resume" : agent.phase === "idle" ? "new task" : "message"]);
-    if (question) hint.push(["r", "reply"]);
+    if (canMessage(agent)) hint.push(["s", canResume(agent.phase) ? "resume" : agent.phase === "idle" ? "new task" : "message"]);
+    if (question && agent.protocolVersion === 3) hint.push(["r", "reply"]);
     hint.push(["q", "close"]);
     lines.push("", this.hint(hint));
     return lines;

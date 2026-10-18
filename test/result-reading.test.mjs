@@ -84,7 +84,8 @@ test('manager → notification preserves the true tail and advertises an exact r
   const h = harness(), a = h.add();
   const legacy = h.manager.get(a.id);
   assert.equal(legacy.protocolVersion, undefined);
-  assert.equal(legacy.phase, 'completed', 'unversioned persisted states keep their original phase');
+  assert.equal(legacy.phase, 'unreachable', 'retired protocols are read-only, not resumable runtime state');
+  assert.match(legacy.error, /Unsupported worker protocol/);
   assert.equal(legacy.text.length, 12000, 'live views keep their bounded cache');
   deliverReports(h.manager, h.pi, h.ctx, new Set(), 10000);
   const content = h.sent[0].message.content;
@@ -215,12 +216,12 @@ test('result paging validates combinations and bounds at the tool boundary', asy
 test('empty failed results remain failed, and stopped results remain stopped', async () => {
   const h = harness(), a = h.add('');
   const failed = a.publish('', 'failed', 2, 'Provider interrupted');
-  assert.equal(h.manager.get(a.id).phase, 'failed', 'legacy failures are not converted to a runtime phase');
+  assert.equal(h.manager.get(a.id).phase, 'unreachable', 'old runtime control is unsupported');
   const result = await h.invoke({ action: 'result', id: a.id, runId: failed.runId });
   assert.equal(result.status, 'failed'); assert.equal(result.error, 'Provider interrupted');
   assert.equal(result.text, ''); assert.equal(result.totalLength, 0); assert.equal(result.nextOffset, null);
   const stopped = a.publish('Partial work', 'stopped', 3);
-  assert.equal(h.manager.get(a.id).phase, 'stopped', 'legacy stops keep their original phase');
+  assert.equal(h.manager.get(a.id).phase, 'unreachable', 'old runtime control is unsupported');
   assert.equal((await h.invoke({ action: 'result', id: a.id, runId: stopped.runId })).status, 'stopped');
 });
 

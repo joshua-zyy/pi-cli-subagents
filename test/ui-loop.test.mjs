@@ -203,7 +203,7 @@ test('open roster shares the status widget animation clock without extra reads o
 test('open roster consumes monitor snapshots, updates elapsed time and detaches on close or session change', async t => {
   const h = harness(t), original = AgentManager.prototype.list;
   let calls = 0, redraws = 0;
-  const agent = { id: '00000000-0000-4000-8000-000000000001', runId: 'run', runtimeId: 'runtime', protocolVersion: 2,
+  const agent = { id: '00000000-0000-4000-8000-000000000001', runId: 'run', runtimeId: 'runtime', protocolVersion: 3,
     role: 'worker', phase: 'running', workerPid: process.pid, updatedAt: 1000, startedAt: 1000, questions: [], history: [], runCount: 1 };
   let snapshot = [agent];
   AgentManager.prototype.list = function () { calls++; return snapshot; };
@@ -256,7 +256,7 @@ test('status widget registers only in TUI, shows agents and unregisters at shutd
   h.start();
   const agent = await h.spawn('REMEMBER widget');
   const idle = await waitForIdle(h.manager, agent.id);
-  assert.equal(idle.protocolVersion, 2);
+  assert.equal(idle.protocolVersion, 3);
   assert.equal(processAlive(idle.workerPid), true, 'run completion must leave the worker resident');
   assert.ok(fs.existsSync(path.join(h.manager.root, agent.id, 'owner.lock')));
   const registered = await waitUntil('widget registration', () => h.widgetCalls.find((call) => typeof call.content === 'function'));

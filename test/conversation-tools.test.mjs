@@ -6,7 +6,7 @@ import { getKeybindings, setKeybindings, KeybindingsManager } from '@earendil-wo
 import { ConversationViewer } from '../dist/ui/conversation.js';
 
 const theme = { fg: (_, text) => text, bold: text => text };
-const agent = { id: 'agent', role: 'worker', phase: 'running', runId: 'run' };
+const agent = { protocolVersion: 3, id: 'agent', role: 'worker', phase: 'running', runId: 'run' };
 const tool = (id, status = 'done', text = `OUTPUT_${id}`) => ({ id, kind: 'tool', title: `tool_${id}`, input: '{"path":"file.ts"}', status, text });
 const message = id => ({ id, kind: 'assistant', title: 'Assistant', text: `MESSAGE_${id}` });
 const wait = () => new Promise(resolve => setTimeout(resolve, 25));

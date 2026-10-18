@@ -35,7 +35,7 @@ test('a live CLI process blocks reclaim until it exits, then the real admission 
   writeJson(path.join(dir, 'spec.json'), { ...spec, id });
   const runtimeId = randomUUID();
   writeJson(path.join(dir, 'state.json'), {
-    id, runId: randomUUID(), runtimeId, protocolVersion: 2, phase: 'running',
+    id, runId: randomUUID(), runtimeId, protocolVersion: 3, phase: 'running',
     workerPid: reapedWorker, cliPid: cli.pid, startedAt: Date.now() - 1000, updatedAt: Date.now(),
     accepted: true, questions: [], logFile: path.join(dir, 'runs', randomUUID(), 'events.jsonl'),
   });

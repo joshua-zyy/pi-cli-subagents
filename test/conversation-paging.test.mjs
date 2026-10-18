@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { ConversationViewer } from '../dist/ui/conversation.js';
 
 const theme = { fg: (_color, text) => text, bold: text => text };
-const agent = { id: 'agent-1', role: 'worker', phase: 'running', runId: 'run-1' };
+const agent = { protocolVersion: 3, id: 'agent-1', role: 'worker', phase: 'running', runId: 'run-1' };
 const entry = (id, text) => ({ id, kind: 'assistant', title: 'Assistant', text });
 const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
 async function until(predicate) {

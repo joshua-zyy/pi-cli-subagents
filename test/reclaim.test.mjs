@@ -45,7 +45,7 @@ function instance(m, spec, options = {}) {
   const id = randomUUID(), dir = path.join(m.root, id);
   writeJson(path.join(dir, 'spec.json'), { ...spec, id });
   const state = {
-    id, runId: randomUUID(), runtimeId: randomUUID(), protocolVersion: 2, phase: 'running',
+    id, runId: randomUUID(), runtimeId: randomUUID(), protocolVersion: 3, phase: 'running',
     workerPid: gonePid(), cliPid: gonePid(), startedAt: Date.now() - 1000, updatedAt: Date.now(),
     accepted: true, questions: [], logFile: path.join(dir, 'runs', randomUUID(), 'events.jsonl'),
     ...options.state,
@@ -311,5 +311,5 @@ test('a claim from another instance, other parent or without a runtime id is ign
   }
 
   const legacy = instance(m, spec, { state: { protocolVersion: undefined, runtimeId: undefined } });
-  await assert.rejects(m.reclaim(legacy.id, randomUUID()), /is not the runtime recorded/);
+  await assert.rejects(m.reclaim(legacy.id, randomUUID()), /Unsupported worker protocol/);
 });

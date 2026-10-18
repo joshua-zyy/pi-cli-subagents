@@ -43,21 +43,21 @@ export const canStop = (phase: Phase): boolean => isActive(phase) || phase === "
 /** UI release requires a known idle owner; active runs remain interruptible, not releasable here. */
 type ReleaseView = Pick<AgentView, "phase"> & Partial<Pick<AgentView, "protocolVersion" | "runtimeId" | "questions" | "runtimeClosed" | "reclaimed">>;
 export const canRelease = (view: ReleaseView): view is ReleaseView & { runtimeId: string } =>
-  view.phase === "idle" && view.protocolVersion === 2 && !!view.runtimeId && view.questions?.length === 0;
+  view.phase === "idle" && view.protocolVersion === 3 && !!view.runtimeId && view.questions?.length === 0;
 
 /** Explicit single-runtime recovery; the manager and worker still verify ownership and acceptance. */
 export const canReleaseUncertain = (view: ReleaseView): view is ReleaseView & { runtimeId: string } =>
-  view.phase === "unreachable" && view.protocolVersion === 2 && !!view.runtimeId && !view.runtimeClosed && !view.reclaimed;
+  view.phase === "unreachable" && view.protocolVersion === 3 && !!view.runtimeId && !view.runtimeClosed && !view.reclaimed;
 
-/** Query views omit operation receipts; closed v2 ownership is the durable release evidence. */
+/** Query views omit operation receipts; closed v3 ownership is the durable release evidence. */
 export const isReleased = (view: Pick<AgentView, "phase" | "protocolVersion" | "runtimeClosed">): boolean =>
-  view.phase === "closed" && view.protocolVersion === 2 && view.runtimeClosed === true;
+  view.phase === "closed" && view.protocolVersion === 3 && view.runtimeClosed === true;
 
 export const canResume = (phase: Phase): boolean => ["completed", "failed", "stopped", "closed"].includes(phase);
 
-/** Only resident v2 backends expose current-run interruption; closing is a different operation. */
+/** Only protocol v3 exposes current-run interruption; closing is a different operation. */
 export const canInterrupt = (view: Pick<AgentView, "protocolVersion" | "cli" | "phase">): boolean =>
-  view.protocolVersion === 2 && (view.cli === "pi" || view.cli === "codex" || view.cli === "claude") && ["starting", "running", "waiting"].includes(view.phase);
+  view.protocolVersion === 3 && (view.cli === "pi" || view.cli === "codex" || view.cli === "claude") && ["starting", "running", "waiting"].includes(view.phase);
 
 /** Waiting children do not accept messages; answer their requests through subagent_reply or /agents. */
 export const canSteer = (phase: Phase): boolean => phase === "starting" || phase === "running";
@@ -66,7 +66,8 @@ export const canSteer = (phase: Phase): boolean => phase === "starting" || phase
  * Running instances are steered, idle ones start a new run in the resident runtime, and closed
  * ones resume their native session. Waiting, stopping and unreachable instances cannot accept input.
  */
-export const canMessage = (phase: Phase): boolean => canSteer(phase) || phase === "idle" || canResume(phase);
+export const canMessage = (view: Pick<AgentView, "phase" | "protocolVersion">): boolean =>
+  view.protocolVersion === 3 && (canSteer(view.phase) || view.phase === "idle" || canResume(view.phase));
 
 /** Unknown phases from old or manually edited records should remain visible. */
 export const phaseLabel = (phase: Phase): string => PHASE_LABEL[phase] ?? String(phase);

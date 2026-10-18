@@ -214,11 +214,13 @@ export class AgentManager {
     let lockAbsent = false, lockMatches = false;
     // A reclaim needs the file itself to be gone: an empty lock record still claims the instance.
     const lockMissing = !existsSync(path.join(dir, "owner.lock"));
-    if (state.protocolVersion !== undefined) {
-      if (state.protocolVersion !== 2 || typeof state.runtimeId !== "string" || !idPattern.test(state.runtimeId) ||
+    if (state.protocolVersion !== 3) {
+      state = { ...state, phase: state.runtimeClosed === true && lockMissing ? "closed" : "unreachable", questions: [], error: `Unsupported worker protocol ${state.protocolVersion ?? "missing"}; only v3 is supported. Records are read-only; manually stop verified old processes. No migration or forced takeover.` };
+    } else {
+      if (typeof state.runtimeId !== "string" || !idPattern.test(state.runtimeId) ||
         state.phase === "closed" && state.runtimeClosed !== true ||
         state.lastStatus !== undefined && !["completed", "failed", "stopped"].includes(state.lastStatus) ||
-        state.runtimeClosed && !["completed", "failed", "stopped", "closed"].includes(state.phase))
+        state.runtimeClosed && state.phase !== "closed")
         throw new Error(`Invalid runtime identity for subagent ${id}`);
       const owner = this.readOwner(dir);
       lockAbsent = lockMissing;
@@ -233,7 +235,7 @@ export class AgentManager {
     }
     // A reclaim frees the accounting of one runtime only. It applies to an unreachable runtime
     // whose ownership is absent or provably the same, never to a conflict or a newer runtime.
-    if (state.phase === "unreachable" && state.protocolVersion === 2 && (lockAbsent || lockMatches)) {
+    if (state.phase === "unreachable" && state.protocolVersion === 3 && (lockAbsent || lockMatches)) {
       const reclaim = this.readReclaim(dir, id, state.runtimeId!);
       if (reclaim) state = { ...state, reclaimed: { at: reclaim.observedAt, evidence: reclaim.evidence, nativeReleaseConfirmed: false, continuation: "blocked" } };
     }
@@ -303,9 +305,10 @@ export class AgentManager {
     this.spec(id);
     const raw = readJson<AgentState>(path.join(dir, "state.json"));
     if (!raw) throw new Error(`Subagent ${id} has no runtime state; nothing was reclaimed. Inspect ${dir}`);
+    if (raw.protocolVersion !== 3) throw new Error(this.get(id).error);
     // Capture the target before observing anything: a later state, or a new runtime, must not
     // inherit this decision.
-    const target = { runtimeId: raw.protocolVersion === 2 ? raw.runtimeId : undefined, workerPid: raw.workerPid, cliPid: raw.cliPid };
+    const target = { runtimeId: raw.runtimeId, workerPid: raw.workerPid, cliPid: raw.cliPid };
     if (!idPattern.test(runtimeId) || target.runtimeId !== runtimeId)
       throw new Error(`Runtime ${runtimeId} is not the runtime recorded for subagent ${id} (${target.runtimeId ?? "none"}); nothing was reclaimed. Query the instance for its current runtime ID.`);
     const view = this.get(id);
@@ -358,15 +361,15 @@ export class AgentManager {
   }
 
   /** Only this parent's validated runs, oldest first. Requests carry their own creation time. */
-  private runs(id: string): { runId: string; folder: string; time: number; request: StartRequest }[] {
+  private runs(id: string): { runId: string; folder: string; time: number; request: Omit<StartRequest, "protocolVersion"> }[] {
     const root = path.join(this.directory(id), "runs");
-    const runs: { runId: string; folder: string; time: number; request: StartRequest }[] = [];
+    const runs: { runId: string; folder: string; time: number; request: Omit<StartRequest, "protocolVersion"> }[] = [];
     for (const runId of directories(root)) {
       if (!idPattern.test(runId)) continue;
       const folder = path.join(root, runId), file = path.join(folder, "request.json");
       // A run directory exists before its request file is durable; skip it rather than failing a poll.
       const request = this.readHistory(file, (mtimeMs) => {
-        const saved = readJson<StartRequest>(file);
+        const saved = readJson<Omit<StartRequest, "protocolVersion">>(file);
         return saved ? { runId: saved.runId, message: summarize(saved.message) ?? "", createdAt: saved.createdAt ?? mtimeMs, logFile: saved.logFile } : undefined;
       });
       if (!request || request.runId !== runId) continue;
@@ -475,14 +478,14 @@ export class AgentManager {
     } finally { this.settleAdmission(admission); }
   }
 
-  private async start(id: string, message: string, session?: NativeSession | SessionHandle, operation: "start" | "send" = "start"): Promise<AgentView> {
+  private async start(id: string, message: string, session?: NativeSession, operation: "start" | "send" = "start"): Promise<AgentView> {
     const dir = this.directory(id);
     if (existsSync(path.join(dir, "owner.lock"))) throw new Error("The previous worker still owns this session or a stale lock remains. Inspect it before resuming; concurrent owners are not allowed.");
     if (session && "sessionFile" in session && !existsSync(session.sessionFile)) throw new Error(`Original session file is missing: ${session.sessionFile}; will not silently create a new session.`);
     const runId = randomUUID(), runDir = path.join(dir, "runs", runId);
     mkdirSync(runDir, { recursive: true, mode: 0o700 });
     const priorStart = readJson<AgentState>(path.join(dir, "state.json"))?.startedAt;
-    const initial: StartRequest = { runId, message, createdAt: Math.max(Date.now(), Number.isFinite(priorStart) ? priorStart! + 1 : 0), session };
+    const initial: StartRequest = { protocolVersion: 3, runId, message, createdAt: Math.max(Date.now(), Number.isFinite(priorStart) ? priorStart! + 1 : 0), session };
     writeJson(path.join(runDir, "request.json"), initial);
     const fd = openSync(path.join(runDir, "worker.log"), "a", 0o600);
     let child: ChildProcess | undefined;
@@ -523,20 +526,17 @@ export class AgentManager {
     // Transport/server errors may already carry the actual captured identity.
     if (error instanceof Error && (error.message.startsWith(`Subagent ${id},`) || error.message.includes(`for subagent ${id},`))) return error;
     if (!state) { try { state = this.get(id); } catch { /* Do not hide the original failure with a diagnostic read. */ } }
-    return new Error(`${operation} for subagent ${id}${state ? `, run ${state.runId}, runtime ${state.runtimeId ?? "legacy"}` : ""}: ${error instanceof Error ? error.message : String(error)}`);
+    return new Error(`${operation} for subagent ${id}${state ? `, run ${state.runId}, runtime ${state.runtimeId ?? "missing"}` : ""}: ${error instanceof Error ? error.message : String(error)}`);
   }
 
   private async request(id: string, input: Control, state: AgentView = this.get(id)): Promise<ControlResult> {
     try {
+      if (state.protocolVersion !== 3) throw new Error(state.error);
       if (!processAlive(state.workerPid)) throw new Error("Worker has exited; inspect the final state");
       const endpoint = readJson<Endpoint>(path.join(this.directory(id), "endpoint.json"));
-      if (!endpoint || endpoint.runId !== state.runId || (state.protocolVersion === 2 &&
-        (endpoint.protocolVersion !== 2 || endpoint.runtimeId !== state.runtimeId))) throw new Error("Worker is not ready, or the connection record is stale");
-      const result = await control(endpoint, input);
-      const operation = input.type === "close" ? "stop" : input.type === "start" || input.type === "send" || input.type === "interrupt" ? input.type : undefined;
-      // A pre-P3 worker's accepted flag describes its initial task, not this command.
-      return operation ? { ...result, receipt: result.receipt ?? { operation, status: "unconfirmed", runId: result.runId,
-        ...(result.runtimeId ? { runtimeId: result.runtimeId } : {}) } } : result;
+      if (!endpoint || endpoint.runId !== state.runId || endpoint.protocolVersion !== 3 || endpoint.runtimeId !== state.runtimeId)
+        throw new Error("Worker is not ready, or the connection record is stale");
+      return await control(endpoint, input);
     } catch (error) { throw this.diagnostic(id, input.type, error, state); }
   }
 
@@ -549,7 +549,7 @@ export class AgentManager {
       if (["starting", "running", "waiting", "stopping", "unreachable"].includes(state.phase)) throw new Error("Cannot sync a running or uncertain instance; wait for it to finish or inspect it first");
       if (state.phase === "idle") { await this.close(id, true); state = this.get(id); }
       await this.waitForRelease(state, "Sync writer release", 15_000);
-      const session = nativeSession(state.session ?? (state.sessionFile && state.sessionId ? { sessionFile: state.sessionFile, sessionId: state.sessionId } : undefined));
+      const session = state.session;
       if (!session || session.cli !== (spec.cli ?? "pi")) throw new Error("No resumable original session; cannot sync for continuation");
       if (session.cli === "pi") {
         if (!existsSync(session.sessionFile)) throw new Error(`Original session file is missing: ${session.sessionFile}; no synchronization was performed`);
@@ -586,7 +586,7 @@ export class AgentManager {
       }
       await this.waitForRelease(state, "Previous worker release", 15_000);
       state = this.get(id);
-      const session = nativeSession(state.session ?? (state.sessionFile && state.sessionId ? { sessionFile: state.sessionFile, sessionId: state.sessionId } : undefined));
+      const session = state.session;
       if (!session || session.cli !== (spec.cli ?? "pi")) throw new Error("No resumable original session; will not silently create a new session");
       if (session.cli === "codex" && session.codexHome !== spec.codexHome) throw new Error("Codex native home changed; refusing to resume a different session store");
       if (session.cli === "claude") inspectClaudeSession(spec, session);
@@ -596,6 +596,8 @@ export class AgentManager {
       finally { this.settleAdmission(admission); }
     };
     try {
+      const current = this.get(id);
+      if (current.protocolVersion !== 3) throw new Error(current.error);
       if (!spec.workspace) return await send();
       return await this.workspaces.runAgent(spec.workspace, id, async (ws, notice) => {
         const state = await send(notice);
@@ -617,7 +619,7 @@ export class AgentManager {
     await waitUntil(label, () => {
       const owner = readJson<{ pid: number; runId: string; runtimeId?: string }>(file);
       if (owner === undefined) return true;
-      if (!owner || owner.pid !== state.workerPid || (state.protocolVersion === 2 ? owner.runtimeId !== state.runtimeId : owner.runId !== state.runId) || !processAlive(owner.pid))
+      if (!owner || owner.pid !== state.workerPid || owner.runtimeId !== state.runtimeId || !processAlive(owner.pid))
         throw new Error(`A different owner or stale lock remains at ${file}; inspect it before retrying. No lock was reclaimed.`);
       return undefined;
     }, timeout);
@@ -626,6 +628,7 @@ export class AgentManager {
   async interrupt(id: string): Promise<AgentView> {
     const state = this.get(id);
     try {
+      if (state.protocolVersion !== 3) throw new Error(state.error);
       if (state.phase === "unreachable") throw new Error(state.error);
       if (["completed", "failed", "stopped", "closed"].includes(state.phase)) {
         await this.waitForRelease(state, "Interrupt closed runtime", 15_000);
@@ -642,11 +645,12 @@ export class AgentManager {
   async close(id: string, onlyIdle = false, expected?: { runId: string; runtimeId?: string }, preserveAccepted = false): Promise<AgentView> {
     const state = this.get(id);
     try {
+      if (state.protocolVersion !== 3) throw new Error(state.error);
       // A reclaim freed only the accounting; there is no native release left to confirm here.
       if (state.reclaimed) throw new Error(`Runtime ${state.runtimeId} had its accounting reclaimed without a native release confirmation, so stop has nothing to confirm. This instance cannot be continued in this version; start a new instance for further work.`);
       if (state.phase === "unreachable" && (!state.runtimeId || !processAlive(state.workerPid))) throw new Error(state.error);
-      if (expected && ((!onlyIdle && !preserveAccepted) || onlyIdle && state.protocolVersion !== 2 || state.runId !== expected.runId || state.runtimeId !== expected.runtimeId))
-        throw new Error(`Captured run ${expected.runId}, runtime ${expected.runtimeId ?? "legacy"} no longer matches; it was not closed`);
+      if (expected && ((!onlyIdle && !preserveAccepted) || state.runId !== expected.runId || state.runtimeId !== expected.runtimeId))
+        throw new Error(`Captured run ${expected.runId}, runtime ${expected.runtimeId ?? "missing"} no longer matches; it was not closed`);
       if (onlyIdle && state.phase !== "idle") throw new Error("Runtime is no longer idle; it was not closed");
       // Keep the checked idle snapshot bound through endpoint selection; the worker
       // rechecks its token and idle state inside the existing control queue.
@@ -656,7 +660,7 @@ export class AgentManager {
       const result = this.get(id);
       if (onlyIdle && (result.runId !== state.runId || result.runtimeId !== state.runtimeId))
         throw new Error("Idle release confirmation identity changed; inspect before retrying");
-      const confirmed = result.protocolVersion === 2 && result.runtimeId === state.runtimeId && result.runtimeClosed === true && result.phase === "closed";
+      const confirmed = result.protocolVersion === 3 && result.runtimeId === state.runtimeId && result.runtimeClosed === true && result.phase === "closed";
       return { ...result, receipt: { operation: "stop", status: confirmed ? "released" : "unconfirmed", runId: result.runId,
         ...(result.runtimeId ? { runtimeId: result.runtimeId } : {}) } };
     } catch (error) { throw this.diagnostic(id, "stop", error, state); }
@@ -702,7 +706,7 @@ export class AgentManager {
           console.error(`[pi-cli-subagents] Could not read report for subagent ${state.id}; inspect ${reportFile}:`, error);
         }
       }
-      if (state.phase === "unreachable") reports.push({
+      if (state.protocolVersion === 3 && state.phase === "unreachable") reports.push({
         notificationId: `${state.runtimeId ?? state.runId}-unreachable`, agentId: state.id, runId: state.runId, parentFile: this.parentFile,
         status: "failed", time: state.updatedAt, text: "", error: state.error, logFile: state.logFile,
       });

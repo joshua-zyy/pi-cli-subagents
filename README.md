@@ -21,6 +21,11 @@ managed Git worktrees keep parallel edits out of each other's way.
 Claude Code currently requires `2.1.x` with patch number `283` or higher, plus runtime protocol
 capability checks. Later minor or major versions require revalidation before support is enabled.
 
+Worker upgrades are a strict boundary: this version only controls and resumes protocol v3 workers.
+Release existing subagents with the previous extension before upgrading, then reload the parent
+extension. Protocol v1/v2 records remain read-only; they are not migrated, resumed or taken over.
+If older processes remain, verify their identities and clean them up manually.
+
 ## Install
 
 ```bash

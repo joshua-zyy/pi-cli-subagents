@@ -6,7 +6,7 @@ import { ConversationViewer } from '../dist/ui/conversation.js';
 const theme = { fg: (_, text) => text, bold: text => text };
 const markdownTheme = { heading: t => t, link: t => t, linkUrl: t => t, code: t => t, codeBlock: t => t, codeBlockBorder: t => t, quote: t => t, quoteBorder: t => t, hr: t => t, listBullet: t => t, bold: t => t, italic: t => t, strikethrough: t => t, underline: t => t };
 const entry = (i, extra = {}) => ({ id: String(i), kind: 'assistant', title: 'Assistant', text: `Message ${i}`, ...extra });
-const state = { id: 'agent-1', role: 'worker', phase: 'running', runId: 'run-1' };
+const state = { protocolVersion: 3, id: 'agent-1', role: 'worker', phase: 'running', runId: 'run-1' };
 const wait = ms => new Promise(r => setTimeout(r, ms));
 function harness(load) {
   const actions = []; let renders = 0;
@@ -223,11 +223,11 @@ test('a loading snapshot followed by failure uses the normal retry interval', as
   assert.match(viewer.render(80).join('\n'), /read failed/);
 });
 
-test('viewer offers t for v2 Pi/Codex/Claude active runs, including while history loads', async () => {
-  for (const cli of ['pi', 'codex', 'claude', undefined]) for (const protocolVersion of [undefined, 2]) {
+test('viewer offers t for v3 Pi/Codex/Claude active runs, including while history loads', async () => {
+  for (const cli of ['pi', 'codex', 'claude', undefined]) for (const protocolVersion of [undefined, 2, 3]) {
     for (const phase of ['starting', 'running', 'waiting', 'stopping', 'idle', 'closed', 'completed', 'failed', 'stopped', 'unreachable']) {
       const agent = { ...state, cli, protocolVersion, phase };
-      const allowed = protocolVersion === 2 && ['pi', 'codex', 'claude'].includes(cli) && ['starting', 'running', 'waiting'].includes(phase);
+      const allowed = protocolVersion === 3 && ['pi', 'codex', 'claude'].includes(cli) && ['starting', 'running', 'waiting'].includes(phase);
       const h = harness(async () => ({ agent, entries: [], loading: true }));
       try {
         await new Promise(setImmediate);
@@ -242,7 +242,7 @@ test('viewer offers t for v2 Pi/Codex/Claude active runs, including while histor
 
 test('viewer leaves Ctrl+C unhandled and preserves k scrolling, composer typing and x release', async t => {
   const actions = [], sent = [];
-  const agent = { ...state, cli: 'pi', protocolVersion: 2, phase:'idle', runtimeId:'runtime', questions:[] };
+  const agent = { ...state, cli: 'pi', protocolVersion: 3, phase:'idle', runtimeId:'runtime', questions:[] };
   const tui = { terminal: { rows: 16, columns: 80 }, requestRender() {} };
   const viewer = new ConversationViewer(tui, theme, action => actions.push(action), async () => ({ agent,
     entries: Array.from({ length: 30 }, (_, i) => entry(i)), loading: false }), { intervalMs: 1000, onSend: message => { sent.push(message); } });
@@ -257,7 +257,7 @@ test('viewer leaves Ctrl+C unhandled and preserves k scrolling, composer typing 
 
 test('narrow viewer offers interruption for active work and release only for idle owners while retaining failure evidence', async () => {
   for (const phase of ['running', 'waiting', 'idle']) for (const width of [40, 80]) for (const rows of [8, 16]) {
-    const agent = { ...state, cli: 'codex', protocolVersion: 2, runtimeId:'runtime', questions:[], phase, lastStatus: 'failed', error: 'failure evidence '.repeat(20) };
+    const agent = { ...state, cli: 'codex', protocolVersion: 3, runtimeId:'runtime', questions:[], phase, lastStatus: 'failed', error: 'failure evidence '.repeat(20) };
     const viewer = new ConversationViewer({ terminal: { rows, columns: width }, requestRender() {} }, theme, () => {},
       async () => ({ agent, entries: [], loading: false, model: 'long-model-name-for-state-visibility', usageComplete: false }), { onSend() {}, intervalMs: 1000 });
     try {
@@ -379,7 +379,7 @@ test('viewer disposal leaves host onSend completion intact without repainting or
 });
 
 test('viewer offers a captured uncertain release without offering interruption or messages', async t => {
-  const agent = { ...state, phase: 'unreachable', protocolVersion: 2, runtimeId: 'runtime', error: 'Input delivery uncertain' };
+  const agent = { ...state, phase: 'unreachable', protocolVersion: 3, runtimeId: 'runtime', error: 'Input delivery uncertain' };
   const h = harness(async () => ({ agent, entries: [], loading: false }));
   t.after(() => h.viewer.dispose());
   await new Promise(setImmediate);
@@ -391,7 +391,7 @@ test('viewer offers a captured uncertain release without offering interruption o
 
 test('prepending history preserves paused position and does not erase a send notice', async t => {
   const frames = [], actions = [];
-  const agent = { id: 'agent', role: 'worker', phase: 'running', runId: 'r' };
+  const agent = { protocolVersion: 3, id: 'agent', role: 'worker', phase: 'running', runId: 'r' };
   const entries = Array.from({ length: 30 }, (_, i) => ({ id: String(i), kind: 'assistant', title: 'Assistant', text: `TAIL_MESSAGE_${i}` }));
   let snapshot = { entries, loading: false, revision: 1, outputRevision: 1 };
   const theme = { fg: (_c, text) => text, bold: text => text };

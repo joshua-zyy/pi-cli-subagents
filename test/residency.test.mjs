@@ -8,7 +8,7 @@ import { randomUUID } from 'node:crypto';
 import { connect } from 'node:net';
 import { once } from 'node:events';
 import { createServer } from 'node:http';
-import { AgentManager } from '../dist/manager.js';
+import { AgentManager, countsAsActive, occupiesRuntime } from '../dist/manager.js';
 import { control } from '../dist/control.js';
 import { waitUntil, processAlive, readJson, writeJson } from '../dist/storage.js';
 import { tempDir } from './helpers/tmp.mjs';
@@ -38,7 +38,7 @@ function noPersistedReceipt(m, id) {
   for (const name of fs.existsSync(reports) ? fs.readdirSync(reports) : []) assert.equal(Object.hasOwn(readJson(path.join(reports, name)), 'receipt'), false);
 }
 
-// A local legacy/control peer, not a native CLI or a model. Exercises the real HTTP
+// A local control peer, not a native CLI or a model. Exercises the real HTTP
 // transport without modifying another worker's state or launching a replacement.
 async function peer(t, protocolVersion, reply) {
   const cwd = tempDir('receipt-peer'), parent = path.join(cwd, 'parent.jsonl'); fs.writeFileSync(parent, '{}\n');
@@ -62,10 +62,43 @@ async function peer(t, protocolVersion, reply) {
   return { m, id, state, calls, endpoint };
 }
 
-for (const [phase, accepted] of [['completed', true], ['failed', false], ['running', true]]) {
+for (const version of [undefined, 2]) test(`retired worker protocol ${version ?? 'v1'} is read-only and never contacted`, async t => {
+  const { m, id, state, endpoint, calls } = await peer(t, version);
+  for (const input of [{ type: 'status' }, { type: 'send', message: 'must not run', mode: 'steer' },
+    { type: 'start', message: 'must not run' }, { type: 'interrupt' }, { type: 'close' },
+    { type: 'reply', id: 'old-question', cancelled: true }]) {
+    await assert.rejects(control(endpoint, input), /Unsupported worker protocol/i);
+  }
+  assert.equal(m.get(id).phase, 'unreachable');
+  assert.match(m.get(id).error, /Unsupported worker protocol.*read.only/i);
+  for (const phase of ['running', 'closed']) {
+    writeJson(path.join(m.root, id, 'state.json'), { ...state, phase, ...(phase === 'closed' ? { runtimeClosed: true } : {}) });
+    await assert.rejects(m.send(id, 'must not resume'), /Unsupported worker protocol/i);
+    await assert.rejects(m.interrupt(id), /Unsupported worker protocol/i);
+    await assert.rejects(m.close(id), /Unsupported worker protocol/i);
+    await assert.rejects(m.reply(id, 'old-question', { cancelled: true }), /Unsupported worker protocol/i);
+    await assert.rejects(m.reclaim(id, state.runtimeId ?? randomUUID()), /Unsupported worker protocol/i);
+  }
+  assert.equal(calls.length, 0);
+  assert.equal(fs.existsSync(path.join(m.root, id, 'runs')), false, 'no migration or replacement run');
+  const report = { notificationId: `${state.runId}-result`, agentId: id, runId: state.runId, parentFile: m.parentFile,
+    status: 'completed', text: 'Preserved historical result', time: 1, logFile: state.logFile };
+  writeJson(path.join(m.root, id, 'reports', `${state.runId}-result.json`), report);
+  assert.deepEqual(m.getResult(id, state.runId), report, 'old results remain readable without executing an old worker');
+  assert.deepEqual(m.reports().map(value => value.notificationId), [report.notificationId], 'unsupported history is not a new runtime failure');
+  fs.rmSync(path.join(m.root, id, 'owner.lock'), { force: true });
+  const closed = m.get(id);
+  assert.equal(closed.phase, 'closed', 'confirmed historical release remains accounting evidence');
+  assert.equal(countsAsActive(closed), false); assert.equal(occupiesRuntime(closed), false);
+  await assert.rejects(m.interrupt(id), /Unsupported worker protocol/);
+  await assert.rejects(m.send(id, 'old closed records cannot resume'), /Unsupported worker protocol/);
+  assert.equal(calls.length, 0);
+});
+
+for (const [phase, accepted] of [['closed', true], ['closed', false], ['running', true]]) {
   test(`workspace send keeps a validated closing response (${phase}, accepted=${accepted})`, async t => {
-    const h = await peer(t, 2, (res, state) => {
-      Object.assign(state, { phase, accepted, runtimeClosed: true, lastStatus: phase === 'failed' ? 'failed' : 'completed' });
+    const h = await peer(t, 3, (res, state) => {
+      Object.assign(state, { phase, accepted, runtimeClosed: true, lastStatus: accepted ? 'completed' : 'failed' });
       writeJson(path.join(h.m.root, h.id, 'state.json'), state);
       res.end(JSON.stringify({ ...state, receipt: { operation: 'send', status: accepted ? 'accepted' : 'unconfirmed', runId: state.runId, runtimeId: state.runtimeId } }));
     });
@@ -141,7 +174,7 @@ for (const cli of ['pi', 'codex']) test(`${cli} keeps one worker/CLI and distinc
   const { cwd, parent, m, codex } = setup(t);
   const started = await m.spawn('worker', cli === 'codex' ? { ...role, cli, model: 'fixture' } : role, cwd, 'REMEMBER alpha');
   const first = await idle(m, started.id), dir = path.join(m.root, first.id);
-  assert.equal(first.protocolVersion, 2); assert.ok(first.runtimeId);
+  assert.equal(first.protocolVersion, 3); assert.ok(first.runtimeId);
   assert.ok(processAlive(first.workerPid)); assert.ok(processAlive(first.cliPid)); assert.ok(fs.existsSync(path.join(dir, 'owner.lock')));
   const report = JSON.stringify(m.getResult(first.id, first.runId));
   const reopened = new AgentManager(parent, pi, codex);
@@ -160,14 +193,14 @@ for (const cli of ['pi', 'codex']) test(`${cli} keeps one worker/CLI and distinc
   receipt(await m.interrupt(first.id), 'interrupt', 'not_running');
   assert.equal(fs.existsSync(path.join(dir, 'owner.lock')), false);
   const saved = readJson(path.join(dir, 'state.json'));
-  assert.equal(saved.phase, 'completed', 'closed snapshot is readable by the old phase validator'); assert.equal(saved.runtimeClosed, true);
+  assert.equal(saved.phase, 'closed', 'current snapshots do not preserve downgrade enums'); assert.equal(saved.runtimeClosed, true);
   const continued = await m.send(first.id, 'RECALL'); receipt(continued, 'send', 'accepted');
   const resumed = await idle(m, first.id);
   assert.equal(resumed.sessionId, first.sessionId); assert.notEqual(resumed.runtimeId, first.runtimeId);
   assert.equal(resumed.text, 'alpha'); assert.equal(m.eventLogs(first.id).length, 3, 'each run raw stream is enumerated exactly once, across a runtime replacement too');
 });
 
-test('v2 rejects legacy control and stale runtime/run identities without stopping new work', { timeout: 20000 }, async t => {
+test('v3 rejects retired control and stale runtime/run identities without stopping new work', { timeout: 20000 }, async t => {
   const { cwd, m } = setup(t); const child = await m.spawn('worker', role, cwd, 'REMEMBER protocol');
   const first = await idle(m, child.id), file = path.join(m.root, child.id, 'endpoint.json');
   const endpoint = readJson(file);
@@ -216,8 +249,8 @@ test('idle release keeps the checked snapshot bound when work changes before the
 });
 
 test('idle release cannot report a later runtime as the captured release result', async t => {
-  const { m, id, state } = await peer(t, 2, (res, prior) => {
-    const result = { ...prior, phase: 'completed', runtimeClosed: true, lastStatus: 'completed' };
+  const { m, id, state } = await peer(t, 3, (res, prior) => {
+    const result = { ...prior, phase: 'closed', runtimeClosed: true, lastStatus: 'completed' };
     writeJson(path.join(m.root, id, 'state.json'), { ...result, runId: randomUUID(), runtimeId: randomUUID() });
     fs.unlinkSync(path.join(m.root, id, 'owner.lock'));
     res.end(JSON.stringify({ ...result, receipt: { operation: 'stop', status: 'released', runId: prior.runId, runtimeId: prior.runtimeId } }));
@@ -393,13 +426,12 @@ test('Claude missing native capabilities reject busy input and interrupt without
   noPersistedReceipt(m, child.id);
 });
 
-for (const version of [undefined, 2]) test(`P3 a worker without receipts stays unconfirmed (protocol ${version ?? 'legacy'})`, async t => {
-  const { m, id, state, calls } = await peer(t, version);
-  const sent = await m.send(id, 'once'); receipt(sent, 'send', 'unconfirmed'); assert.equal(sent.accepted, true);
-  if (version === undefined) await assert.rejects(m.interrupt(id), /legacy|resident v2/i);
-  else receipt(await m.interrupt(id), 'interrupt', 'unconfirmed');
+test('current workers must supply operation receipts instead of legacy acceptance fallback', async t => {
+  const { m, id, state, calls } = await peer(t, 3);
+  await assert.rejects(m.send(id, 'once'), /Invalid worker operation receipt.*uncertain/);
+  await assert.rejects(m.interrupt(id), /Invalid worker operation receipt.*uncertain/);
   assert.equal(calls.filter(r => r.type === 'send').length, 1);
-  assert.equal(calls.filter(r => r.type === 'interrupt').length, version ? 1 : 0);
+  assert.equal(calls.filter(r => r.type === 'interrupt').length, 1);
   assert.equal(Object.hasOwn(m.get(id), 'receipt'), false);
   writeJson(path.join(m.root, id, 'state.json'), { ...state, receipt: { operation: 'send', status: 'accepted', runId: state.runId } });
   assert.equal(Object.hasOwn(m.get(id), 'receipt'), false, 'query must not replay even a stray persisted receipt');
@@ -415,18 +447,16 @@ test('P3 initial acknowledgement and final outcome remain different facts', { ti
   noPersistedReceipt(m, rejected.id); noPersistedReceipt(m, failed.id);
 });
 
-test('P3 an absent owner lock or legacy response alone is not proof of released native resources', async t => {
-  for (const version of [undefined, 2]) {
-    const { m, id } = await peer(t, version, (res, state) => {
+test('an absent owner lock without a closed snapshot is not native release proof', async t => {
+    const { m, id } = await peer(t, 3, (res, state) => {
       fs.rmSync(path.join(path.dirname(state.logFile), 'owner.lock'), { force: true });
-      res.end(JSON.stringify({ ...state, ...(version ? { receipt: { operation: 'stop', status: 'released', runId: state.runId, runtimeId: state.runtimeId } } : {}) }));
+      res.end(JSON.stringify({ ...state, receipt: { operation: 'stop', status: 'released', runId: state.runId, runtimeId: state.runtimeId } }));
     });
     receipt(await m.close(id), 'stop', 'unconfirmed');
-  }
 });
 
 test('P3 invalid or stale worker receipts are rejected without replay', async t => {
-  const { m, id, calls } = await peer(t, 2, (res, state) => res.end(JSON.stringify({ ...state,
+  const { m, id, calls } = await peer(t, 3, (res, state) => res.end(JSON.stringify({ ...state,
     receipt: { operation: 'send', status: 'accepted', runId: randomUUID(), runtimeId: state.runtimeId },
   })));
   await assert.rejects(m.send(id, 'one attempt'), /Invalid worker operation receipt.*uncertain/);
@@ -434,7 +464,7 @@ test('P3 invalid or stale worker receipts are rejected without replay', async t 
 });
 
 test('P3 lost control response retains known identity diagnostics and is never replayed', async t => {
-  const { m, id, state, calls } = await peer(t, 2, res => res.destroy());
+  const { m, id, state, calls } = await peer(t, 3, res => res.destroy());
   await assert.rejects(m.send(id, 'one side effect'), error => {
     for (const value of [id, state.runId, state.runtimeId]) assert(error.message.includes(value), error.message);
     return true;
@@ -445,7 +475,7 @@ test('P3 lost control response retains known identity diagnostics and is never r
 
 test('P3 interrupt reports the captured settled run, not an interruption verdict or a newer snapshot', async t => {
   const nextRun = randomUUID();
-  const { m, id, state, calls } = await peer(t, 2, (res, prior, input) => {
+  const { m, id, state, calls } = await peer(t, 3, (res, prior, input) => {
     assert.equal(input.type, 'interrupt');
     writeJson(path.join(path.dirname(prior.logFile), 'state.json'), { ...prior, runId: nextRun });
     res.end(JSON.stringify({ ...prior, phase: 'idle', lastStatus: 'completed', receipt: {

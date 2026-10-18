@@ -7,7 +7,7 @@ import { SPINNER, viewStatus } from '../dist/ui/format.js';
 const theme = { fg: (_, text) => text, bold: text => text };
 const keys = { up: '\u001b[A', down: '\u001b[B', left: '\u001b[D', enter: '\r', escape: '\u001b' };
 const view = (over = {}) => ({
-  id: 'a1', runId: 'r1', phase: 'running', workerPid: 1, accepted: true, questions: [],
+  protocolVersion: 3, id: 'a1', runId: 'r1', phase: 'running', workerPid: 1, accepted: true, questions: [],
   startedAt: 1000, updatedAt: 1000, role: 'worker', cwd: 'D:/work', task: 'Implement widget', logFile: 'events.jsonl', ...over,
 });
 /** The roster is a framed pane; these tests read its body without the border and its padding. */
@@ -52,7 +52,7 @@ test('live snapshots preserve the selected identity and detail scroll while upda
 
 test('live release filtering preserves history mode and never silently swaps the detail target', () => {
   const first = view({ id: 'first' }), second = view({ id: 'second', startedAt: 2000 });
-  const released = { ...second, phase: 'closed', protocolVersion: 2, runtimeClosed: true };
+  const released = { ...second, phase: 'closed', protocolVersion: 3, runtimeClosed: true };
   const p = panel([first, second]); p.instance.handleInput(keys.down); p.instance.handleInput('i');
   p.instance.update([first, released]);
   assert.equal(p.instance.mode, 'list'); assert.equal(p.instance.selection, 0);
@@ -66,16 +66,16 @@ test('live release filtering preserves history mode and never silently swaps the
 });
 
 test('live idle admission uses the latest runtime and excludes newly busy or questioning siblings', () => {
-  const idle = view({ id: 'old-idle', phase: 'idle', protocolVersion: 2, runtimeId: 'old-runtime' });
+  const idle = view({ id: 'old-idle', phase: 'idle', protocolVersion: 3, runtimeId: 'old-runtime' });
   const p = panel([idle, view({ id: 'next', startedAt: 2000 })]);
-  const next = view({ id: 'next', startedAt: 2000, phase: 'idle', protocolVersion: 2, runId: 'new-run', runtimeId: 'new-runtime' });
+  const next = view({ id: 'next', startedAt: 2000, phase: 'idle', protocolVersion: 3, runId: 'new-run', runtimeId: 'new-runtime' });
   p.instance.update([{ ...idle, phase: 'running' }, next, { ...idle, id: 'pending', questions: [{ id: 'q' }] }]);
   assert.match(text(p.render()), /release idle \(1\)/);
   p.instance.handleInput('c'); assert.deepEqual(p.actions, [{ kind: 'close-idle', targets: [next] }]);
 });
 
 test('released instances are hidden by default but remain available in explicit history', () => {
-  const released=view({id:'released',phase:'closed',protocolVersion:2,runtimeClosed:true,text:'RESULT_EVIDENCE',sessionId:'original'});
+  const released=view({id:'released',phase:'closed',protocolVersion:3,runtimeClosed:true,text:'RESULT_EVIDENCE',sessionId:'original'});
   const uncertain=view({id:'uncertain',phase:'closed',receipt:{status:'unconfirmed'}});
   const p=panel([released,view({id:'active'}),uncertain]);
   assert.match(text(p.render(160)),/Subagents \(2\)/);assert.doesNotMatch(text(p.render(160)),/worker released/);
@@ -89,12 +89,12 @@ test('released instances are hidden by default but remain available in explicit 
   assert.deepEqual(empty.actions,[{kind:'message',id:'released',resume:true}]);
 });
 
-test('x offers idle release or explicit uncertain release only for v2 runtime identities', () => {
+test('x offers idle release or explicit uncertain release only for v3 runtime identities', () => {
   for(const phase of ['starting','running','waiting','stopping','idle','closed','completed','failed','stopped','unreachable'])
-  for(const protocolVersion of [undefined,2]) for(const runtimeId of [undefined,'native-owner']) for(const questions of [[],[{id:'q',title:'Pending permission',method:'confirm'}]]){
+  for(const protocolVersion of [undefined, 2, 3]) for(const runtimeId of [undefined,'native-owner']) for(const questions of [[],[{id:'q',title:'Pending permission',method:'confirm'}]]){
     const agent=view({phase,protocolVersion,runtimeId,questions}),p=panel([agent]);
-    p.instance.handleInput('i');const uncertain=phase==='unreachable'&&protocolVersion===2&&!!runtimeId;
-    const allowed=uncertain||(phase==='idle'&&protocolVersion===2&&!!runtimeId&&questions.length===0);
+    p.instance.handleInput('i');const uncertain=phase==='unreachable'&&protocolVersion===3&&!!runtimeId;
+    const allowed=uncertain||(phase==='idle'&&protocolVersion===3&&!!runtimeId&&questions.length===0);
     assert.equal(text(p.render(180)).includes('x release'),allowed,JSON.stringify(agent));
     assert.doesNotMatch(text(p.render(180)),/x stop/);p.instance.handleInput('x');
     assert.deepEqual(p.actions,allowed?[{kind:uncertain?'release-uncertain':'stop',id:agent.id,expected:{runId:agent.runId,runtimeId}}]:[]);
@@ -102,12 +102,12 @@ test('x offers idle release or explicit uncertain release only for v2 runtime id
 });
 
 test('c captures only eligible idle runtimes even while an active row is selected', () => {
-  const eligible = view({ id: 'idle', phase: 'idle', protocolVersion: 2, runtimeId: 'runtime' });
-  const agents = [view(), eligible, view({ phase: 'closed', protocolVersion: 2, runtimeId: 'closed' }),
-    view({ phase: 'idle' }), view({ phase: 'idle', protocolVersion: 2 }),
-    view({ phase: 'waiting', protocolVersion: 2, runtimeId: 'waiting' }),
-    view({ phase: 'unreachable', protocolVersion: 2, runtimeId: 'uncertain' }),
-    view({ phase: 'idle', protocolVersion: 2, runtimeId: 'question', questions: [{ id: 'q', isBlocking: false }] })];
+  const eligible = view({ id: 'idle', phase: 'idle', protocolVersion: 3, runtimeId: 'runtime' });
+  const agents = [view(), eligible, view({ phase: 'closed', protocolVersion: 3, runtimeId: 'closed' }),
+    view({ phase: 'idle' }), view({ phase: 'idle', protocolVersion: 3 }),
+    view({ phase: 'waiting', protocolVersion: 3, runtimeId: 'waiting' }),
+    view({ phase: 'unreachable', protocolVersion: 3, runtimeId: 'uncertain' }),
+    view({ phase: 'idle', protocolVersion: 3, runtimeId: 'question', questions: [{ id: 'q', isBlocking: false }] })];
   const p = panel(agents);
   assert.match(text(p.render()), /c release idle/);
   p.instance.handleInput('c'); p.instance.handleInput('c'); p.instance.handleInput(keys.escape);
@@ -116,7 +116,7 @@ test('c captures only eligible idle runtimes even while an active row is selecte
 
 test('uncertain release excludes reclaimed accounting and already closed runtimes', () => {
   for (const extra of [{ runtimeClosed: true }, { reclaimed: { at: 1, evidence: 'absent', nativeReleaseConfirmed: false, continuation: 'blocked' } }]) {
-    const p = panel([view({ phase: 'unreachable', protocolVersion: 2, runtimeId: 'runtime', ...extra })]);
+    const p = panel([view({ phase: 'unreachable', protocolVersion: 3, runtimeId: 'runtime', ...extra })]);
     p.instance.handleInput('i'); assert.doesNotMatch(text(p.render()), /x release/);
     p.instance.handleInput('x'); assert.deepEqual(p.actions, []);
   }
@@ -125,14 +125,14 @@ test('uncertain release excludes reclaimed accounting and already closed runtime
 test('c is absent without eligible targets and never acts inside details', () => {
   const empty = panel([view({ phase: 'idle' })]);
   assert.doesNotMatch(text(empty.render()), /c release idle/); empty.instance.handleInput('c'); assert.equal(empty.actions.length, 0);
-  const p = panel([view({ phase: 'idle', protocolVersion: 2, runtimeId: 'runtime' })]);
+  const p = panel([view({ phase: 'idle', protocolVersion: 3, runtimeId: 'runtime' })]);
   p.instance.handleInput('i'); p.instance.handleInput('c'); assert.equal(p.actions.length, 0);
   p.instance.handleInput(keys.escape); p.instance.handleInput('q'); assert.deepEqual(p.actions, [undefined]);
 });
 
 test('idle batch hint keeps selection and small-pane dimensions intact', () => {
   for (const width of [26, 40, 80]) for (const rows of [6, 8, 12]) {
-    const p = panel([view(), view({ phase: 'idle', protocolVersion: 2, runtimeId: 'runtime' })], { rows });
+    const p = panel([view(), view({ phase: 'idle', protocolVersion: 3, runtimeId: 'runtime' })], { rows });
     const rendered = p.framed(width);
     assert(rendered.length <= rows); assert(rendered.every(row => visibleWidth(row) <= width && !row.includes('\n')));
     assert.match(text(rendered), /c release idle/); assert.match(text(rendered), /›/);
@@ -265,7 +265,7 @@ test('s/x/r/v return the intended action exactly once', () => {
     ['running', 'v', { kind: 'view', id: 'a1' }],
     ['waiting', 'r', { kind: 'reply', id: 'a1', questionId: 'q1' }],
   ]) {
-    const p = panel([view({ phase, protocolVersion:2, runtimeId:'runtime', questions: phase === 'waiting' ? [{ id: 'q1', method: 'confirm', title: 'Allow?' }] : [] })]);
+    const p = panel([view({ phase, protocolVersion:3, runtimeId:'runtime', questions: phase === 'waiting' ? [{ id: 'q1', method: 'confirm', title: 'Allow?' }] : [] })]);
     p.instance.handleInput('i'); p.instance.handleInput(key); assert.deepEqual(p.actions, [expected]);
     p.instance.handleInput('x'); p.instance.handleInput(keys.escape); assert.equal(p.actions.length, 1); assert.ok(p.render().length);
   }
@@ -316,10 +316,10 @@ test('summary resizes without hiding action hints and preserves errors alongside
   }
 });
 
-test('t interrupts v2 Pi/Codex/Claude active runs from the selected roster row or detail', () => {
-  for (const cli of ['pi', 'codex', 'claude', undefined]) for (const protocolVersion of [undefined, 2]) {
+test('t interrupts v3 Pi/Codex/Claude active runs from the selected roster row or detail', () => {
+  for (const cli of ['pi', 'codex', 'claude', undefined]) for (const protocolVersion of [undefined, 2, 3]) {
     for (const phase of ['starting', 'running', 'waiting', 'stopping', 'idle', 'closed', 'completed', 'failed', 'stopped', 'unreachable']) {
-      const allowed = protocolVersion === 2 && ['pi', 'codex', 'claude'].includes(cli) && ['starting', 'running', 'waiting'].includes(phase);
+      const allowed = protocolVersion === 3 && ['pi', 'codex', 'claude'].includes(cli) && ['starting', 'running', 'waiting'].includes(phase);
       for (const detail of [false, true]) {
         const p = panel([view({ id: 'other' }), view({ id: 'target', startedAt: 2000, cli, protocolVersion, phase })]);
         p.instance.handleInput(keys.down);
@@ -336,7 +336,7 @@ test('t interrupts v2 Pi/Codex/Claude active runs from the selected roster row o
 });
 
 test('interrupt does not reuse i, x or Ctrl+C and stays visible within small panel budgets', () => {
-  const active = view({ protocolVersion: 2, cli: 'pi', phase: 'running' });
+  const active = view({ protocolVersion: 3, cli: 'pi', phase: 'running' });
   const p = panel([active]);
   p.instance.handleInput('\x03'); assert.deepEqual(p.actions, []);
   p.instance.handleInput('i'); assert.equal(p.instance.mode, 'detail');

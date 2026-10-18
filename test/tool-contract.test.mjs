@@ -81,7 +81,7 @@ test('the reply tool exposes one structured answer map without changing the pare
 
 test('the stop and workspace actions retain the existing runtime operation and target', async t => {
   const { tools, invoke } = harness(), calls = [];
-  t.mock.method(AgentManager.prototype, 'get', () => ({ id: 'original', phase: 'idle', accepted: false, protocolVersion: 2, runtimeId: 'runtime', questions: [] }));
+  t.mock.method(AgentManager.prototype, 'get', () => ({ id: 'original', phase: 'idle', accepted: false, protocolVersion: 3, runtimeId: 'runtime', questions: [] }));
   t.mock.method(AgentManager.prototype, 'close', async id => { calls.push(['stop', id]); return { id, phase: 'stopped' }; });
   t.mock.method(WorkspaceStore.prototype, 'create', async (cwd, args) => { calls.push(['create', cwd, args]); return { id: 'workspace' }; });
   t.mock.method(WorkspaceStore.prototype, 'integrate', async id => { calls.push(['integrate', id]); return { workspace: id, status: 'applied' }; });
@@ -103,7 +103,7 @@ test('the stop and workspace actions retain the existing runtime operation and t
 
 test('stop refuses an accepted turn in flight instead of discarding it', async t => {
   const { invoke } = harness(), calls = [];
-  let observed = { id: 'busy', phase: 'running', accepted: true, protocolVersion: 2, runtimeId: 'runtime', questions: [] };
+  let observed = { id: 'busy', phase: 'running', accepted: true, protocolVersion: 3, runtimeId: 'runtime', questions: [] };
   t.mock.method(AgentManager.prototype, 'get', () => observed);
   t.mock.method(AgentManager.prototype, 'close', async id => { calls.push(['stop', id]); return { id, phase: 'stopped' }; });
   for (const phase of ['running', 'waiting']) {
@@ -121,7 +121,7 @@ test('stop refuses an accepted turn in flight instead of discarding it', async t
 
 test('a release receipt omits the report body while an interrupt keeps it', async t => {
   const { invoke } = harness();
-  const state = { id: 'original', runId: 'run', phase: 'idle', accepted: false, protocolVersion: 2, runtimeId: 'runtime',
+  const state = { id: 'original', runId: 'run', phase: 'idle', accepted: false, protocolVersion: 3, runtimeId: 'runtime',
     questions: [], text: 'FULL REPORT BODY', truncated: false, history: [{ runId: 'run', status: 'completed' }], updatedAt: 2 };
   t.mock.method(AgentManager.prototype, 'get', () => state);
   let outcome = { ...state, phase: 'closed',

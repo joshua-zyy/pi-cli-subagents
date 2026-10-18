@@ -7,7 +7,7 @@ import { CodexAdapter } from "./codex-adapter.js";
 import { validateQuestionAnswers } from "./codex-question.js";
 import { ClaudeAdapter, ClaudeCapabilityError } from "./claude-adapter.js";
 import { claudeQuestionAnswers } from "./claude-question.js";
-import { nativeSession, type CliAdapter, type AdapterEvent } from "./cli-adapter.js";
+import { type CliAdapter, type AdapterEvent } from "./cli-adapter.js";
 import { readJson, writeJson } from "./storage.js";
 import { pruneRunLogs, LOG_BUDGET_BYTES } from "./log-writer.js";
 import type { AgentSpec, AgentState, Control, ControlResult, OperationReceipt, Question, Report, StartRequest } from "./types.js";
@@ -26,14 +26,15 @@ async function run(dir: string, runId: string): Promise<void> {
   const runtimeId = randomUUID();
   const spec = readJson<AgentSpec>(path.join(dir, "spec.json"))!;
   const start = readJson<StartRequest>(path.join(runDir, "request.json"))!;
+  if (start?.protocolVersion !== 3) throw new Error("Unsupported worker startup protocol; only v3 is supported. No CLI was launched.");
   if (!spec || ![1, 2, 3].includes(spec.version) || (spec.version === 1 && spec.cli !== undefined && spec.cli !== "pi") || (spec.version === 2 && (spec.cli !== "codex" || !spec.codexHome)) || (spec.version === 3 && (spec.cli !== "claude" || !spec.claudeHome)) || start?.runId !== runId) throw new Error("Invalid startup record");
   const lockFile = path.join(dir, "owner.lock");
   const lock = openSync(lockFile, "wx", 0o600);
   writeFileSync(lock, JSON.stringify({ pid: process.pid, runId, runtimeId }));
   const state: AgentState = {
-    id: spec.id, runId, runtimeId, protocolVersion: 2, phase: "starting", workerPid: process.pid, startedAt: start.createdAt ?? Date.now(),
+    id: spec.id, runId, runtimeId, protocolVersion: 3, phase: "starting", workerPid: process.pid, startedAt: start.createdAt ?? Date.now(),
     updatedAt: Date.now(), accepted: false, questions: [], logFile: path.join(runDir, "events.jsonl"),
-    ...(start.session ? { session: nativeSession(start.session), sessionId: start.session.sessionId,
+    ...(start.session ? { session: start.session, sessionId: start.session.sessionId,
       ...("sessionFile" in start.session ? { sessionFile: start.session.sessionFile } : {}) } : {}),
   };
   const save = () => { state.updatedAt = Date.now(); writeJson(path.join(dir, "state.json"), state); };
@@ -47,7 +48,7 @@ async function run(dir: string, runId: string): Promise<void> {
   const endpoint = () => {
     const address = server?.address();
     if (!address || typeof address === "string") throw new Error("Local control address is unavailable");
-    writeJson(path.join(dir, "endpoint.json"), { port: address.port, token, runId, runtimeId, protocolVersion: 2, preserveAccepted: true });
+    writeJson(path.join(dir, "endpoint.json"), { port: address.port, token, runId, runtimeId, protocolVersion: 3 });
   };
   const independentQuestions = new Set<string>();
   let unblockStartup: (() => void) | undefined;
@@ -111,8 +112,7 @@ async function run(dir: string, runId: string): Promise<void> {
       }
       if (outcome) publish(outcome);
       state.questions = []; independentQuestions.clear(); state.runtimeClosed = true;
-      // On-disk terminal enums remain readable by the old version after release.
-      state.phase = state.lastStatus ?? "stopped"; save(); released = true;
+      state.phase = "closed"; save(); released = true;
       // Native reaping, not a half-open HTTP client, is the ownership barrier. Allow the
       // current response to flush, then bound connection draining without holding the writer lock.
       server?.close();
@@ -181,7 +181,7 @@ async function run(dir: string, runId: string): Promise<void> {
       if (!rpc.resident || state.phase !== "idle" || runOpen || state.questions.length) throw new Error("Runtime is not idle; new work was not accepted");
       if (typeof input.message !== "string" || !input.message.trim()) throw new Error("Task must not be empty");
       const next = randomUUID(), nextRunDir = path.join(dir, "runs", next), logFile = path.join(nextRunDir, "events.jsonl");
-      const request: StartRequest = { runId: next, message: input.message, createdAt: Math.max(Date.now(), (state.startedAt ?? 0) + 1), session: state.session, logFile };
+      const request: StartRequest = { protocolVersion: 3, runId: next, message: input.message, createdAt: Math.max(Date.now(), (state.startedAt ?? 0) + 1), session: state.session, logFile };
       writeJson(path.join(nextRunDir, "request.json"), request);
       // Each run writes its own raw stream, so one resident runtime cannot grow a single file.
       rpc.rotateLog(logFile);
@@ -240,7 +240,7 @@ async function run(dir: string, runId: string): Promise<void> {
       if (input.actor !== undefined && input.actor !== "parent" && input.actor !== "human") throw new Error("Unknown decision actor");
       if (input.actor === "parent" && !input.cancelled) {
         // The policy describes supported responses, not proof of user authorization. Keep
-        // native human-only and legacy restrictions; the parent judges the authorized scope.
+        // native human-only restrictions and refusal-only defaults; the parent judges the authorized scope.
         const refusal = q.method === "confirm" && input.confirmed === false;
         const permitted = form ? q.parentPolicy?.answers === true && q.humanOnly !== true :
           q.method === "confirm" ? q.parentPolicy?.confirm === true : textAnswer || q.parentPolicy?.values?.includes(input.value!) === true;
@@ -277,7 +277,7 @@ async function run(dir: string, runId: string): Promise<void> {
         const body = Buffer.concat(chunks, bytes).toString("utf8");
         const input = JSON.parse(body) as Control & { protocolVersion?: number; runtimeId?: string; expectedRunId?: string };
         const operation = commandQueue.then(() => {
-          if (input.protocolVersion !== 2 || input.runtimeId !== runtimeId || input.expectedRunId !== runId)
+          if (input.protocolVersion !== 3 || input.runtimeId !== runtimeId || input.expectedRunId !== runId)
             throw new Error("Worker control protocol/runtime/run identity mismatch; inspect before retrying");
           return dispatch(input);
         });
@@ -289,7 +289,7 @@ async function run(dir: string, runId: string): Promise<void> {
     server.requestTimeout = 40_000;
     await new Promise<void>((resolve, reject) => { server!.once("error", reject); server!.listen(0, "127.0.0.1", resolve); });
     endpoint();
-    const session = nativeSession(start.session);
+    const session = start.session;
     rpc = (spec.cli ?? "pi") === "codex"
       ? new CodexAdapter({ spec, session, logFile: state.logFile, onEvent: event })
       : spec.cli === "claude" ? new ClaudeAdapter({ spec, session, logFile: state.logFile, onEvent: event })

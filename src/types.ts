@@ -46,7 +46,7 @@ export interface Role {
 export interface Launch { command: string; args: string[] }
 export interface AgentSpec {
   version: 1 | 2 | 3;
-  /** Missing only in legacy Pi records. Backend selection is immutable per instance. */
+  /** Omitted for Pi; backend selection is immutable per instance. */
   cli?: Cli;
   /** Resolved once at creation; never switch native stores on continuation. */
   codexHome?: string;
@@ -83,7 +83,7 @@ export interface Question {
   method: "select" | "confirm" | "input" | "editor" | "form";
   /** Present only for a recognized native task-question form. */
   fields?: QuestionField[];
-  /** Absent means blocking for legacy/native permission dialogs. */
+  /** Absent means blocking for native permission dialogs. */
   isBlocking?: boolean;
   /** Set only for a recognized, call-correlated task-question contract. */
   kind?: "question";
@@ -98,7 +98,7 @@ export interface Question {
   /**
    * Supported parent response shapes, not proof of user authorization or single-action effects.
    * Pi dialogs expose their native choices; the parent judges scope and user-required escalation.
-   * Absent policy preserves legacy refusal-only behavior (`cancelled`, or `confirmed: false`).
+   * Unproven policy permits refusal only (`cancelled`, or `confirmed: false`).
    * `text` permits input/editor text and custom answers for recognized logical question selects.
    * `answers` permits a scoped Codex or Claude task form, not native MCP approval forms. An explicit
    * `humanOnly` flag remains binding; the parent must not invent or broaden authorization.
@@ -123,10 +123,10 @@ export interface TaskRun {
   status: Phase | "unknown";
 }
 export interface AgentState extends Partial<SessionHandle> {
-  /** v2 runtime identity is independent of the currently assigned run. */
-  protocolVersion?: 2;
+  /** Stored versions remain readable; execution accepts only protocol v3. */
+  protocolVersion?: number;
   runtimeId?: string;
-  /** Closed snapshots keep a legacy terminal phase on disk for downgrade readers. */
+  /** Confirmed native release; phase is closed on disk as well as in queries. */
   runtimeClosed?: boolean;
   lastStatus?: "completed" | "failed" | "stopped";
   session?: NativeSession;
@@ -147,8 +147,8 @@ export interface AgentState extends Partial<SessionHandle> {
   exitCode?: number | null;
   forced?: boolean;
 }
-export interface StartRequest { runId: string; message: string; session?: NativeSession | SessionHandle; createdAt?: number; logFile?: string }
-export interface Endpoint { port: number; token: string; runId: string; protocolVersion?: 2; runtimeId?: string; preserveAccepted?: true }
+export interface StartRequest { protocolVersion: 3; runId: string; message: string; session?: NativeSession; createdAt?: number; logFile?: string }
+export interface Endpoint { port: number; token: string; runId: string; protocolVersion: 3; runtimeId: string }
 /** The interaction a waiting report is about, so the notifier can state it without re-reading state. */
 export type PendingRequest = Pick<Question, "method" | "options" | "parentPolicy" | "humanOnly" | "kind" | "fields" | "isBlocking">;
 export interface Report {

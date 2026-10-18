@@ -51,7 +51,21 @@ test('worker checks accepted-run protection at release execution', { timeout: 15
   const { cwd, manager } = setup(t);
   const child = await manager.spawn('worker', { description: 'fixture', instructions: 'fixture' }, cwd, 'HOLD');
   const endpoint = readJson(path.join(manager.root, child.id, 'endpoint.json'));
-  await assert.rejects(control({ ...endpoint, preserveAccepted: undefined }, { type: 'close', preserveAccepted: true }), /cannot protect accepted turns/);
+  assert.equal(endpoint.protocolVersion, 3);
+  assert.equal(Object.hasOwn(endpoint, 'preserveAccepted'), false, 'the current protocol guarantees protection without capability negotiation');
+  await assert.rejects(control({ ...endpoint, protocolVersion: 2 }, { type: 'close', preserveAccepted: true }), /Unsupported worker protocol/);
+  const obsolete = await new Promise((resolve, reject) => {
+    const req = request({ hostname: '127.0.0.1', port: endpoint.port, method: 'POST', path: '/',
+      headers: { authorization: `Bearer ${endpoint.token}`, 'content-type': 'application/json' } }, res => {
+      res.setEncoding('utf8'); let body = '';
+      res.on('data', chunk => { body += chunk; }); res.on('error', reject);
+      res.on('end', () => resolve({ status: res.statusCode, body }));
+    });
+    req.on('error', reject);
+    req.end(JSON.stringify({ type: 'close', protocolVersion: 2, runtimeId: endpoint.runtimeId, expectedRunId: endpoint.runId }));
+  });
+  assert.equal(obsolete.status, 400); assert.match(obsolete.body, /protocol.*mismatch/);
+  assert.equal(manager.get(child.id).phase, 'running', 'an old parent cannot issue an unprotected close');
   await assert.rejects(control(endpoint, { type: 'close', preserveAccepted: true }), /in flight/i);
   assert.equal(manager.get(child.id).phase, 'running');
   await manager.interrupt(child.id);
@@ -64,7 +78,7 @@ test('worker control preserves split UTF-8 and limits raw request bytes', { time
   const child = await manager.spawn('worker', { description: 'fixture', instructions: 'fixture' }, cwd, 'HOLD');
   const endpoint = readJson(path.join(manager.root, child.id, 'endpoint.json'));
   const post = (message, split) => new Promise((resolve, reject) => {
-    const body = Buffer.from(JSON.stringify({ type: 'send', message, mode: 'steer', protocolVersion: 2,
+    const body = Buffer.from(JSON.stringify({ type: 'send', message, mode: 'steer', protocolVersion: 3,
       runtimeId: endpoint.runtimeId, expectedRunId: endpoint.runId }));
     const req = request({ hostname: '127.0.0.1', port: endpoint.port, method: 'POST', path: '/',
       headers: { authorization: `Bearer ${endpoint.token}` } }, res => {
@@ -173,7 +187,7 @@ test('tool receipts report observed state without equating initial acceptance wi
   const { cwd, invoke } = setup(t);
   const base = { id: randomUUID(), runId: randomUUID(), role: 'worker', cli: 'pi', cwd, workerPid: 0, updatedAt: 1, questions: [], logFile: 'fixture' };
   for (const [phase, accepted, error, lastStatus] of [
-    // Legacy observations remain unversioned and retain their original phase.
+    // Presentation preserves observed metadata; operation evidence comes only from a receipt.
     ['running', true], ['waiting', false], ['completed', true], ['stopped', false],
     ['failed', false, 'Pi RPC prompt timed out; acceptance is uncertain.'],
     ['failed', true, 'Task ran but failed.'],
@@ -184,7 +198,7 @@ test('tool receipts report observed state without equating initial acceptance wi
     ['running', true, undefined, 'failed'], // Previous failure is not the new input's outcome.
   ]) {
     const state = { ...base, phase, accepted, ...(error ? { error } : {}),
-      ...(lastStatus ? { protocolVersion: 2, runtimeId: randomUUID(), lastStatus } : {}) };
+      ...(lastStatus ? { protocolVersion: 3, runtimeId: randomUUID(), lastStatus } : {}) };
     for (const [method, tool, args] of [
       ['spawn', 'subagent', { action: 'start', role: 'worker', task: 'fixture' }],
       ['send', 'subagent', { action: 'send', id: base.id, message: 'fixture' }],
@@ -214,7 +228,7 @@ test('tool receipts report observed state without equating initial acceptance wi
 
 test('public input and release receipts preserve actual operation evidence rather than infer it from phase', async t => {
   const { cwd, invoke } = setup(t);
-  const base = { id:randomUUID(), runId:randomUUID(), runtimeId:randomUUID(), protocolVersion:2,
+  const base = { id:randomUUID(), runId:randomUUID(), runtimeId:randomUUID(), protocolVersion:3,
     role:'worker', cli:'pi', cwd, workerPid:0, updatedAt:1, questions:[], logFile:'fixture', phase:'running', accepted:true };
   // The stop tool refuses an accepted turn in flight, so that row's runtime has none: the tool
   // reads this view before it dispatches, and a busy one would be refused rather than receipted.

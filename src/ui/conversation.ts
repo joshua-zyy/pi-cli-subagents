@@ -322,7 +322,7 @@ export class ConversationViewer {
     const agent = this.agent;
     if (!agent || !this.onSend || this.sending) return;
     // The phase can change while the composer is open. Do not dispatch a now-blocked message.
-    if (!canMessage(agent.phase)) {
+    if (!canMessage(agent)) {
       this.notice = { text: `Cannot send while ${viewStatus(agent).label}; inspect the instance first.`, color: "warning" };
       this.tui.requestRender();
       return;
@@ -376,7 +376,7 @@ export class ConversationViewer {
     const page = Math.max(1, this.viewport);
     let direction: "older" | "newer" | undefined;
     if (matchesKey(data, "escape") || matchesKey(data, "q")) { this.finish(); return; }
-    if (agent && this.onSend && !this.sending && canMessage(agent.phase) && matchesKey(data, "return")) { this.openComposer(); return; }
+    if (agent && this.onSend && !this.sending && canMessage(agent) && matchesKey(data, "return")) { this.openComposer(); return; }
     if (this.toolKeys().some(key => matchesKey(data, key))) {
       this.toggleTools(); this.tui.requestRender(); return;
     }
@@ -399,7 +399,7 @@ export class ConversationViewer {
       this.pendingUpRows = 0; this.scroll = Math.min(max, this.scroll + 1);
       this.follow = this.scroll >= max && (this.snapshot.window?.atEnd ?? true); direction = "newer";
     }
-    else if (agent && !this.sending && matchesKey(data, "s") && canMessage(agent.phase)) {
+    else if (agent && !this.sending && matchesKey(data, "s") && canMessage(agent)) {
       this.finish({ kind: "message", id: agent.id, resume: canResume(agent.phase) }); return;
     } else if (agent && matchesKey(data, "t") && canInterrupt(agent)) { this.finish({ kind: "interrupt", id: agent.id }); return; }
     else if (agent && matchesKey(data, "x") && canRelease(agent)) { this.finish({ kind: "stop", id: agent.id, expected: { runId: agent.runId, runtimeId: agent.runtimeId } }); return; }
@@ -480,7 +480,7 @@ export class ConversationViewer {
     if (this.snapshot?.window && !this.snapshot.window.atEnd) hints.push("End latest");
     const toolKey = this.toolKeys()[0];
     if (toolKey && this.snapshot?.entries.some(entry => entry.kind === "tool")) hints.push(`${toolKey} tools`);
-    if (agent && this.onSend && !this.sending && canMessage(agent.phase)) hints.push(canResume(agent.phase) ? "Enter resume" : agent.phase === "idle" ? "Enter new task" : "Enter message");
+    if (agent && this.onSend && !this.sending && canMessage(agent)) hints.push(canResume(agent.phase) ? "Enter resume" : agent.phase === "idle" ? "Enter new task" : "Enter message");
     if (agent && canInterrupt(agent)) hints.push("t interrupt");
     if (agent && canRelease(agent)) hints.push("x release");
     else if (agent && canReleaseUncertain(agent)) hints.push("x release uncertain");

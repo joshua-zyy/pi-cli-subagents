@@ -81,16 +81,22 @@ Node 测试运行器使用 `--test-concurrency=1`，不修改父进程环境或�
 
 未使用的导出常量 `TEXT_FIELDS` 也已删除。深度导入 `dist/role-settings.js` 并依赖该常量的外部代码需要移除该依赖；不提供兼容导出。
 
-## 旧 worker 的清理边界
+## 运行时协议升级边界
 
-旧 worker 不会被热替换。缺少 `protocolVersion` 的 v1 worker 不支持受保护的公共 stop、interrupt 或 UI 释放；本次不新增 legacy force-close。缺少 `preserveAccepted` 能力的旧 v2 worker 仍可先中断当前轮，再通过 idle-only UI 释放；该建议不适用于 v1。
+当前只接受协议 v3，不保留旧 worker 的控制或恢复兼容。无协议标记的 v1、所有 v2 及其他版本均不会收到 status、start、send、reply、interrupt、stop 请求，也不能续跑或 reclaim；UI 隐藏旧实例的控制入口。旧记录的结果、活动和任务历史仍可只读查询，状态明确标为不支持，不把旧历史宣告为新的运行失败，也不自动迁移、重建运行或强制接管。
 
-v1 需要人工清理时：
+v3 把身份校验、受保护 stop 和操作回执作为统一契约，不再通过 endpoint 的 `preserveAccepted` 能力字段兼容旧 worker，也不从旧 accepted 标记补造回执。启动记录必须带 `protocolVersion: 3`；旧父进程生成的启动请求会在取得锁、启动 CLI 前拒绝。确认原生释放后直接将 phase: closed 写入磁盘，不再为降级读取保留旧终态枚举。`spec.version` 的 1/2/3 区分 Pi、Codex、Claude 后端，并非旧控制协议，仍保留。
+
+升级前须先用旧扩展正常释放所有实例，再更新并重新加载父扩展；更新后不再从本版中断或释放旧 v2 worker。若仍有 v1/v2 进程，需要人工清理：
 
 1. 从 `subagent_query get` 及实例目录的 `state.json`、`owner.lock`、日志中记录原 `workerPid`、`cliPid`、运行目录与实例身份。
 2. 在操作系统进程详情中核对启动时间、命令行和父子关系，确认 PID 仍属于该实例。PID 可能复用；无法确认时不要按旧 PID 结束进程。
 3. 仅人工结束确认属于该实例的 worker 与 CLI 子进程树。这会中断工作，可能丢失尚未报告的输出，不会撤销文件修改；保留会话与诊断记录。
-4. 复查进程是否确实消失，不手工改写状态为 closed、不删除锁来伪造释放。v1 缺少 runtimeId，也不能使用现有的 v2 reclaim；人工结束后仍可能显示 unreachable 并占用原父会话配额，本版本不提供 v1 自动迁移或配额回收。
+4. 复查进程是否确实消失，不手工改写状态为 closed、不删除锁来伪造释放。旧记录不支持本版的 reclaim；人工结束后仍可能显示 unreachable 并占用原父会话配额，本版本不提供旧记录自动迁移或配额回收。
+
+只读历史中已有 `runtimeClosed: true` 且原 owner.lock 已缺失的记录仍作为释放证据，不重新占用活动或驻留配额；这不开放任何旧协议控制或恢复入口。
+
+当前 v3 worker 已死亡时，stop 也不会伪造释放；只有在可靠确认原 worker 与 CLI 都已消失、且所有权身份符合条件时，才可通过显式 reclaim 回收配额。UI 不自动把释放失败改成 reclaim。
 
 Pi 的 `handled` 失败释放说明只指初始输入，以及 idle/原会话恢复后启动新轮的输入；运行中 steer 被扩展处理时，不会把既有轮次改成失败或伪造终态，其 accepted 回执也不代表模型执行。
 
@@ -119,11 +125,11 @@ Claude 驻留验收复用原 adapter/manager/workspace 替身：同 worker/CLI �
 
 运行图标复用外部状态摘要的同一 80ms 动画帧，不新增计时器或读盘；waiting、idle 和终态保持静态图标。已打开面板接收既有 800ms 监控快照，状态、问题和释放候选随之更新，elapsed 在绘制时计算。更新按实例 ID 保留选中项与同轮详情滚动；新轮清除旧结果滚动，当前详情目标消失时退回列表而不切到另一实例。历史开关保持不变，关闭、执行动作或切换父会话后解除快照回调。用 mock timers 和真实扩展接线验证读取次数、共享帧、状态变化及无迟到重绘。
 
-对于已知 v2 idle owner，面板及会话查看器的 `x` 要求没有待处理请求；`c` 仅批量释放同类目标。确认前复读状态，执行时传入捕获的 runId/runtimeId 并复用 onlyIdle 准入，拒绝变忙或换代的目标，不重试。执行中的 Pi/Codex 可用 `t` 中断当前轮，之后才可释放；不改变父代理工具的主动 stop 契约。
+对于已知 v3 idle owner，面板及会话查看器的 `x` 要求没有待处理请求；`c` 仅批量释放同类目标。确认前复读状态，执行时传入捕获的 runId/runtimeId 并复用 onlyIdle 准入，拒绝变忙或换代的目标，不重试。执行中的 Pi/Codex 可用 `t` 中断当前轮，之后才可释放；不改变父代理工具的主动 stop 契约。
 
-对于带有 v2 runtimeId 的 `unreachable` 实例，详情页与会话查看器另提供 `x release uncertain`：单独确认可能结束工作、丢弃未报告输出，且不能据此推断输入是否执行。确认前复读目标，调用现有绑定 runId/runtimeId 的受保护 stop；身份变化、已恢复为已知执行状态、所有权或控制能力不足时仍拒绝，不自动重试。该入口不加入 `c` 的 idle 批量目标，不显示在已回收配额或已确认关闭的实例上，也不为 v1 增加强制关闭能力。
+对于带有 v3 runtimeId 的 `unreachable` 实例，详情页与会话查看器另提供 `x release uncertain`：单独确认可能结束工作、丢弃未报告输出，且不能据此推断输入是否执行。确认前复读目标，调用现有绑定 runId/runtimeId 的受保护 stop；身份变化、已恢复为已知执行状态、所有权冲突或进程死亡时仍拒绝，不自动重试。该入口不加入 `c` 的 idle 批量目标，不显示在旧协议、已回收配额或已确认关闭的实例上。
 
-默认隐藏 manager 查询已确认关闭所有权的 v2 实例（closed + runtimeClosed），不依赖仅存在于操作响应的 receipt。列表按 `h` 查看历史，结果、原生会话恢复和文件均保留；unreachable 或旧版未确认状态不会冒充已释放。
+默认隐藏 manager 查询已确认关闭所有权的 v3 实例（closed + runtimeClosed），不依赖仅存在于操作响应的 receipt。列表按 `h` 查看历史，结果和文件保留；只有当前协议实例可恢复，unreachable 或旧版未确认状态不会冒充已释放。
 
 人工操作记录默认一行折叠，使用 Pi 当前展开键查看完整正文。批量成功只弹出释放数量，部分失败仍显示各目标诊断；原正文、outbox、去重及 `triggerTurn:false` 保持不变。覆盖列表边界、历史恢复、忙碌/换代拒绝、真实本地 fixture 释放和无模型消息组件；不替代人工 TUI 与真实模型验收。
 

@@ -44,6 +44,19 @@ function setup(t) {
   return { cwd, m };
 }
 
+test('current worker refuses retired startup records before ownership or CLI launch', () => {
+  const cwd = tempDir('retired-worker-startup'), worker = fileURLToPath(new URL('../dist/worker.js', import.meta.url));
+  for (const protocolVersion of [undefined, 2]) {
+    const id = randomUUID(), runId = randomUUID(), dir = path.join(cwd, id);
+    writeJson(path.join(dir, 'spec.json'), { version: 1, id, parentFile: path.join(cwd, 'parent.jsonl'), cwd,
+      roleName: 'worker', role: { description: 'test', instructions: 'test' }, launch: { command: path.join(cwd, 'must-not-launch'), args: [] }, createdAt: 1 });
+    writeJson(path.join(dir, 'runs', runId, 'request.json'), { protocolVersion, runId, message: 'MUST NOT START' });
+    assert.throws(() => execFileSync(process.execPath, [worker, dir, runId], { windowsHide: true, stdio: 'pipe', timeout: 15000 }), error => error.status === 1);
+    assert.match(readJson(path.join(dir, 'runs', runId, 'error.json')).error, /Unsupported worker startup protocol/);
+    for (const file of ['owner.lock', 'state.json', 'endpoint.json', 'sessions']) assert.equal(fs.existsSync(path.join(dir, file)), false, file);
+  }
+});
+
 test('incomplete or unreadable registrations stay visible without blocking healthy notifications', { timeout: 15000 }, async t => {
   const { cwd, m } = setup(t);
   const good = await m.spawn('worker', { description: 'test', instructions: 'test' }, cwd, 'HEALTHY');

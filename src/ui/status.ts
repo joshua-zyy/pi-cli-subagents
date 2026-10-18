@@ -65,7 +65,7 @@ export function statusLines(agents: AgentView[], options: StatusLinesOptions): s
     };
   };
 
-  // Idle owners remain visible until explicitly released; only closed/legacy results expire.
+  // Idle owners remain visible until explicitly released; only closed or historical results expire.
   // Display priority: waiting for a response, active, idle, then recently finished.
   const groups: { rows: Row[] }[] = [
     { rows: waiting.map((agent) => row(phaseIcon("waiting"), "warning", agent, "Waiting", oneLine(agent.questions?.[0]?.title, BODY_LIMIT) || "Waiting for a response")) },

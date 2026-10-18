@@ -11,7 +11,7 @@ import { deliverReports } from '../dist/notifier.js';
 import { readJson, writeJson } from '../dist/storage.js';
 import { tempDir } from './helpers/tmp.mjs';
 
-function fixture(count = 100) {
+function fixture(count = 100, { resident = false } = {}) {
   const cwd = tempDir('history-cache'), parent = path.join(cwd, 'parent.jsonl');
   fs.writeFileSync(parent, '{}\n');
   const manager = new AgentManager(parent, { command: process.execPath, args: [] }), id = randomUUID();
@@ -24,8 +24,10 @@ function fixture(count = 100) {
     writeJson(path.join(dir, 'reports', `${runId}-result.json`), { notificationId: `${runId}-result`, agentId: id,
       runId, parentFile: parent, status: 'completed', time: n, text: `Result ${n} ` + 'y'.repeat(16000), logFile: 'events.jsonl' });
   }
-  const runId = runs.at(-1), stateFile = path.join(dir, 'state.json');
-  writeJson(stateFile, { id, runId, phase: 'completed', workerPid: 0, accepted: true, questions: [], startedAt: count,
+  const runId = runs.at(-1), stateFile = path.join(dir, 'state.json'), runtimeId = randomUUID();
+  if (resident) writeJson(path.join(dir, 'owner.lock'), { pid: process.pid, runId, runtimeId });
+  writeJson(stateFile, { id, runId, runtimeId, protocolVersion: 3, runtimeClosed: !resident, lastStatus: 'completed',
+    phase: resident ? 'idle' : 'closed', workerPid: resident ? process.pid : 0, accepted: true, questions: [], startedAt: count,
     updatedAt: count, resultFile: path.join(dir, 'reports', `${runId}-result.json`), logFile: 'events.jsonl' });
   return { manager, id, dir, parent, runs, stateFile };
 }
@@ -91,7 +93,7 @@ test('the aggregate history payload budget bypasses misses without turning each 
 });
 
 test('metadata-only approvals have an aggregate entry cap without losing new live approval bodies', () => {
-  const {manager,id,dir,parent,runs,stateFile} = fixture(1), runId = runs[0];
+  const {manager,id,dir,parent,runs,stateFile} = fixture(1, { resident: true }), runId = runs[0];
   for(let n=0;n<1030;n++) {
     const notificationId = `${runId}-waiting-${randomUUID()}`;
     writeJson(path.join(dir,'reports',notificationId+'.json'),{notificationId,agentId:id,runId,parentFile:parent,
@@ -113,7 +115,7 @@ test('metadata-only approvals have an aggregate entry cap without losing new liv
 });
 
 test('live approval text stays complete through manager and notifier without retaining resolved bodies', () => {
-  const { manager, id, dir, parent, stateFile } = fixture(1);
+  const { manager, id, dir, parent, stateFile } = fixture(1, { resident: true });
   const runId = randomUUID(), notificationId = `${runId}-waiting-${randomUUID()}`;
   const tail = 'TAIL: the separately protected resource is also affected; do not approve.';
   const question = { id: 'long-approval', method: 'confirm', title: 'Review this non-executable fixture',
@@ -168,7 +170,7 @@ test('live approval text stays complete through manager and notifier without ret
 });
 
 test('history memoization sees external publication, replacement, deletion and live permission changes', () => {
-  const { manager, id, dir, parent, runs, stateFile } = fixture(3);
+  const { manager, id, dir, parent, runs, stateFile } = fixture(3, { resident: true });
   manager.get(id); manager.reports();
   const next = randomUUID(), requestFile = path.join(dir, 'runs', next, 'request.json');
   fs.mkdirSync(path.dirname(requestFile));
@@ -195,7 +197,8 @@ test('history memoization sees external publication, replacement, deletion and l
   assert.equal(manager.reports().some(r => r.status === 'waiting'), false, 'cached waiting reports are filtered against live state');
   writeJson(reportFile, { ...readJson(reportFile), notificationId: `${next}-result`, status: 'completed', questionId: undefined,
     text: 'Finished ' + 'z'.repeat(16000) });
-  writeJson(stateFile, { ...readJson(stateFile), phase: 'completed', workerPid: 0, resultFile: reportFile });
+  writeJson(stateFile, { ...readJson(stateFile), phase: 'closed', runtimeClosed: true, workerPid: 0, resultFile: reportFile });
+  fs.rmSync(path.join(dir, 'owner.lock'));
   view = manager.get(id);
   assert.match(view.text, /^Finished /); assert.equal(view.truncated, true);
   assert.equal(manager.reports().find(r => r.runId === next).status, 'completed', 'replaced reports must invalidate their cached summaries');

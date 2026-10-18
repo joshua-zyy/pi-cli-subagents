@@ -55,7 +55,7 @@ function setup(t) {
   return { cwd, home, manager, done, release, parent, launch, options };
 }
 
-test('manager preserves Codex native identity across a fresh controller, old Pi records still resume', { timeout: 30_000 }, async t => {
+test('manager preserves Codex and Pi native identity across a fresh controller', { timeout: 30_000 }, async t => {
   const { cwd, home, manager, done, release, parent, launch, options } = setup(t);
   const launchRole = { ...role, defaultModeQuestions: true };
   const started = await manager.spawn('codex-worker', launchRole, cwd, 'REMEMBER alpha');
@@ -76,7 +76,10 @@ test('manager preserves Codex native identity across a fresh controller, old Pi 
   const piFirst = await release(piStarted.id);
   const spec = path.join(manager.root, piStarted.id, 'spec.json');
   const state = path.join(manager.root, piStarted.id, 'state.json');
-  const s = readJson(state); delete s.session; writeJson(state, s);
+  const saved = readJson(state), s = { ...saved }; delete s.session; writeJson(state, s);
+  await assert.rejects(reopened.send(piStarted.id, 'must not repair old session fields'), /No resumable original session/);
+  assert.equal(reopened.get(piStarted.id).runCount, 1);
+  writeJson(state, saved);
   const resumed = await reopened.send(piStarted.id, 'RECALL');
   assert.equal((await done(resumed.id)).text, 'beta'); assert.equal(reopened.get(resumed.id).sessionId, piFirst.sessionId);
   assert.equal(readJson(spec).cli, undefined);

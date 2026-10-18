@@ -7,7 +7,7 @@ import { TranscriptReader } from '../dist/transcript.js';
 import { tempDir } from './helpers/tmp.mjs';
 
 const theme = { fg: (_color, text) => text, bold: text => text };
-const agent = { id: 'agent-1', role: 'worker', phase: 'running', runId: 'run-2' };
+const agent = { protocolVersion: 3, id: 'agent-1', role: 'worker', phase: 'running', runId: 'run-2' };
 const entry = text => ({ id: text, kind: 'assistant', title: 'Assistant', text });
 const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
 async function until(predicate) {

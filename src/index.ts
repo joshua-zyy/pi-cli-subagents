@@ -687,7 +687,7 @@ ${view(state, args.action === "interrupt")}`);
   async function messageFromRoster(ctx: ExtensionContext, manager: AgentManager, epoch: number,
     action: Extract<PanelAction, { kind: "message" }>, state: AgentView): Promise<PanelStep> {
     if (state.phase === "waiting") { ctx.ui.notify("This child has a pending interaction: use r in its details or subagent_reply; a message is not an answer.", "error"); return "next"; }
-    if (!canMessage(state.phase)) { ctx.ui.notify(`Cannot message this child while ${state.phase}; inspect it before continuing.`, "error"); return "next"; }
+    if (!canMessage(state)) { ctx.ui.notify(`Cannot message this child while ${state.phase}; inspect it before continuing.`, "error"); return "next"; }
     const steerable = canSteer(state.phase);
     const resuming = canResume(state.phase);
     const message = action.message ?? await ctx.ui.editor(resuming ? `Resume ${state.role} in the original session` : state.phase === "idle" ? `New task for ${state.role}` : `Message ${state.role}`, "");

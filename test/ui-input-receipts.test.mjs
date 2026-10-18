@@ -17,7 +17,7 @@ function harness(t, beforePhase = 'completed', decision = 'none') {
   const oldHome = process.env.PI_CODING_AGENT_DIR;
   process.env.PI_CODING_AGENT_DIR = path.join(root,'agent-home'); fs.mkdirSync(process.env.PI_CODING_AGENT_DIR);
   const entriesByParent = new Map([[parent,[]]]);
-  const before = {id:randomUUID(), runId:randomUUID(), cli:'pi', role:'worker', phase:beforePhase, questions:[], cwd:process.cwd(), updatedAt:1, logFile:'fixture'};
+  const before = {protocolVersion:3, id:randomUUID(), runId:randomUUID(), cli:'pi', role:'worker', phase:beforePhase, questions:[], cwd:process.cwd(), updatedAt:1, logFile:'fixture'};
   const instance = path.join(parent+'.subagents',before.id);fs.mkdirSync(instance,{recursive:true});
   fs.writeFileSync(path.join(instance,'spec.json'),JSON.stringify({id:before.id,parentFile:parent}));
   const failed = {...before, runId:beforePhase === 'running' ? before.runId : randomUUID(), phase:'failed', accepted:beforePhase === 'running', error:'fixture native identity mismatch'};
@@ -59,7 +59,7 @@ function harness(t, beforePhase = 'completed', decision = 'none') {
 }
 function idleBatch(t, count = 3) {
   const h = harness(t, 'idle');
-  Object.assign(h.before, { protocolVersion: 2, runtimeId: randomUUID(), accepted: true, lastStatus: 'completed' });
+  Object.assign(h.before, { protocolVersion: 3, runtimeId: randomUUID(), accepted: true, lastStatus: 'completed' });
   const targets = [h.before, ...Array.from({ length: count - 1 }, () => ({ ...h.before, id: randomUUID(), runId: randomUUID(), runtimeId: randomUUID() }))];
   for (const target of targets.slice(1)) {
     const dir = path.join(h.originalParent + '.subagents', target.id); fs.mkdirSync(dir, { recursive: true });
@@ -74,7 +74,7 @@ function idleBatch(t, count = 3) {
 test('uncertain runtime release requires explicit confirmation and preserves captured identity', { timeout: 10000 }, async t => {
   for (const scenario of ['cancel', 'release', 'changed', 'refused']) {
     const h = harness(t, 'unreachable'), calls = [];
-    Object.assign(h.before, { protocolVersion: 2, runtimeId: randomUUID(), accepted: true, error: 'Input delivery uncertain' });
+    Object.assign(h.before, { protocolVersion: 3, runtimeId: randomUUID(), accepted: true, error: 'Input delivery uncertain' });
     const expected = { runId: h.before.runId, runtimeId: h.before.runtimeId };
     h.ctx.ui.confirm = async (title, message) => {
       assert.match(title, /uncertain/i); assert.match(message, /discard|end.*work/i);
@@ -116,7 +116,7 @@ test('idle batch cancellation performs no release and writes no action record', 
 test('uncertain release refuses a recovered or replaced snapshot before confirmation', { timeout: 5000 }, async t => {
   for (const changes of [{ phase: 'running' }, { runId: randomUUID() }, { runtimeId: randomUUID() }]) {
     const h = harness(t, 'unreachable'); let confirms = 0, closes = 0;
-    Object.assign(h.before, { protocolVersion: 2, runtimeId: randomUUID(), accepted: true });
+    Object.assign(h.before, { protocolVersion: 3, runtimeId: randomUUID(), accepted: true });
     t.mock.method(AgentManager.prototype, 'get', () => ({ ...h.before, ...changes }));
     t.mock.method(AgentManager.prototype, 'close', async () => { closes++; });
     h.ctx.ui.confirm = async () => { confirms++; return true; };
@@ -302,7 +302,7 @@ test('both human input paths preserve unconfirmed receipts without claiming acce
 });
 
 test('human t action interrupts rather than releases and records the actual receipt', async t => {
-  const h = harness(t,'running');h.before.protocolVersion=2;
+  const h = harness(t,'running');h.before.protocolVersion=3;
   let calls=0;
   const interrupt = t.mock.method(AgentManager.prototype,'interrupt',async()=>{calls++;return {...h.before,phase:'idle',lastStatus:'stopped',receipt:{operation:'interrupt',status:'settled',runId:h.before.runId}};});
   const close = t.mock.method(AgentManager.prototype,'close',async()=>{throw Error('interrupt must not release');});
