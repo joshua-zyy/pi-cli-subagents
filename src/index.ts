@@ -467,12 +467,12 @@ ${view(state, args.action === "interrupt")}`);
     const epoch = sessionEpoch;
     const q: Question | undefined = manager.get(id).questions.find((entry) => entry.id === questionId);
     if (!q) throw new Error("This request has ended or does not belong to this session");
+    // Presentation only: native option values and human answers remain verbatim.
+    const display = (text: string): string => text.replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f\u061c\u200e-\u200f\u2028-\u202e\u2066-\u2069]/gu,
+      char => `\\u${char.charCodeAt(0).toString(16).padStart(4, "0")}`);
     let answer: { value?: string; answers?: QuestionAnswers; confirmed?: boolean; cancelled?: boolean };
     if (q.method === "form") {
       if (!q.fields?.length) throw new Error("The task form has no fields");
-      // Escape presentation controls only; IDs, chosen labels and typed answers stay verbatim.
-      const display = (text: string): string => text.replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f\u061c\u200e-\u200f\u2028-\u202e\u2066-\u2069]/gu,
-        char => `\\u${char.charCodeAt(0).toString(16).padStart(4, "0")}`);
       const entries: [string, string[]][] = [];
       let cancelled = false;
       for (const field of q.fields) {
@@ -519,19 +519,23 @@ ${view(state, args.action === "interrupt")}`);
         entries.push([field.id, [value]]);
       }
       answer = cancelled ? { cancelled: true } : { answers: Object.fromEntries(entries) };
-    } else if (q.method === "confirm") answer = { confirmed: await ctx.ui.confirm(q.title, q.message ?? "") };
+    } else if (q.method === "confirm") answer = { confirmed: await ctx.ui.confirm(display(q.title), display(q.message ?? "")) };
     else if (q.method === "select") {
       const freeText = q.kind === "question" && q.parentPolicy?.text === true && q.humanOnly !== true;
       const options = q.options ?? [];
-      let value = await ctx.ui.select(q.message ? `${q.title}\n\n${q.message}` : q.title, freeText ? [...options, "Type something."] : options);
+      const choices = options.map((option, index) => `${index + 1}. ${display(option)}`);
+      const custom = `${choices.length + 1}. Type something.`;
+      const selected = await ctx.ui.select(display(q.message ? `${q.title}\n\n${q.message}` : q.title), freeText ? [...choices, custom] : choices);
       if (epoch !== sessionEpoch) return;
-      if (freeText && value === "Type something.") value = await ctx.ui.input(q.title, "");
+      const value = freeText && selected === custom ? await ctx.ui.input(display(q.title), "") : options[choices.indexOf(selected ?? "")];
       answer = value === undefined ? { cancelled: true } : { value };
     } else if (q.method === "editor") {
-      const value = await ctx.ui.editor(q.title, q.prefill);
+      const prefill = q.prefill === undefined ? undefined : display(q.prefill);
+      const edited = await ctx.ui.editor(display(q.title), prefill);
+      const value = edited === prefill ? q.prefill : edited;
       answer = value === undefined ? { cancelled: true } : { value };
     } else {
-      const value = await ctx.ui.input(q.title, q.placeholder);
+      const value = await ctx.ui.input(display(q.title), q.placeholder === undefined ? undefined : display(q.placeholder));
       answer = value === undefined ? { cancelled: true } : { value };
     }
     if (epoch !== sessionEpoch) return;

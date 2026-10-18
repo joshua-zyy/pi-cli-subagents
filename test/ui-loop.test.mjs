@@ -420,13 +420,13 @@ test('Codex choice dialogs retain the command details and cancel without a persi
   const manager = new AgentManager(h.state.parent, { command: process.execPath, args: [fixture] }, { home, launch: { command: process.execPath, args: [codexFixture] } });
   const child = await manager.spawn('codex-worker', { cli: 'codex', model: 'gpt-6-luna', description: 'fixture', instructions: 'test' }, h.state.cwd, 'APPROVAL_ACCEPT_CANCEL');
   await waitUntil('Codex choice', () => manager.get(child.id).questions[0]);
-  h.state.selectAnswer = 'Cancel turn';
+  h.state.selectAnswer = '2. Cancel turn';
   const pane = await h.openAgents(); await pane.press('i'); await pane.press('r');
   await waitUntil('human Codex decision', () => h.messages.some(e => e.message.customType === 'cli-subagents-human-action'));
   await pane.press(keys.escape); await pane.running;
   const dialog = h.state.selections.at(-1);
   assert.match(dialog.title, /Command: write fixture-only/); assert.match(dialog.title, /Directory:/);
-  assert.match(dialog.title, /Cancel turn ends this turn/); assert.deepEqual(dialog.options, ['Approve once', 'Cancel turn']);
+  assert.match(dialog.title, /Cancel turn ends this turn/); assert.deepEqual(dialog.options, ['1. Approve once', '2. Cancel turn']);
   const cancelled = await waitForIdle(manager, child.id, 'stopped');
   assert.equal(processAlive(cancelled.workerPid), true, 'Cancel turn must not close the resident runtime');
   assert.ok(fs.existsSync(path.join(manager.root, child.id, 'owner.lock')));

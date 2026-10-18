@@ -276,7 +276,7 @@ test('human task answers collect custom text locally and submit one logical repl
     });
     try {
       h.ctx.hasUI=true;
-      h.ctx.ui.select=async(title,options)=>{assert.match(title,/Fast tests/);assert.deepEqual(options,['Unit','Integration','Type something.']);return 'Type something.';};
+      h.ctx.ui.select=async(title,options)=>{assert.match(title,/Fast tests/);assert.deepEqual(options,['1. Unit','2. Integration','3. Type something.']);return options[2];};
       h.ctx.ui.input=async()=>value;
       h.open(); h.press('i'); h.press('r');
       await waitUntil('human answer action', () => h.messages.length === 1, 2000);
@@ -376,6 +376,29 @@ test('human form display escapes controls while preserving native field IDs and 
     assert.deepEqual(replies,[{answers:Object.fromEntries(fields.map(field=>[field.id,[field.options[0].label]]))}]);
     assert.deepEqual(h.before.questions,snapshot,'presentation must not mutate the native payload');
   } finally {reply.mock.restore();await h.close();}
+});
+
+test('all native dialog displays escape controls and preserve exact response values', async t => {
+  const poison = '\x1b[2J\u202e\u2069', displays = [];
+  for (const method of ['confirm', 'select', 'input', 'editor']) {
+    const h = harness(t, 'waiting'), replies = [];
+    const q = { id: 'native', method, title: 'Title' + poison, message: 'Command' + poison,
+      options: ['Same' + poison, 'Same\\u001b[2J\\u202e\\u2069'], placeholder: 'Hint' + poison, prefill: 'Text' + poison };
+    h.before.questions = [q];
+    const reply = t.mock.method(AgentManager.prototype, 'reply', async (_id, _q, answer) => { replies.push(answer); return h.before; });
+    const show = (...args) => { displays.push(...args.flat().filter(x => typeof x === 'string')); };
+    h.ctx.ui.confirm = async (...args) => { show(...args); return false; };
+    h.ctx.ui.select = async (title, options) => { show(title, options); return options[0]; };
+    h.ctx.ui.input = async (...args) => { show(...args); return 'answer' + poison; };
+    h.ctx.ui.editor = async (...args) => { show(...args); return 'edited' + poison; };
+    try {
+      h.open(); h.press('i'); h.press('r');
+      await waitUntil('dialog reply', () => h.messages.length === 1, 2000);
+      assert.deepEqual(replies, [method === 'confirm' ? { confirmed: false } : { value: method === 'select' ? q.options[0] : (method === 'input' ? 'answer' : 'edited') + poison }]);
+      assert.equal(q.title, 'Title' + poison);
+    } finally { reply.mock.restore(); await h.close(); }
+  }
+  for (const text of displays) assert.doesNotMatch(text, /[\x00-\x08\x0b-\x1f\x7f-\x9f\u202e\u2069]/u);
 });
 
 test('inline input surfaces failed state instead of an accepted notice and records the human attempt', async t => {
