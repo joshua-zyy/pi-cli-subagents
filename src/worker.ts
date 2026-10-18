@@ -135,6 +135,7 @@ async function run(dir: string, runId: string): Promise<void> {
 
   function event(record: AdapterEvent): void {
     if (ending || (record.runId !== undefined && record.runId !== runId)) return;
+    if (record.type === "uncertain") { state.phase = "unreachable"; state.error = record.error; save(); }
     if (record.type === "activity") {
       const label = state.lastActivity, phase = state.phase;
       state.lastActivity = record.detail;
@@ -167,7 +168,7 @@ async function run(dir: string, runId: string): Promise<void> {
     let receipt: OperationReceipt | undefined;
     if (input.type === "status") return state;
     if (input.type === "close") {
-      if (input.preserveAccepted && runOpen && state.accepted) throw new Error("A turn is in flight; interrupt first, then stop");
+      if (input.preserveAccepted && state.phase !== "unreachable" && runOpen && state.accepted) throw new Error("A turn is in flight; interrupt first, then stop");
       if (input.onlyIdle && (state.phase !== "idle" || runOpen || state.questions.length)) throw new Error("Runtime is no longer idle; it was not closed");
       const captured = runId;
       await release(true);

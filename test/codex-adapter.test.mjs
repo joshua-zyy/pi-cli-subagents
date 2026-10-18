@@ -28,6 +28,25 @@ function setup(t, overrides = {}) {
 const settled = events => waitUntil('adapter terminal event', () => events.find(e => e.type === 'settled'), 5000);
 const runSettled = (events, runId) => waitUntil('run terminal', () => events.find(e => e.type === 'settled' && e.runId === runId), 5000);
 
+test('Codex uncertain steer blocks later inputs and emits uncertainty without stopping the turn', async t => {
+  const { client, requests } = setup(t), { c, events } = client(undefined, ['--no-steer-response']);
+  await c.ready(); await c.start('HOLD', 'one'); c.timeout = 100;
+  await assert.rejects(c.send('one', 'steer'), /uncertain/);
+  await assert.rejects(c.send('two', 'steer'), /uncertain/);
+  assert.equal(requests().filter(r => r.method === 'turn/steer').length, 1);
+  assert(events.some(e => e.type === 'uncertain' && e.runId === 'one'));
+  assert.equal(events.some(e => e.type === 'settled'), false);
+});
+
+test('Codex confirmed steer rejection does not poison a healthy active turn', async t => {
+  const { client } = setup(t), { c, events } = client(undefined, ['--reject-steer-once']);
+  await c.ready(); await c.start('HOLD');
+  await assert.rejects(c.send('rejected', 'steer'), /fixture steer rejected/);
+  await c.send('accepted after rejection', 'steer');
+  assert.equal((await settled(events)).text, 'accepted after rejection');
+  assert.equal(events.some(e => e.type === 'uncertain'), false);
+});
+
 test('Codex role without a model inherits the native default and is not pinned against provider fallback', async t => {
   const { client, requests, spec } = setup(t, { role: { cli: 'codex', description: 'test', instructions: 'Do only the assigned work.' } });
   const { c, events } = client(); const session = await c.ready();

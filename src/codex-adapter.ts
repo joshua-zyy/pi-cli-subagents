@@ -134,17 +134,26 @@ export class CodexAdapter implements CliAdapter {
   private request(method: string, params: RecordValue = {}): Promise<RecordValue> {
     if (this.exitError) return Promise.reject(this.exitError);
     const id = ++this.nextId;
+    const run = this.run;
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
-        reject(new Error(`Codex ${method} timed out; acceptance is uncertain. Inspect the instance before retrying.`));
+        const error = new Error(`Codex ${method} timed out; acceptance is uncertain. Inspect the instance before retrying.`);
+        reject(method === "turn/steer" ? this.uncertainInput(error, run) : error);
       }, this.timeout);
       this.pending.set(id, { resolve, reject, timer });
       void this.write({ id, method, params }).catch(error => {
         const entry = this.pending.get(id);
-        if (entry) { clearTimeout(entry.timer); this.pending.delete(id); entry.reject(error); }
+        if (entry) { clearTimeout(entry.timer); this.pending.delete(id); entry.reject(method === "turn/steer" ? this.uncertainInput(error, run) : error); }
       });
     });
+  }
+
+  private uncertainInput(error: Error, run = this.run): Error {
+    if (this.run !== run) return error;
+    this.poisoned ??= new Error(`Codex input delivery is uncertain; stop/release before new work: ${error.message}`);
+    this.emit({ type: "uncertain", error: this.poisoned.message }, run);
+    return this.poisoned;
   }
 
   private record(record: RecordValue): void {
@@ -424,8 +433,9 @@ export class CodexAdapter implements CliAdapter {
     if (mode === "followUp") throw new Error("Codex followUp while running is not supported; wait for this run to finish");
     if (!this.thread || !this.activeTurn) throw new Error("Codex has no active turn; inspect the instance before retrying");
     const expectedTurnId = this.activeTurn;
+    const run = this.run;
     const result = await this.request("turn/steer", { threadId: this.thread.threadId, expectedTurnId, input: textInput(message) });
-    if (result.turnId !== expectedTurnId) throw new Error("Codex acknowledged a different steer target");
+    if (result.turnId !== expectedTurnId) throw this.uncertainInput(new Error("Codex acknowledged a different steer target"), run);
   }
   async reply(answer: InteractionReply): Promise<void> {
     const approval = this.approvals.get(answer.id);

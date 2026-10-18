@@ -10,6 +10,7 @@ const response = (cmd, result = {}) => emit({ id: cmd.id, result });
 const error = (cmd, message) => emit({ id: cmd.id, error: { code: -32000, message } });
 const notify = (method, params) => emit({ method, params });
 let initialized = false, acknowledged = false, thread, turn, buffer = '';
+let rejectedSteer = false;
 const approvals = new Map();
 const questions = new Map();
 const elicitations = new Map();
@@ -337,6 +338,8 @@ function handle(cmd) {
   }
   if (cmd.method === 'turn/steer') {
     if (process.argv.includes('--no-steer-response')) return;
+    if (process.argv.includes('--wrong-steer-target')) return response(cmd, { turnId: 'wrong-target' });
+    if (process.argv.includes('--reject-steer-once') && !rejectedSteer) { rejectedSteer = true; return error(cmd, 'fixture steer rejected'); }
     if (cmd.params.threadId !== thread.id || cmd.params.expectedTurnId !== turn.id) return error(cmd, 'Wrong active turn');
     const message = cmd.params.input[0].text;
     if (message === 'FAST_STEER') { finish('FAST_STEER'); response(cmd, { turnId: turn.id }); }

@@ -14,6 +14,16 @@ import { tempDir } from './helpers/tmp.mjs';
 const fixture = fileURLToPath(new URL('./fixtures/codex.mjs', import.meta.url));
 const pi = fileURLToPath(new URL('./fixtures/pi.mjs', import.meta.url));
 const role = { cli: 'codex', description: 'fixture', instructions: 'Do only this task', model: 'gpt-6-luna', effort: 'medium' };
+
+test('worker preserves Codex uncertain input state until explicit protected release', { timeout: 15000 }, async t => {
+  const { cwd, manager, options } = setup(t); options.launch.args.push('--wrong-steer-target');
+  const child = await manager.spawn('worker', role, cwd, 'HOLD');
+  await assert.rejects(manager.send(child.id, 'uncertain'), /uncertain|different steer target/i);
+  const state = manager.get(child.id); assert.equal(state.phase, 'unreachable');
+  await assert.rejects(manager.send(child.id, 'must not send'), /uncertain|different steer target/i);
+  const closed = await manager.close(child.id, false, { runId: state.runId, runtimeId: state.runtimeId }, true);
+  assert.equal(closed.receipt.status, 'released');
+});
 function setup(t) {
   const cwd = tempDir('codex-manager');
   const home = path.join(cwd, 'home'); fs.mkdirSync(home); fs.writeFileSync(path.join(home, 'fixture-home'), '');

@@ -2,6 +2,7 @@ import type { Exit } from "./pi-process.js";
 import type { AgentSpec, Control, Delivery, NativeSession, Question, SessionHandle } from "./types.js";
 
 export type AdapterEvent =
+  | { type: "uncertain"; error: string; runId?: string }
   | { type: "activity"; detail: string; runId?: string }
   | { type: "question"; question: Question; runId?: string; runtimeScoped?: true }
   | { type: "resolved"; id: string; runId?: string }
