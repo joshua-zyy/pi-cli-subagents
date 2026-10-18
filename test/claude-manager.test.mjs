@@ -13,6 +13,15 @@ import { tempDir } from './helpers/tmp.mjs';
 const fixture = fileURLToPath(new URL('./fixtures/claude.mjs', import.meta.url));
 const pi = fileURLToPath(new URL('./fixtures/pi.mjs', import.meta.url));
 const role = {cli:'claude',description:'fixture',instructions:'Only assigned work'};
+
+test('Claude long first task remains resumable after release', { timeout: 15000 }, async t => {
+  const { m, cwd, done } = setup(t), marker = '雪😀'.repeat(16000);
+  const first = await m.spawn('worker', role, cwd, 'REMEMBER ' + marker); await done(first.id);
+  await m.close(first.id);
+  const next = await m.send(first.id, 'RECALL'); const result = await done(next.id);
+  assert.equal(m.getResult(next.id, next.runId).text, marker);
+  assert.equal(result.sessionId, first.sessionId);
+});
 const setup = t => {
   const cwd=tempDir('claude-manager'),home=path.join(cwd,'home'),parent=path.join(cwd,'parent.jsonl');
   fs.mkdirSync(home);fs.writeFileSync(path.join(home,'fixture-home'),'');fs.writeFileSync(parent,'{}\n');

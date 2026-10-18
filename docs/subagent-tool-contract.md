@@ -34,6 +34,8 @@ The following is a logical parameter contract, not the final TypeBox/JSON Schema
 
 `start` defaults to the current Pi working directory; when workspace is specified, resolve its actual path from the record. The role must exist in the current effective configuration. Resolve CLI, provider and model from role configuration; do not expose per-run model-routing parameters. task/message must be non-empty.
 
+Claude 任务与追加输入的 JSON 编码字符串最多 1 MiB，超限在原生输入发送前拒绝。恢复时按完整行读取原转录的起始身份，头部读取最多 4 MiB，尾部校验最多 64 KiB；长首条任务仍须满足原 sessionId 与启动 cwd 校验，不用后续匹配行替代起始身份。
+
 `send.mode` remains `steer | followUp`, defaulting to steer. It controls how the child receives instructions, not how result notifications are delivered to the parent agent.
 
 | Target state / CLI | `send` behavior |

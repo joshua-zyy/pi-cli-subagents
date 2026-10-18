@@ -177,13 +177,24 @@ test('Claude preflight does not use later cwd matches or a sampled tail as start
     [[{ ...original, cwd: path.dirname(cwd) }, original], /directory|cwd/i],
     [[{ ...original, cwd: undefined }, original], /identity|metadata|cwd/i],
     [[{ ...original, sessionId: undefined }, original], /identity|metadata/i],
-    [[{ ...original, message: 'x'.repeat(70_000) }, original], /identity|metadata/i],
+    [[{ ...original, message: 'x'.repeat(4 * 1024 * 1024) }, original], /identity|metadata|header/i],
     [[original, { type: 'progress', data: 'x'.repeat(70_000) }, { ...original, sessionId: 'foreign' }], /identity|session/i],
     [[original, { type: 'attachment', sessionId, cwd: 42 }], /metadata|cwd|directory/i],
   ]) {
     fs.writeFileSync(file, rows.map(row => JSON.stringify(row)).join('\n') + '\n');
     assert.throws(() => inspectClaudeSession(spec, session), error);
   }
+});
+
+test('Claude rejects oversized encoded input before submission without poisoning a healthy turn', async t => {
+  const { client, requests } = setup(t), { c, events } = client(); await c.ready();
+  const oversized = '\u0000'.repeat(200000);
+  await assert.rejects(c.start(oversized), /1 MiB.*no input was sent/);
+  assert.equal(requests().filter(r => r.type === 'user').length, 0);
+  await c.start('HOLD');
+  await assert.rejects(c.send(oversized, 'steer'), /1 MiB.*no input was sent/);
+  await c.send('valid', 'steer');
+  assert.equal((await terminal(events)).status, 'completed');
 });
 
 test('Claude startup identity notification is optional on new and resumed sessions', async t => {

@@ -80,7 +80,7 @@ Launcher tests use independent miniature repositories to verify real process bou
 
 ## Claude 原会话恢复预检
 
-恢复保留原 native home、sessionId 和唯一转录文件，不自动新建替代会话。只读预检保持首尾各最多 65,536 字节的预算：文件头首条非 sidechain 的 user/assistant 记录必须含原 sessionId 和与 spec.cwd 一致的启动目录；后续工具执行可改变 cwd，不再将动态目录当作启动身份。首尾采样中的外国 sessionId、非法 cwd 类型、错误启动目录仍拒绝。文件头缺少可验证起点时 fail-closed，不用后续匹配行或文件尾代替原始身份，也不改写原转录。
+恢复保留原 native home、sessionId 和唯一转录文件，不自动新建替代会话。只读预检以 65,536 字节分块读取文件头，直到首条主线身份记录完整可读，总量最多 4 MiB；另检查末尾最多 65,536 字节。文件头首条非 sidechain 的 user/assistant 记录必须含原 sessionId 和与 spec.cwd 一致的启动目录；后续工具执行可改变 cwd，不再将动态目录当作启动身份。采样中的外国 sessionId、非法 cwd 类型、错误启动目录仍拒绝。文件头缺少可验证起点时 fail-closed，不用后续匹配行或文件尾代替原始身份，也不改写原转录。Claude 的初始任务和忙碌输入在发送前限制为最多 1 MiB 的 JSON 编码字符串，为身份记录元数据保留预算；超限明确拒绝，不发送输入。本地夹具覆盖中文与 emoji 的长首条任务释放后原身份恢复，以及超限输入不污染健康轮次。
 
 依据 [官方会话恢复文档](https://platform.claude.com/docs/en/agent-sdk/sessions) 和 [官方 SDK 的文件头 cwd 提取](https://github.com/anthropics/claude-agent-sdk-python/blob/main/src/claude_agent_sdk/_internal/sessions.py)，沿用现有 native-resume 接线，不引入 SDK 依赖。既有 adapter 域测试覆盖动态目录和拒绝边界；manager 本地替身覆盖自然完成及 stop 后同身份恢复、历史记忆和固定启动目录。真实 Claude 续聊仍须单独授权；cwd 预检与驻留生命周期分别验收，前者通过不代表真实驻留能力通过。
 

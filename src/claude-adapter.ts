@@ -4,6 +4,7 @@ import { LogWriter } from "./log-writer.js";
 import { terminateProcessTree } from "./process-tree.js";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
+import { StringDecoder } from "node:string_decoder";
 import type { AdapterEvent, AdapterOptions, CliAdapter, InteractionReply } from "./cli-adapter.js";
 import { childEnvironment, type Exit } from "./pi-process.js";
 import { claudeEnvironment } from "./claude-launch.js";
@@ -66,28 +67,45 @@ export function inspectClaudeSession(spec: AgentSpec, session: ClaudeSession): s
   let identified = false;
   try {
     const size = fstatSync(fd).size;
-    for (const offset of size > 65_536 ? [0, Math.max(65_536, size - 65_536)] : [0]) {
-      const buffer = Buffer.alloc(Math.min(65_536, size - offset));
-      const count = readSync(fd, buffer, 0, buffer.length, offset);
-      let text = buffer.subarray(0, count).toString("utf8");
-      if (offset) text = text.slice(text.indexOf("\n") + 1);
-      if (offset + count < size) text = text.slice(0, text.lastIndexOf("\n") + 1);
-      for (const line of text.split("\n").filter(line => line.trim())) {
+    const check = (line: string, head: boolean): void => {
+      if (line.trim()) {
         const row: unknown = JSON.parse(line);
         if (!object(row)) throw new Error("Malformed Claude session metadata");
         if (row.sessionId !== undefined && row.sessionId !== session.sessionId) throw new Error("Claude session identity mismatch");
         if (row.cwd !== undefined && (typeof row.cwd !== "string" || !row.cwd.trim())) throw new Error("Malformed Claude session cwd metadata");
         // Tool calls can change later cwd values. Only the first mainline message in the
         // file head establishes the original directory; a matching tail cannot replace it.
-        if (!identified && offset === 0 && row.isSidechain !== true && ["user", "assistant"].includes(row.type)) {
+        if (!identified && head && row.isSidechain !== true && ["user", "assistant"].includes(row.type)) {
           if (row.sessionId !== session.sessionId || !row.cwd) throw new Error("Original Claude session lacks verifiable identity and cwd metadata");
           if (path.resolve(row.cwd) !== path.resolve(spec.cwd)) throw new Error("Original Claude working directory differs");
           identified = true;
         }
       }
+    };
+    // Extend the head only until the first mainline identity is complete. A large first
+    // message is supported without reading an unbounded transcript or trusting the tail.
+    const limit = Math.min(size, 4 * 1024 * 1024), buffer = Buffer.alloc(65_536), decoder = new StringDecoder("utf8");
+    let offset = 0, pending = "";
+    while (offset < limit && !identified) {
+      const count = readSync(fd, buffer, 0, Math.min(buffer.length, limit - offset), offset);
+      if (!count) throw new Error("Claude session shortened during identity preflight");
+      offset += count; pending += decoder.write(buffer.subarray(0, count));
+      const lines = pending.split("\n"); pending = lines.pop() ?? "";
+      for (const line of lines) check(line, true);
+    }
+    if (offset === size && pending.trim()) check(pending + decoder.end(), true);
+    if (!identified) throw new Error("Original Claude session header lacks verifiable identity within the 4 MiB limit");
+    if (offset < size) {
+      const tailOffset = Math.max(offset, size - 65_536);
+      const tail = Buffer.alloc(Math.min(65_536, size - tailOffset));
+      const count = readSync(fd, tail, 0, tail.length, tailOffset);
+      if (count !== tail.length) throw new Error("Claude session shortened during identity preflight");
+      const text = tail.subarray(0, count).toString("utf8");
+      // The head may have stopped inside a line; the tail never establishes startup identity.
+      const complete = tailOffset === offset && pending === "" ? text : text.slice(text.indexOf("\n") + 1);
+      for (const line of complete.split("\n")) check(line, false);
     }
   } finally { closeSync(fd); }
-  if (!identified) throw new Error("Original Claude session lacks verifiable identity and cwd metadata");
   return files[0];
 }
 
@@ -344,6 +362,7 @@ export class ClaudeAdapter implements CliAdapter {
     return this.session;
   }
   async start(message: string, runId?: string): Promise<void> {
+    if (Buffer.byteLength(JSON.stringify(message)) > 1024 * 1024) throw new ClaudeCapabilityError("Claude input exceeds the 1 MiB encoded limit for resumable tasks; no input was sent");
     if (this.error) throw this.error;
     if (!this.observed.has("ready") || this.activeMessage || this.interrupting || this.background.size || this.ending) throw new Error("Claude is not ready for a new task");
     this.runId = runId; this.result = undefined; this.settled = false; this.observed.delete("terminal");
@@ -359,6 +378,7 @@ export class ClaudeAdapter implements CliAdapter {
     } finally { this.observed.delete(`input:${id}`); this.observed.delete(`cancelled:${id}`); }
   }
   async send(message: string, mode: Delivery): Promise<void> {
+    if (Buffer.byteLength(JSON.stringify(message)) > 1024 * 1024) throw new ClaudeCapabilityError("Claude input exceeds the 1 MiB encoded limit for resumable tasks; no input was sent");
     if (this.error) throw this.error;
     if (!this.activeMessage || this.settled || this.interrupting || this.ending) throw new Error("Claude has no available active run; inspect before sending");
     if (!this.capabilities.has("msg_lifecycle_v1")) throw new ClaudeCapabilityError("Claude busy input requires the msg_lifecycle_v1 receipt capability");
