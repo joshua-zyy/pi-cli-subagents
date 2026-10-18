@@ -59,6 +59,7 @@ function finish(text, stopReason = 'stop') {
   }, 100);
 }
 function handle(cmd) {
+  if (cmd.type === 'fixture/raw') { for (const chunk of cmd.chunks) process.stdout.write(chunk); return; }
   if (cmd.type === 'fixture/finish') return finish(cmd.text);
   if (cmd.type === 'fixture/pending') { session.fixturePendingCount = cmd.count; save(); return response(cmd); }
   if (cmd.type === 'fixture/emit') { for (const record of cmd.records) emit(record); return; }

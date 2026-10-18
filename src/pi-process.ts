@@ -71,6 +71,7 @@ export class PiProcess {
       while ((newline = this.buffer.indexOf("\n")) >= 0) {
         const line = this.buffer.slice(0, newline).replace(/\r$/, "");
         this.buffer = this.buffer.slice(newline + 1);
+        if (Buffer.byteLength(line) > 4 * 1024 * 1024) { fail(new Error("Pi RPC record exceeds 4 MiB")); void this.kill(); return; }
         if (!line.trim()) continue;
         try {
           const record: WireRecord = JSON.parse(line);
@@ -83,6 +84,7 @@ export class PiProcess {
           } else this.record(record);
         } catch (error) { fail(error as Error); void this.kill(); return; }
       }
+      if (Buffer.byteLength(this.buffer) > 4 * 1024 * 1024) { fail(new Error("Pi RPC record exceeds 4 MiB")); void this.kill(); }
     });
     this.child.once("error", fail);
     this.child.stdin.on("error", fail);

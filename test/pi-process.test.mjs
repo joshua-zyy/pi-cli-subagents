@@ -8,6 +8,16 @@ import { waitUntil, readJson } from '../dist/storage.js';
 import { tempDir } from './helpers/tmp.mjs';
 const fixture = fileURLToPath(new URL('./fixtures/pi.mjs', import.meta.url));
 
+for (const scenario of ['chunks', 'normal-prefix', 'complete-record']) test(`Pi rejects oversized native records: ${scenario}`, { timeout: 10000 }, async t => {
+  const { rpc } = gated(t); await rpc.request({ type: 'get_state' });
+  const chunks = scenario === 'chunks' ? Array(8).fill('雪'.repeat(180000)) : scenario === 'normal-prefix'
+    ? [JSON.stringify({ type: 'notice' }) + '\n' + 'x'.repeat(4 * 1024 * 1024 + 1)]
+    : [JSON.stringify({ type: 'notice', text: '雪'.repeat(1500000) }) + '\n'];
+  await assert.rejects(rpc.request({ type: 'fixture/raw', chunks }), /Pi RPC record exceeds 4 MiB/);
+  await rpc.closed;
+  await assert.rejects(rpc.request({ type: 'prompt', message: 'must not run' }), /Pi RPC record exceeds 4 MiB/);
+});
+
 test('Pi initial handled input releases its run reservation without a terminal event', async t => {
   const { rpc, records } = gated(t);
   const handled = rpc.request({ type: 'prompt', message: 'HANDLED' }), captured = rpc.run;
