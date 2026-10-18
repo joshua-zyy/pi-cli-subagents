@@ -95,11 +95,11 @@ export class CodexAdapter implements CliAdapter {
       const output = this.log.stream;
       if (!output.write(chunk)) { this.child.stdout.pause(); output.once("drain", () => this.child.stdout.resume()); }
       this.buffer += chunk;
-      if (this.buffer.length > 4 * 1024 * 1024 && !this.buffer.includes("\n")) { fail(new Error("Codex RPC record exceeds 4 MiB")); void this.kill(); return; }
       let newline: number;
       while ((newline = this.buffer.indexOf("\n")) >= 0) {
         const line = this.buffer.slice(0, newline).replace(/\r$/, "");
         this.buffer = this.buffer.slice(newline + 1);
+        if (Buffer.byteLength(line) > 4 * 1024 * 1024) { fail(new Error("Codex RPC record exceeds 4 MiB")); void this.kill(); return; }
         if (!line.trim()) continue;
         try {
           const record: unknown = JSON.parse(line);
@@ -107,6 +107,7 @@ export class CodexAdapter implements CliAdapter {
           this.record(record);
         } catch (error) { fail(error instanceof SyntaxError ? new Error("Codex stdout is not a valid JSON-RPC record") : error as Error); void this.kill(); return; }
       }
+      if (Buffer.byteLength(this.buffer) > 4 * 1024 * 1024) { fail(new Error("Codex RPC record exceeds 4 MiB")); void this.kill(); }
     });
     this.child.once("error", fail);
     this.child.stdin.on("error", fail);
