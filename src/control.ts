@@ -7,8 +7,10 @@ export function control(endpoint: Endpoint, input: Control): Promise<ControlResu
     new Error(`Control ${input.type}, run ${endpoint.runId}, runtime ${endpoint.runtimeId ?? "legacy"}: ${error instanceof Error ? error.message : String(error)}`);
   if (endpoint.protocolVersion !== undefined && (endpoint.protocolVersion !== 2 || !endpoint.runtimeId))
     return Promise.reject(diagnostic("Unsupported or invalid worker control protocol"));
-  if (endpoint.protocolVersion === undefined && (input.type === "start" || input.type === "interrupt" || input.type === "close" && input.onlyIdle))
+  if (endpoint.protocolVersion === undefined && (input.type === "start" || input.type === "interrupt" || input.type === "close" && (input.onlyIdle || input.preserveAccepted)))
     return Promise.reject(diagnostic("This operation requires a resident v2 worker; legacy workers are not hot-replaced"));
+  if (input.type === "close" && input.preserveAccepted && endpoint.preserveAccepted !== true)
+    return Promise.reject(diagnostic("This worker cannot protect accepted turns during stop; interrupt first and release through the idle-only UI, or inspect its owner. Existing workers are not hot-replaced."));
   return new Promise<ControlResult>((resolve, reject) => {
     const req = request({
       hostname: "127.0.0.1", port: endpoint.port, path: "/", method: "POST", agent: false,

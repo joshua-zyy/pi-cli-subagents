@@ -378,15 +378,17 @@ ${view(state)}`);
       if (args.action !== "stop" && args.action !== "interrupt") throw new Error("Unknown subagent action; use start, send, interrupt, stop, reclaim, workspace_create or workspace_integrate");
       checkFields(args, ["action", "id"]);
       const manager = parentManager(ctx, launch);
+      let captured: { runId: string; runtimeId?: string } | undefined;
       if (args.action === "stop") {
         // Releasing the runtime of an accepted, in-flight turn ends that turn as "Parent requested
         // shutdown" and keeps none of its output. Interrupt is the operation that ends one turn, so
         // refuse here rather than discard work the model did not mean to cancel.
         const observed = manager.get(args.id!);
+        captured = { runId: observed.runId, runtimeId: observed.runtimeId };
         if (observed.accepted && ["starting", "running", "waiting"].includes(observed.phase))
           throw new Error(`A turn is in flight (${observed.phase}); stop releases processes without ending it, which would discard that turn. Interrupt first, then stop.`);
       }
-      const state = args.action === "interrupt" ? await manager.interrupt(args.id!) : await manager.close(args.id!);
+      const state = args.action === "interrupt" ? await manager.interrupt(args.id!) : await manager.close(args.id!, false, captured, true);
       // A release receipt proves the released runtime; the retained report is read by identity
       // through subagent_query, so repeating its body here only spends parent context.
       return content(`${receiptText(state)}

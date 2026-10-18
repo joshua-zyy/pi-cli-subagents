@@ -47,7 +47,7 @@ async function run(dir: string, runId: string): Promise<void> {
   const endpoint = () => {
     const address = server?.address();
     if (!address || typeof address === "string") throw new Error("Local control address is unavailable");
-    writeJson(path.join(dir, "endpoint.json"), { port: address.port, token, runId, runtimeId, protocolVersion: 2 });
+    writeJson(path.join(dir, "endpoint.json"), { port: address.port, token, runId, runtimeId, protocolVersion: 2, preserveAccepted: true });
   };
   const independentQuestions = new Set<string>();
   let unblockStartup: (() => void) | undefined;
@@ -167,6 +167,7 @@ async function run(dir: string, runId: string): Promise<void> {
     let receipt: OperationReceipt | undefined;
     if (input.type === "status") return state;
     if (input.type === "close") {
+      if (input.preserveAccepted && runOpen && state.accepted) throw new Error("A turn is in flight; interrupt first, then stop");
       if (input.onlyIdle && (state.phase !== "idle" || runOpen || state.questions.length)) throw new Error("Runtime is no longer idle; it was not closed");
       const captured = runId;
       await release(true);

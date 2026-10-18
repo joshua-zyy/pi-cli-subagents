@@ -650,19 +650,19 @@ export class AgentManager {
     } catch (error) { throw this.diagnostic(id, "interrupt", error, state); }
   }
 
-  async close(id: string, onlyIdle = false, expected?: { runId: string; runtimeId: string }): Promise<AgentView> {
+  async close(id: string, onlyIdle = false, expected?: { runId: string; runtimeId?: string }, preserveAccepted = false): Promise<AgentView> {
     const state = this.get(id);
     try {
       // A reclaim freed only the accounting; there is no native release left to confirm here.
       if (state.reclaimed) throw new Error(`Runtime ${state.runtimeId} had its accounting reclaimed without a native release confirmation, so stop has nothing to confirm. This instance cannot be continued in this version; start a new instance for further work.`);
       if (state.phase === "unreachable" && (!state.runtimeId || !processAlive(state.workerPid))) throw new Error(state.error);
-      if (expected && (!onlyIdle || state.protocolVersion !== 2 || state.runId !== expected.runId || state.runtimeId !== expected.runtimeId))
-        throw new Error(`Captured idle run ${expected.runId}, runtime ${expected.runtimeId} no longer matches; it was not closed`);
+      if (expected && ((!onlyIdle && !preserveAccepted) || onlyIdle && state.protocolVersion !== 2 || state.runId !== expected.runId || state.runtimeId !== expected.runtimeId))
+        throw new Error(`Captured run ${expected.runId}, runtime ${expected.runtimeId ?? "legacy"} no longer matches; it was not closed`);
       if (onlyIdle && state.phase !== "idle") throw new Error("Runtime is no longer idle; it was not closed");
       // Keep the checked idle snapshot bound through endpoint selection; the worker
       // rechecks its token and idle state inside the existing control queue.
       if (!["completed", "failed", "stopped", "stopping", "closed"].includes(state.phase))
-        await this.request(id, { type: "close", ...(onlyIdle ? { onlyIdle: true } : {}) }, onlyIdle ? state : undefined);
+        await this.request(id, { type: "close", ...(onlyIdle ? { onlyIdle: true } : {}), ...(preserveAccepted ? { preserveAccepted: true } : {}) }, expected || onlyIdle ? state : undefined);
       await this.waitForRelease(state, "Subagent shutdown", 30_000);
       const result = this.get(id);
       if (onlyIdle && (result.runId !== state.runId || result.runtimeId !== state.runtimeId))

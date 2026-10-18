@@ -8,12 +8,41 @@ import { fileURLToPath } from 'node:url';
 import { getAgentDir } from '@earendil-works/pi-coding-agent';
 import extension from '../dist/index.js';
 import { AgentManager } from '../dist/manager.js';
+import { control } from '../dist/control.js';
 import { deliverReports } from '../dist/notifier.js';
 import { readJson, writeJson, waitUntil } from '../dist/storage.js';
 import { tempDir } from './helpers/tmp.mjs';
 
 const fixture = fileURLToPath(new URL('./fixtures/pi.mjs', import.meta.url));
 const launch = { command: process.execPath, args: [fixture] };
+
+test('public stop refuses a new accepted run after its preflight', { timeout: 15000 }, async t => {
+  const { cwd, manager, invoke } = setup(t);
+  const first = await manager.spawn('worker', { description: 'fixture', instructions: 'fixture' }, cwd, 'DONE');
+  await waitUntil('idle', () => manager.get(first.id).phase === 'idle');
+  const close = AgentManager.prototype.close;
+  let next;
+  const mock = t.mock.method(AgentManager.prototype, 'close', async function(id, ...args) {
+    next = await manager.send(id, 'HOLD next');
+    return close.call(this, id, ...args);
+  });
+  try { await assert.rejects(invoke('subagent', { action: 'stop', id: first.id }), /captured|identity|in flight/i); }
+  finally { mock.mock.restore(); }
+  assert.equal(manager.get(first.id).phase, 'running');
+  assert.equal(manager.get(first.id).runId, next.runId);
+});
+
+test('worker checks accepted-run protection at release execution', { timeout: 15000 }, async t => {
+  const { cwd, manager } = setup(t);
+  const child = await manager.spawn('worker', { description: 'fixture', instructions: 'fixture' }, cwd, 'HOLD');
+  const endpoint = readJson(path.join(manager.root, child.id, 'endpoint.json'));
+  await assert.rejects(control({ ...endpoint, preserveAccepted: undefined }, { type: 'close', preserveAccepted: true }), /cannot protect accepted turns/);
+  await assert.rejects(control(endpoint, { type: 'close', preserveAccepted: true }), /in flight/i);
+  assert.equal(manager.get(child.id).phase, 'running');
+  await manager.interrupt(child.id);
+  const result = await control(endpoint, { type: 'close', preserveAccepted: true });
+  assert.equal(result.receipt.status, 'released');
+});
 
 test('worker control preserves split UTF-8 and limits raw request bytes', { timeout: 15000 }, async t => {
   const { cwd, manager } = setup(t);

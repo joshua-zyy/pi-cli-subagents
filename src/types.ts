@@ -148,7 +148,7 @@ export interface AgentState extends Partial<SessionHandle> {
   forced?: boolean;
 }
 export interface StartRequest { runId: string; message: string; session?: NativeSession | SessionHandle; createdAt?: number; logFile?: string }
-export interface Endpoint { port: number; token: string; runId: string; protocolVersion?: 2; runtimeId?: string }
+export interface Endpoint { port: number; token: string; runId: string; protocolVersion?: 2; runtimeId?: string; preserveAccepted?: true }
 /** The interaction a waiting report is about, so the notifier can state it without re-reading state. */
 export type PendingRequest = Pick<Question, "method" | "options" | "parentPolicy" | "humanOnly" | "kind" | "fields" | "isBlocking">;
 export interface Report {
@@ -225,5 +225,5 @@ export type Control =
   | { type: "send"; message: string; mode: Delivery }
   | { type: "start"; message: string }
   | { type: "interrupt" }
-  | { type: "close"; onlyIdle?: boolean }
+  | { type: "close"; onlyIdle?: boolean; preserveAccepted?: boolean }
   | { type: "reply"; id: string; value?: string; answers?: QuestionAnswers; confirmed?: boolean; cancelled?: boolean; actor?: "human" | "parent"; reason?: string };
