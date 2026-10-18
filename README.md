@@ -18,6 +18,8 @@ managed Git worktrees keep parallel edits out of each other's way.
 - For Codex or Claude Code subagents, the matching CLI installed and logged in; Pi subagents need
   nothing extra
 
+Claude Code 支持边界：当前仅接受 `2.1.x` 且补丁号至少为 `283`，并检查运行时协议能力；更高的次版本或主版本须重新验证后才能开放。
+
 ## Install
 
 ```bash

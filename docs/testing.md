@@ -4,15 +4,16 @@
 
 ## Entry points and boundaries
 
-The existing Node test infrastructure is unchanged. `scripts/test.mjs` selects local tests, isolates the environment before imports, and runs tests serially. The counts and costs below are the baseline from the introduction of test tiers (`b45f3a6`): the existing 45 files and 385 tests were retained, with 5 launcher tests added, for a total of 390. Later regression tests do not rewrite historical measurements; use actual execution output for current counts.
+复用现有 Node 测试入口；`scripts/test.mjs` 在导入前隔离环境并按文件串行执行。当前有四层，精确文件集合以 manifest 为准，测试数量与耗时以当次输出为准。
 
-| Entry point | Files / tests | Scope |
-|---|---:|---|
-| `npm run test:fast` | 26 / 239 | Logic, UI, result projections and transcript reading without launching CLIs/Git; temporary file I/O is allowed |
-| `npm run test:domain` | 6 / 62 | Single-module protocols/adapters, RPC, storage races, Git workspaces and the test launcher; local fixtures only |
-| `npm run test:acceptance:local` | 14 / 89 | Local end-to-end checks for the manager, extension entry points, UI actions, approvals and recovery; CLIs use fixtures |
-| `npm test` | 46 / 390 | Union of the three local selections above; excludes real-model acceptance |
-| `npm run test:list` | No tests executed | List all local test files and identify real acceptance tests that were not run |
+| 入口 | 范围 |
+|---|---|
+| `npm run test:fast` | 纯逻辑、UI 与转录投影，允许临时文件 I/O，不启动 CLI/Git |
+| `npm run test:domain` | 协议、adapter、存储和 Git 工作区，使用本地替身 |
+| `npm run test:acceptance:local` | manager、扩展入口、UI、审批和恢复的本地闭环 |
+| `npm run test:acceptance:slow` | manager、驻留和工作区的重型本地进程验收 |
+| `npm test` | 上述四层的并集，不包含真实模型验收 |
+| `npm run test:list` | 仅列出全部本地测试，并明确未运行真实验收 |
 
 Execution entry points build `dist/` first; `test:list` does not build. With a current build, run `node scripts/test.mjs fast` directly.
 
@@ -83,6 +84,8 @@ Launcher tests use independent miniature repositories to verify real process bou
 已删除 `TranscriptReader.readRecent()` 及其尾部预览、后台全量重放和交接状态。直接深度导入 `dist/transcript.js` 调用该方法的外部代码需要迁移；不保留兼容代理。顺序解析继续使用 `TranscriptReader.read()`，交互式历史查看继续使用现有 `TranscriptWindow` 的有界按需分页。相关旧 API 测试随行为退休；独立的 UI 暂停定位、合并绘制与通知保留测试迁入 `conversation.test.mjs`，分页、原生身份过滤及字节边界仍由现有 window/seek 测试覆盖。
 
 ## Claude 原会话恢复预检
+
+版本预检保留 `2.1.x` 且补丁号至少为 `283` 的边界，并继续检查运行时协议能力。该条件不是“任意版本号大于等于 2.1.283”；`2.2.x`、`3.x`、预发行后缀等均不自动放行。此处是经验证的接入边界，扩展支持范围前需要重新验证原生协议。
 
 恢复保留原 native home、sessionId 和唯一转录文件，不自动新建替代会话。只读预检以 65,536 字节分块读取文件头，直到首条主线身份记录完整可读，总量最多 4 MiB；另检查末尾最多 65,536 字节。文件头首条非 sidechain 的 user/assistant 记录必须含原 sessionId 和与 spec.cwd 一致的启动目录；后续工具执行可改变 cwd，不再将动态目录当作启动身份。采样中的外国 sessionId、非法 cwd 类型、错误启动目录仍拒绝。文件头缺少可验证起点时 fail-closed，不用后续匹配行或文件尾代替原始身份，也不改写原转录。Claude 的初始任务和忙碌输入在发送前限制为最多 1 MiB 的 JSON 编码字符串，为身份记录元数据保留预算；超限明确拒绝，不发送输入。本地夹具覆盖中文与 emoji 的长首条任务释放后原身份恢复，以及超限输入不污染健康轮次。
 
