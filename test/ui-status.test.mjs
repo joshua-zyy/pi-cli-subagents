@@ -3,7 +3,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { stripTerminalSequences, visibleWidth } from '@earendil-works/pi-tui';
 import { formatElapsed, formatTokens, oneLine, rightAlign, viewElapsed, canMessage, canStop, canResume, viewStatus } from '../dist/ui/format.js';
-import { FINISHED_LINGER_MS, FRAME_INTERVAL_MS, MAX_STATUS_LINES, STATUS_KEY, StatusWidget, statusLines } from '../dist/ui/status.js';
+import { FRAME_INTERVAL_MS, MAX_STATUS_LINES, STATUS_KEY, StatusWidget, statusLines } from '../dist/ui/status.js';
 
 const theme = { fg: (_color, text) => text, bold: text => text };
 const tagged = { fg: (color, text) => `[${color}]${text}`, bold: text => text };
@@ -20,25 +20,25 @@ test('token counts stay compact and messageability excludes unreachable instance
   for (const protocolVersion of [undefined, 2]) for (const phase of ['running', 'idle', 'closed']) assert.equal(canMessage({ phase, protocolVersion }), false);
 });
 
-test('idle resources remain visible after linger and expose failure and release without busy semantics', () => {
+test('idle resources stay manageable but never occupy the active-work widget', () => {
   assert.equal(canStop('idle'), true); assert.equal(canStop('closed'), false);
   assert.equal(canResume('idle'), false); assert.equal(canResume('closed'), true);
   const saved = view({ phase: 'idle', lastStatus: 'failed', error: 'native failure', updatedAt: 1 });
   assert.equal(viewStatus(saved).color, 'error'); assert.match(viewStatus(saved).label, /Idle.*Failed/);
   for (const width of [40, 80, 120]) {
     const rendered = lines([saved], { now: 3600000, width });
-    assert.match(rendered.join('\n'), /idle/i); assert.match(rendered.join('\n'), /Failed|failure/);
+    assert.deepEqual(rendered, []);
     assert.ok(rendered.every(row => visibleWidth(row) <= width));
   }
-  const h = host(), widget = new StatusWidget(h, () => [saved], { lingerMs: 0 });
-  widget.update(); assert.equal(h.calls.length, 1); widget.dispose();
+  const h = host(), widget = new StatusWidget(h, () => [saved]);
+  widget.update(); assert.equal(h.calls.length, 0); widget.dispose();
 });
 
-test('confirmed released runtimes disappear immediately without hiding unconfirmed failures', () => {
+test('released and unreachable records leave the activity widget without faking their lifecycle', () => {
   const released=view({phase:'closed',protocolVersion:3,runtimeClosed:true,updatedAt:11000,lastStatus:'completed'});
   assert.deepEqual(lines([released]),[]);
   const unconfirmed={...released,phase:'unreachable',lastStatus:'failed',error:'release uncertainty'};
-  assert.match(lines([unconfirmed]).join('\n'),/Failed|uncertainty/);
+  assert.deepEqual(lines([unconfirmed]),[]); assert.equal(unconfirmed.phase,'unreachable');
   assert.match(lines([{...released,phase:'running'}]).join('\n'),/Running/);
 });
 
@@ -80,29 +80,27 @@ test('waiting entries have priority, warning color and sanitized titles', () => 
   assert.match(rows[1], /^\[dim\]├─ \[warning\]⚠ \[text\]worker \[dim\]a1 {2}\[muted\]Implement UI +\[dim\]· Waiting · 10\.0s$/);
   assert.match(rows[2], /Allow bash\?/); assert.match(rows[0], /1 running · 1 waiting/);
 });
-test('finished entries collapse and disappear after their linger period', () => {
-  const done = view({ phase: 'completed', updatedAt: 5000 });
-  const rows = statusLines([done], { now: 5000 + FINISHED_LINGER_MS, frame: 0, width: 120, theme });
-  assert.equal(rows.length, 2); assert.match(rows[1], /^└─ ✓ worker a1 {2}Implement UI +· Completed · 4\.0s$/);
-  assert.deepEqual(statusLines([done], { now: 5001 + FINISHED_LINGER_MS, frame: 0, width: 120, theme }), []);
+test('idle and every terminal phase disappear immediately, even with a just-finished result', () => {
+  for (const phase of ['idle','completed','failed','stopped','closed','unreachable']) {
+    const saved=view({phase,updatedAt:11000,lastStatus:'failed',error:'Retained diagnostic'}), snapshot=structuredClone(saved);
+    assert.deepEqual(lines([saved]),[],phase);assert.deepEqual(saved,snapshot,'display filtering cannot rewrite evidence');
+  }
   assert.deepEqual(lines([]), []);
 });
-test('errors stay inline and waiting entries do not expire', () => {
-  const rows = lines([view({ phase: 'failed', error: 'Child exited unexpectedly', updatedAt: 5000 })]);
-  assert.match(rows[1], /^└─ ✗ worker a1 {2}Implement UI +· Failed: Child exited unexpectedly · 4\.0s$/);
+test('all in-progress phases remain visible and waiting for human input never expires', () => {
+  for(const phase of ['starting','running','waiting','stopping'])assert.equal(lines([view({phase})]).length,3,phase);
   const stuck = view({ phase: 'waiting', updatedAt: 1000, questions: [{ id: 'q1', method: 'select', title: 'Human response needed' }] });
-  assert.equal(statusLines([stuck], { now: 10 * FINISHED_LINGER_MS, frame: 0, width: 120, theme }).length, 3);
+  assert.equal(statusLines([stuck], { now: 3600000, frame: 0, width: 120, theme }).length, 3);
 });
-test('overflow retains waiting, active, then newest finished instances and counts correctly', () => {
+test('overflow counts only active work, keeping waiting entries first regardless of idle history', () => {
   const agents = [view({ id: 'w', phase: 'waiting', questions: [{ id: 'q1', method: 'select', title: 'Respond' }] }),
     ...Array.from({ length: 12 }, (_, i) => view({ id: `a${i}`, startedAt: 1000 + i, task: `Task${i}` }))];
   const rows = lines(agents);
   assert.equal(rows.length, MAX_STATUS_LINES); assert.match(rows[0], /12 running · 1 waiting/);
   assert.ok(rows.some(row => row.includes('Task0'))); assert.equal(rows.at(-1), '+ 9 more (/agents)');
   const completed = Array.from({ length: 12 }, (_, i) => view({ id: `c${i}`, phase: 'completed', startedAt: 1000 + i * 10, updatedAt: 5000 + i * 10, task: `Done${i}` }));
-  const kept = lines(completed);
-  assert.match(kept[0], /12 ended/); assert.ok(kept.some(row => row.includes('Done11'))); assert.ok(!kept.some(row => row.includes('Done0')));
-  assert.equal(kept.at(-1), '+ 4 more (/agents)');
+  assert.deepEqual(lines([...completed,...agents,...completed.map(agent=>({...agent,phase:'idle'}))]),rows);
+  assert.deepEqual(lines(completed),[]);
 });
 test('rightAlign clips the left side first', () => {
   assert.equal(rightAlign('abcdefgh', '12.3s', 20), `abcdefgh${' '.repeat(6)} 12.3s`);
@@ -122,6 +120,20 @@ test('empty widgets do not register; active widgets register once and request re
   assert.match(component.render(100).join('\n'), /worker/); widget.update(); assert.ok(state.ticks >= 1);
   widget.dispose(); assert.equal(active.calls.at(-1).content, undefined);
 });
+test('finishing work unregisters immediately, stops animation, and a new run registers again', t => {
+  const h=host();let snapshot=[view()];const widget=new StatusWidget(h,()=>snapshot);
+  t.mock.timers.enable({apis:['setInterval']});
+  try {
+    widget.update();const {state,tui}=ticker();const component=h.calls[0].content(tui,theme);
+    t.mock.timers.tick(FRAME_INTERVAL_MS);assert.equal(state.ticks,1);
+    snapshot=[view({phase:'idle',lastStatus:'completed'})];widget.update();
+    assert.equal(h.calls.at(-1).content,undefined);assert.deepEqual(component.render(100),[]);
+    const ticks=state.ticks;t.mock.timers.tick(1000);assert.equal(state.ticks,ticks);
+    snapshot=[view({phase:'waiting'})];widget.update();assert.equal(typeof h.calls.at(-1).content,'function');
+    snapshot=[view({phase:'completed'})];widget.update();assert.equal(h.calls.at(-1).content,undefined);
+  } finally {widget.dispose();t.mock.timers.reset();}
+});
+
 test('animation redraws without rereading state and disposal stops all side effects', async t => {
   let reads = 0;
   const active = host(); const widget = new StatusWidget(active, () => { reads++; return [view()]; }, { intervalMs: 10 });
@@ -145,13 +157,13 @@ test('the spinner turns at pi-tui’s own cadence by default', async t => {
   assert.ok(state.ticks >= 3, `the spinner must advance about every ${FRAME_INTERVAL_MS} ms, got ${state.ticks} redraws in 400 ms`);
   assert.notEqual(component.render(100).join('\n'), first, 'the rendered frame must move');
 });
-test('read failure preserves the last snapshot; old finished entries do not register', async () => {
+test('read failure preserves the last active snapshot; finished entries do not register', async () => {
   const active = host(); let fail = false;
-  const widget = new StatusWidget(active, () => { if (fail) throw Error('Corrupt record'); return [view()]; }, { intervalMs: 10, lingerMs: 0 });
+  const widget = new StatusWidget(active, () => { if (fail) throw Error('Corrupt record'); return [view()]; }, { intervalMs: 10 });
   widget.update(); const { tui } = ticker(); active.calls[0].content(tui, theme); fail = true;
   const saved = console.error; console.error = () => {};
   try { assert.doesNotThrow(() => widget.update()); } finally { console.error = saved; }
   assert.equal(active.calls.length, 1); await sleep(30); widget.dispose();
-  const finished = host(); const old = new StatusWidget(finished, () => [view({ phase: 'completed', updatedAt: 1 })], { lingerMs: 0 });
+  const finished = host(); const old = new StatusWidget(finished, () => [view({ phase: 'completed', updatedAt: 11000 })]);
   old.update(); assert.equal(finished.calls.length, 0); old.dispose();
 });
