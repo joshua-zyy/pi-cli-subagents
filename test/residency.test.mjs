@@ -170,7 +170,7 @@ test('a prior logical question cannot answer a later run reusing the native tool
   await m.reply(first.id, current.id, { value: 'Integration' }); assert.match((await idle(m, first.id)).text, /Integration/);
 });
 
-/** Gate the real adapter return, not its native acknowledgement or the worker's state writer. */
+/** Gate the real adapter return, not its native acknowledgement or state writer. Ready is not a terminal barrier. */
 async function gatedStartup(t, mode = 'after') {
   const copy = path.join(tempDir('i015-dist'), 'dist');
   fs.cpSync(fileURLToPath(new URL('../dist', import.meta.url)), copy, { recursive: true });
@@ -207,6 +207,11 @@ async function gatedStartup(t, mode = 'after') {
     return request && records.some(row=>row.id===request.id&&typeof row.result?.turn?.id==='string'&&row.result.turn.id.trim());
   }, 5000);
   return { ...h, ready, requests, acknowledged,
+    assertHeld: state => {
+      assert.equal(fs.existsSync(path.join(gates,state.runId+'.ready')),true);
+      for(const marker of [state.runId+'.release',state.runId+'.drained','release-all'])
+        assert.equal(fs.existsSync(path.join(gates,marker)),false,'worker start return must remain gated: '+marker);
+    },
     release: state => fs.writeFileSync(path.join(gates,state.runId+'.release'),''),
     drained: state => waitUntil('worker await continuation drained',()=>fs.existsSync(path.join(gates,state.runId+'.drained')),5000),
     releaseAll: () => fs.writeFileSync(path.join(gates,'release-all'),'') };
@@ -216,13 +221,15 @@ test('I-015 native ACK survives completion before worker start returns, initiall
   const h=await gatedStartup(t),pending=[];
   try {
     const start=h.m.spawn('worker',{...role,cli:'codex',model:'fixture'},h.cwd,'REMEMBER alpha');pending.push(start);void start.catch(()=>{});
-    const first=await h.ready();await h.acknowledged(first);
+    const firstGate=await h.ready(),first=await idle(h.m,firstGate.id);
+    assert.equal(first.runId,firstGate.runId);h.assertHeld(first);await h.acknowledged(first);
     const started=await start;for(const key of ['id','runId','runtimeId'])assert.equal(started[key],first[key],key);receipt(started,'start','accepted');
     assert.equal(first.accepted,true);assert.equal(first.phase,'idle');assert.equal(first.lastStatus,'completed');
     const original=JSON.stringify(h.m.getResult(first.id,first.runId));
     h.release(first);await h.drained(first);
     const send=h.m.send(first.id,'RECALL');pending.push(send);void send.catch(()=>{});
-    const next=await h.ready(first.runId);await h.acknowledged(next);
+    const nextGate=await h.ready(first.runId),next=await idle(h.m,nextGate.id);
+    assert.equal(next.runId,nextGate.runId);h.assertHeld(next);await h.acknowledged(next);
     assert.equal(next.accepted,true,'native receipt must be durable before the resident control handler resumes');
     assert.equal(next.phase,'idle');assert.equal(next.lastStatus,'completed');
     h.release(next);receipt(await send,'send','accepted');
@@ -248,7 +255,8 @@ test('I-015 an older start continuation cannot acknowledge a newer gated run', {
   const h=await gatedStartup(t,'mixed'),pending=[];
   try {
     const start=h.m.spawn('worker',{...role,cli:'codex',model:'fixture'},h.cwd,'REMEMBER alpha');pending.push(start);void start.catch(()=>{});
-    const first=await h.ready();await start;
+    const firstGate=await h.ready(),first=await idle(h.m,firstGate.id);
+    assert.equal(first.runId,firstGate.runId);h.assertHeld(first);await start;
     const send=h.m.send(first.id,'HOLD second');pending.push(send);void send.catch(()=>{});
     const next=await h.ready(first.runId);assert.equal(next.accepted,false);
     h.release(first);await h.drained(first);
