@@ -136,6 +136,10 @@ test('Claude native rule-forced questions show the signal to the parent and stil
   const {m,cwd,parent,done}=setup(t);let multiPrompts=0,input;
   const {ctx,commands,notices,messages}=publicApi(parent,cwd,{
     theme:{fg:(_,text)=>text,bold:text=>text},setWidget(){},onTerminalInput(fn){input=fn;return()=>{input=undefined;};},
+    custom(factory){return new Promise(resolve=>{
+      const component=factory({terminal:{rows:35,columns:120},requestRender(){}},ctx.ui.theme,{},resolve);
+      input=data=>component.handleInput(data);
+    });},
     select:async(title,options)=>{
       assert.doesNotMatch(title,/Human response required/);
       if(title.includes('Which checks?'))return options[0];

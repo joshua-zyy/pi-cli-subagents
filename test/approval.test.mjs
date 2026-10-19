@@ -27,6 +27,10 @@ test('parent tools and the human agents panel answer the same original request',
   const ctx = {cwd, mode:'tui', hasUI:true, isProjectTrusted:()=>false,
     sessionManager:{ getSessionFile:()=>parent, getEntries:()=>[] },
     ui:{theme:{fg:(_,text)=>text,bold:text=>text},setWidget(){},onTerminalInput(fn){input=fn;return()=>{input=undefined;};},
+      custom(factory){return new Promise(resolve=>{
+        const component=factory({terminal:{rows:35,columns:120},requestRender(){}},ctx.ui.theme,{},resolve);
+        input=data=>component.handleInput(data);
+      });},
       notify:(message)=>notices.push(message),confirm:async()=>{confirmations++;return false;}}};
   extension({on:(name,fn)=>events.set(name,fn),registerTool(tool){tools.set(tool.name,tool)},registerCommand(name,def){commands.set(name,def)},registerShortcut(){},registerMessageRenderer(){},sendMessage(_message,options){assert.equal(options.triggerTurn,false);}});
   const manager = new AgentManager(parent,{command:process.execPath,args:[fixture]});
