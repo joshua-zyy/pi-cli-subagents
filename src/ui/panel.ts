@@ -22,25 +22,22 @@ const PANEL_RESERVED_LINES = 8;
 /** Under this the detail view drops its metadata block, so the task and the result stay visible. */
 const DETAIL_FULL_ROWS = 30;
 const DETAIL_MIN_ROWS = 12;
-const DETAIL_SHARE = 0.7;
+const PANE_SHARE = 0.7;
 
 /**
- * How many rows the pane above the editor may take. The roster stays as compact as the role editor;
- * the detail view carries a result to read, so it takes a share of the terminal instead of a block.
+ * Bound the native overlay to the current terminal, not the widget dock's unknown allocation.
+ * A short roster uses only the rows it needs; a roomy viewport must not impose an eight-item cap.
  */
 export function paneRows(terminalRows: number, mode: "list" | "detail"): number {
   const rows = Number.isFinite(terminalRows) && terminalRows > 0 ? Math.floor(terminalRows) : 24;
-  const wanted = mode === "detail"
-    ? Math.max(DETAIL_MIN_ROWS, Math.floor(rows * DETAIL_SHARE))
-    : Math.max(6, Math.min(PANEL_MAX_ROWS + 4, Math.floor(rows / 3)));
-  // Never take so much that the input box and its status line disappear.
-  return Math.min(rows - 4, wanted);
+  const wanted = Math.max(mode === "detail" ? DETAIL_MIN_ROWS : 6, Math.floor(rows * PANE_SHARE));
+  return Math.max(1, Math.min(rows - 4, wanted));
 }
 
 const isText = (value: string | undefined): value is string => typeof value === "string" && value.trim().length > 0;
 
 /**
- * Snapshot-based /agents roster, rendered as a pane above the editor like the role editor.
+ * Snapshot-based /agents roster inside a native Pi overlay.
  * It returns actions; the command handler performs send/close/reply after the pane closes.
  */
 export class AgentsPanel {
@@ -48,7 +45,7 @@ export class AgentsPanel {
   private allAgents: AgentView[] = [];
   private showReleased = false;
   private readonly now: number | undefined;
-  private readonly maxRows: number;
+  private readonly maxRows: number | undefined;
   private readonly rowLimit: () => number;
   private readonly frameColor?: (text: string) => string;
   private readonly frame: () => number;
@@ -68,7 +65,7 @@ export class AgentsPanel {
   ) {
     this.update(agents);
     this.now = options.now;
-    this.maxRows = options.maxRows ?? PANEL_MAX_ROWS;
+    this.maxRows = options.maxRows;
     this.frameColor = options.frameColor;
     this.frame = options.frame ?? (() => 0);
     const rows = options.rows;
@@ -195,10 +192,11 @@ export class AgentsPanel {
     if (canInterrupt(this.agents[selected])) hints.unshift(["t", "interrupt"]);
     if (this.idleTargets.length) hints.unshift(["c", `release idle (${this.idleTargets.length})`]);
     lines.push(this.hint(hints));
-    const limit = this.room || this.maxRows + lines.length + 2;
+    const maxRows = this.maxRows ?? (this.room > 0 ? this.agents.length : PANEL_MAX_ROWS);
+    const limit = this.room || maxRows + lines.length + 2;
     // Keep one selectable row before headers, then charge only indicators that actually exist.
     const header = lines.slice(0, Math.max(0, limit - 1)), budget = limit - header.length;
-    const fit = fitSelection(this.agents.length, selected, budget, Math.max(1, Math.min(this.maxRows, this.agents.length, budget)));
+    const fit = fitSelection(this.agents.length, selected, budget, Math.max(1, Math.min(maxRows, this.agents.length, budget)));
     let spare = fit.spare;
     if (fit.above > 0 && spare > 0) { header.push(rightAlign("", this.theme.fg("dim", `↑ ${fit.above} more`), width)); spare--; }
     for (let index = fit.start; index < fit.start + fit.visible; index++) header.push(this.agentRow(index, selected, width));

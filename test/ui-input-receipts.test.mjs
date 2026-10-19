@@ -9,6 +9,7 @@ import extension from '../dist/index.js';
 import { AgentManager } from '../dist/manager.js';
 import { WorkspaceDecisionRequired } from '../dist/workspace.js';
 import { waitUntil } from '../dist/storage.js';
+import { AgentsPanel } from '../dist/ui/panel.js';
 
 const theme = {fg:(_,text)=>text, bg:(_,text)=>text, bold:text=>text, getThinkingBorderColor:()=>text=>text};
 function harness(t, beforePhase = 'completed', decision = 'none') {
@@ -36,13 +37,19 @@ function harness(t, beforePhase = 'completed', decision = 'none') {
       return failed;
     }),
   ];
-  let listener, viewer, running, ticks = 0;
+  let listener, viewer, roster, running, ticks = 0;
   const ctx = {cwd:root, mode:'tui', isProjectTrusted:()=>false,isIdle:()=>true,abort(){throw Error('unexpected parent abort');},
     sessionManager:{getSessionFile:()=>parent,getEntries:()=>entriesByParent.get(parent) ?? []},
     ui:{theme, notify:(message,type)=>notices.push({message,type}), setWidget(){}, setStatus(){ticks++;},
       onTerminalInput(fn){listener=fn;return()=>{listener=undefined;};},
       editor:async()=> 'FOLLOW_UP', select:async()=> 'sync — update workspace from parent', confirm:async()=>true,
-      custom(factory){return new Promise(resolve=>{viewer=factory({terminal:{rows:35,columns:400},requestRender(){}},theme,{ matches: () => false },resolve);});},
+      custom(factory){return new Promise(resolve=>{
+        const component=factory({terminal:{rows:35,columns:400},requestRender(){}},theme,{ matches: () => false },result=>{
+          if(roster===component)roster=undefined;
+          resolve(result);
+        });
+        if(component instanceof AgentsPanel)roster=component;else viewer=component;
+      });},
     }};
   extension({on:(name,handler)=>events.set(name,handler), registerTool(){}, registerCommand:(name,command)=>commands.set(name,command), registerShortcut(){}, registerMessageRenderer(){},
     sendMessage:(message,options)=>{messages.push({message,options,parent});entriesByParent.get(parent).push({type:'custom_message',customType:message.customType,details:message.details});}});
@@ -51,7 +58,10 @@ function harness(t, beforePhase = 'completed', decision = 'none') {
     input:key=>listener(key),
     activate(file){parent=file;if(!entriesByParent.has(parent))entriesByParent.set(parent,[]);ctx.mode='rpc';events.get('session_start')({},ctx);ctx.mode='tui';},
     open(){running=commands.get('agents').handler('',ctx);},
-    press(key){assert.deepEqual(listener(key),{consume:true});},
+    press(key){
+      const result=listener(key);
+      if(!result?.consume){assert(roster,'native roster must own keyboard focus');roster.handleInput(key);}
+    },
     viewer:()=>viewer,
     async close(){events.get('session_shutdown')();await running;for(const mock of mocks)mock.mock.restore();
       if(oldHome===undefined)delete process.env.PI_CODING_AGENT_DIR;else process.env.PI_CODING_AGENT_DIR=oldHome;},
@@ -244,16 +254,24 @@ test('an input finishing after a parent switch is durably delivered only when it
   } finally {finished.resolve(h.failed);sending.mock.restore();await h.close();}
 });
 
-test('viewer Ctrl+C routes only to the busy parent; roster still yields to Pi', async t => {
+test('roster and viewer Ctrl+C route only to the busy parent', async t => {
   const h = harness(t,'running');let aborts=0,childInterrupts=0;
   h.ctx.isIdle=()=>false;h.ctx.abort=()=>aborts++;
   const interrupt = t.mock.method(AgentManager.prototype,'interrupt',async()=>{childInterrupts++;return h.before;});
   try {
-    h.open();assert.equal(h.input('\u0003'),undefined);assert.equal(aborts,0);
+    h.open();assert.deepEqual(h.input('\u0003'),{consume:true});assert.equal(aborts,1);
     h.press('v');await waitUntil('viewer',()=>h.viewer(),2000);
-    h.press('\u0003');assert.equal(aborts,1);assert.equal(childInterrupts,0);
+    h.press('\u0003');assert.equal(aborts,2);assert.equal(childInterrupts,0);
     assert.equal(h.messages.length,0,'parent interruption is not a child action');
   } finally {interrupt.mock.restore();await h.close();}
+});
+
+test('idle-parent Ctrl+C dismisses the roster without a child action', async t => {
+  const h = harness(t, 'idle');
+  try {
+    h.open(); assert.deepEqual(h.input('\u0003'), { consume: true }); await h.wait();
+    assert.equal(h.messages.length, 0); assert.equal(h.calls.length, 0);
+  } finally { await h.close(); }
 });
 
 function assertFailureEvidence(h, text) {

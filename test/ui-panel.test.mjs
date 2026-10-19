@@ -150,10 +150,13 @@ test('the pane is framed like the role editor, in every view', () => {
   assert.match(painted[0], /^<╭─+╮>$/); assert.match(painted[1], /^<│> /);
 });
 
-test('pane height stays compact for the roster and grows for the result it has to show', () => {
-  assert.equal(paneRows(120, 'list'), PANEL_MAX_ROWS + 4, 'the roster is capped like the role editor');
-  assert.equal(paneRows(35, 'list'), 11, 'a third of a 35-row terminal');
-  assert.ok(paneRows(35, 'detail') > paneRows(35, 'list'), 'the detail view needs room for a result');
+test('native pane budget follows terminal height instead of capping a roomy roster', () => {
+  assert.equal(paneRows(120, 'list'), 84);
+  assert.equal(paneRows(35, 'list'), 24);
+  assert.equal(paneRows(35, 'detail'), 24);
+  for (const height of [1, 2, 4, 8, 24, 35, 120]) for (const mode of ['list', 'detail']) {
+    assert(paneRows(height, mode) >= 1 && paneRows(height, mode) <= height);
+  }
   assert.ok(paneRows(8, 'list') > 0 && paneRows(8, 'detail') > 0, 'a short terminal still gets a pane');
   assert.equal(paneRows(Number.NaN, 'list'), paneRows(24, 'list'));
 });
@@ -203,6 +206,19 @@ test('large rosters keep every selected identity visible within the actual row b
       assert(lines.some(line=>line.includes('›')&&line.includes(id)),`selected ${id} missing at ${height}x${width}: ${text(lines)}`);
     }
     p.instance.handleInput(direction);
+  }
+});
+
+test('roomy bounded rosters show all nine instances without an artificial row cap', () => {
+  let height = 45;
+  const agents = Array.from({ length: 9 }, (_, i) => view({ id: `agent00${i}`, startedAt: i }));
+  const p = panel(agents, { rows: () => paneRows(height, 'list') });
+  for (let i = 0; i < 8; i++) p.instance.handleInput(keys.down);
+  for (height of [45, 30, 60]) {
+    const rendered = text(p.framed(140));
+    for (const agent of agents) assert(rendered.includes(agent.id), `height ${height} unnecessarily hides ${agent.id}`);
+    assert.doesNotMatch(rendered, /[↑↓] \d+ more/);
+    assert.match(rendered, /›.*agent008/);
   }
 });
 

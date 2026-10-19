@@ -12,6 +12,9 @@ import { AgentManager } from '../dist/manager.js';
 import { tempDir } from './helpers/tmp.mjs';
 import { SPINNER } from '../dist/ui/format.js';
 import { FRAME_INTERVAL_MS } from '../dist/ui/status.js';
+import { AgentsPanel } from '../dist/ui/panel.js';
+import { TuiAltScreen, stripTerminalSequences, visibleWidth } from '@earendil-works/pi-tui';
+const { createChatViewport } = await import(new URL('./modes/interactive/chat-viewport.js', import.meta.resolve('@earendil-works/pi-coding-agent')));
 
 const fixture = fileURLToPath(new URL('./fixtures/pi.mjs', import.meta.url));
 const theme = { fg: (_color, text) => text, bold: (text) => text };
@@ -35,13 +38,14 @@ async function closeCompleted(manager, id) {
   return closed;
 }
 
-function harness(t) {
+function harness(t, tui) {
   const cwd = tempDir('ui-loop');
   const parent = path.join(cwd, 'parent.jsonl'); fs.writeFileSync(parent, '{}\n');
   const state = {
     cwd, parent, entries: [], messages: [], notices: [], widgetCalls: [], editors: [], confirms: [],
-    scripts: [], customCalls: 0, customActive: 0, mode: 'tui', editorAnswer: '', confirmAnswer: true, listeners: [], selections: [], selectAnswer: undefined,
+    scripts: [], customCalls: 0, customActive: 0, customs: [], mode: 'tui', editorAnswer: '', confirmAnswer: true, listeners: [], selections: [], selectAnswer: undefined,
   };
+  const surfaceTui = tui ?? { terminal: { columns: 120, rows: 35 }, requestRender() {} };
   const ctx = {
     cwd, hasUI: true, isProjectTrusted: () => false,
     get mode() { return state.mode; },
@@ -52,14 +56,29 @@ function harness(t) {
       notify(message, type) { state.notices.push({ message, type }); },
       setStatus() {},
       setWidget(key, content, options) { state.widgetCalls.push({ key, content, options }); },
-      onTerminalInput(listener) { state.listeners.push(listener); return () => { state.listeners.splice(state.listeners.indexOf(listener), 1); }; },
+      onTerminalInput(listener) {
+        state.listeners.push(listener); const remove = tui?.addInputListener?.(listener);
+        return () => { state.listeners.splice(state.listeners.indexOf(listener), 1); remove?.(); };
+      },
       getEditorText() { return ''; },
-      custom(factory) {
+      custom(factory, options) {
         state.customCalls += 1; state.customActive += 1;
         return new Promise((resolve, reject) => {
-          let settled = false;
-          const done = (result) => { if (!settled) { settled = true; state.customActive -= 1; resolve(result); } };
-          const component = factory({ terminal: { columns: 120, rows: 35 }, requestRender() {} }, theme, {}, done);
+          let settled = false, entry, overlay;
+          const done = (result) => {
+            if (settled) return;
+            settled = true; state.customActive -= 1;
+            if (entry) entry.active = false;
+            overlay?.hide(); resolve(result);
+          };
+          const component = factory(surfaceTui, theme, {}, done);
+          entry = { component, options, active: !settled, roster: component instanceof AgentsPanel };
+          state.customs.push(entry);
+          if (tui?.showOverlay && !settled) {
+            assert.equal(options?.overlay, true, 'interactive panels use the native overlay layer');
+            overlay = tui.showOverlay(component, options.overlayOptions);
+          }
+          if (entry.roster) return;
           const script = state.scripts.shift() ?? [];
           if (typeof script === 'function') { Promise.resolve(script(component, done)).catch(reject); return; }
           for (const key of script) component.handleInput(key);
@@ -96,8 +115,9 @@ function harness(t) {
   });
   return {
     // Getters keep test observations live instead of returning stale primitive snapshots.
-    state, ctx, pi, handlers, tools, commands, shortcuts, manager,
+    state, ctx, pi, handlers, tools, commands, shortcuts, manager, tui: surfaceTui,
     get customCalls() { return state.customCalls; },
+    get viewerCalls() { return state.customs.filter(entry => !entry.roster).length; },
     get messages() { return state.messages; },
     get notices() { return state.notices; },
     get widgetCalls() { return state.widgetCalls; },
@@ -118,23 +138,77 @@ function harness(t) {
     async spawn(task, role = 'worker') {
       return json(await this.invoke('subagent', { action: 'start', role, task, cwd }));
     },
-    /**
-     * The roster is a pane above the editor like the role editor, so it has no custom() overlay:
-     * keys go through its terminal-input listener, and only the conversation viewer is modal.
-     * A key is only accepted while the pane owns the keyboard, so presses retry around actions
-     * that open a host dialog or the viewer.
-     */
     async openAgents({ shortcut = false } = {}) {
-      const before = state.widgetCalls.length;
+      const customBefore = state.customs.length;
       const running = shortcut ? shortcuts.get('ctrl+alt+a').handler(ctx) : commands.get('agents').handler('', ctx);
-      const registered = await waitUntil('agents pane widget', () => state.widgetCalls.slice(before)
-        .find(call => call.key === 'cli-subagents-agents' && typeof call.content === 'function'));
-      const component = registered.content({ terminal: { rows: 35, columns: 120 }, requestRender() {} }, theme);
-      const press = (key) => waitUntil(`the agents pane to accept ${JSON.stringify(key)}`, () => state.listeners.at(-1)(key));
-      return { running, render: (width = 100) => component.render(width).join('\n'), press };
+      const current = () => state.customs.slice(customBefore).findLast(entry => entry.roster);
+      await waitUntil('agents panel', current);
+      const press = (key) => waitUntil(`the agents panel to accept ${JSON.stringify(key)}`, () => {
+        const entry = current();
+        if (!entry?.active) return undefined;
+        entry.component.handleInput(key); return { consume: true };
+      });
+      return { running, render: (width = 100) => current().component.render(width).join('\n'), press };
     },
   };
 }
+
+test('fullscreen host keeps the roster frame and selected identity visible through resize with sibling widgets', async t => {
+  const terminal = { rows: 35, columns: 160, kittyProtocolActive: false,
+    start(input, resize) { this.input = input; this.resize = resize; }, stop() {}, async drainInput() {},
+    write() {}, moveBy() {}, hideCursor() {}, showCursor() {}, clearLine() {}, clearFromCursor() {}, clearScreen() {}, setTitle() {}, setProgress() {} };
+  const tui = new TuiAltScreen(terminal, false, undefined, { mouse: false });
+  const h = harness(t, tui), agents = Array.from({ length: 9 }, (_, i) => ({
+    id: `agent00${i}`, runId: 'run', runtimeId: 'runtime', protocolVersion: 3, role: 'explore', phase: 'idle', lastStatus: 'completed',
+    questions: [], startedAt: i, updatedAt: 1000, task: `Task ${i}`, history: [], runCount: 1,
+  }));
+  t.mock.method(AgentManager.prototype, 'list', () => agents);
+  t.mock.method(AgentManager.prototype, 'reports', () => []);
+  const fixed = lines => ({ render: () => lines, invalidate() {} });
+  const components = new WeakMap();
+  const widgetsAbove = { invalidate() {}, render(width) {
+    const slots = new Map();
+    for (const call of h.widgetCalls) {
+      if (call.content === undefined) slots.delete(call.key); else slots.set(call.key, call.content);
+    }
+    return ['', ...[...slots.values()].flatMap(content => {
+      if (!components.has(content)) components.set(content, content(tui, theme));
+      return components.get(content).render(width);
+    })];
+  } };
+  const { root } = createChatViewport({ document: fixed(['CHAT']), pendingMessages: fixed([]), status: fixed([]), widgetsAbove,
+    editor: fixed(['EDITOR', 'INPUT', 'EDITOR']), footer: fixed(Array(4).fill('FOOTER')) });
+  tui.setLayoutRoot(root); tui.start();
+  let pane;
+  try {
+    h.start();
+    await waitUntil('status widget', () => h.widgetCalls.some(call => call.key === 'cli-subagents'));
+    h.ctx.ui.setWidget('fixture-todos', () => fixed(Array(6).fill('TODO')));
+    pane = await h.openAgents();
+    for (let i = 0; i < 6; i++) terminal.input(keys.down);
+    for (const [columns, rows] of [[160, 35], [100, 30], [60, 24], [40, 12], [30, 8], [180, 45]]) {
+      terminal.columns = columns; terminal.rows = rows; terminal.resize(); tui.renderNow(true);
+      const screen = tui.getScreenLines().map(stripTerminalSequences);
+      assert(screen.some(line => line.includes('›') && line.includes('agent006')), `selected identity clipped at ${columns}x${rows}`);
+      assert(screen.some(line => /^╭─+╮$/.test(line)), `top frame clipped at ${columns}x${rows}`);
+      assert(screen.some(line => /^╰─+╯$/.test(line)), `bottom frame clipped at ${columns}x${rows}`);
+      assert(screen.every(line => visibleWidth(line) <= columns && !/[\r\n]/.test(line)));
+      if (rows === 45) for (const agent of agents) assert(screen.some(line => line.includes(agent.id)), `roomy viewport unnecessarily hides ${agent.id}`);
+    }
+    terminal.rows = 12; terminal.columns = 60; terminal.resize();
+    for (let i = 0; i < agents.length; i++) terminal.input(keys.up);
+    for (const direction of [keys.down, keys.up]) for (let i = 0; i < agents.length; i++) {
+      tui.renderNow(true);
+      const selected = h.state.customs.at(-1).component.selection;
+      assert(tui.getScreenLines().map(stripTerminalSequences).some(line => line.includes('›') && line.includes(agents[selected].id)));
+      terminal.input(direction);
+    }
+    terminal.input(keys.escape); await pane.running; tui.renderNow(true);
+    assert(!tui.hasOverlay(), 'Esc disposes the native overlay and restores host focus');
+  } finally {
+    h.handlers.session_shutdown?.(); if (pane) await pane.running; tui.stop();
+  }
+});
 
 test('one monitor tick shares one live snapshot across reports and status without a bottom selector', t => {
   const h = harness(t), original = AgentManager.prototype.list;
@@ -165,8 +239,8 @@ test('one monitor tick shares one live snapshot across reports and status withou
 });
 
 test('open roster shares the status widget animation clock without extra reads or timers', async t => {
-  const h = harness(t), original = AgentManager.prototype.list;
   let calls = 0, redraws = 0;
+  const h = harness(t, { terminal: { columns: 160, rows: 35 }, requestRender() { redraws++; } }), original = AgentManager.prototype.list;
   const agent = { id: '00000000-0000-4000-8000-000000000001', runId: 'run', role: 'worker', phase: 'running',
     workerPid: process.pid, updatedAt: Date.now(), startedAt: Date.now(), questions: [], history: [], runCount: 1 };
   AgentManager.prototype.list = function () { calls++; return [agent]; };
@@ -175,11 +249,8 @@ test('open roster shares the status widget animation clock without extra reads o
   try {
     h.start(); t.mock.timers.tick(100);
     running = h.commands.get('agents').handler('', h.ctx);
-    const components = h.widgetCalls.filter(call => typeof call.content === 'function').map(call => ({
-      key: call.key, component: call.content({ terminal: { columns: 120, rows: 35 }, requestRender() { redraws++; } }, theme),
-    }));
-    const outer = components.find(c => c.key === 'cli-subagents').component;
-    const pane = components.find(c => c.key === 'cli-subagents-agents').component;
+    const outer = h.widgetCalls.find(call => call.key === 'cli-subagents' && typeof call.content === 'function').content(h.tui, theme);
+    const pane = h.state.customs.at(-1).component;
     const reads = calls, renders = redraws;
     for (let frame = 0; frame < 4; frame++) {
       assert(outer.render(160).join('\n').includes(`${SPINNER[frame]} worker`));
@@ -188,7 +259,7 @@ test('open roster shares the status widget animation clock without extra reads o
     }
     assert.equal(calls, reads, 'animation must not poll the manager');
     assert.equal(redraws - renders, 3, 'one shared 80ms timer requests rendering, not a second pane timer');
-    h.state.listeners.at(-1)('q'); await running;
+    pane.handleInput('q'); await running;
     const closedRenders = redraws;
     t.mock.timers.tick(FRAME_INTERVAL_MS);
     assert.equal(redraws, closedRenders + 1, 'closing the pane leaves only the existing outer animation');
@@ -201,8 +272,8 @@ test('open roster shares the status widget animation clock without extra reads o
 });
 
 test('open roster consumes monitor snapshots, updates elapsed time and detaches on close or session change', async t => {
-  const h = harness(t), original = AgentManager.prototype.list;
   let calls = 0, redraws = 0;
+  const h = harness(t, { terminal: { columns: 160, rows: 35 }, requestRender() { redraws++; } }), original = AgentManager.prototype.list;
   const agent = { id: '00000000-0000-4000-8000-000000000001', runId: 'run', runtimeId: 'runtime', protocolVersion: 3,
     role: 'worker', phase: 'running', workerPid: process.pid, updatedAt: 1000, startedAt: 1000, questions: [], history: [], runCount: 1 };
   let snapshot = [agent];
@@ -211,8 +282,7 @@ test('open roster consumes monitor snapshots, updates elapsed time and detaches 
   let running;
   const open = () => {
     running = h.commands.get('agents').handler('', h.ctx);
-    const registered = h.widgetCalls.findLast(call => call.key === 'cli-subagents-agents' && typeof call.content === 'function');
-    const pane = registered.content({ terminal: { columns: 160, rows: 35 }, requestRender() { redraws++; } }, theme);
+    const pane = h.state.customs.at(-1).component;
     return () => pane.render(160).join('\n');
   };
   try {
@@ -226,13 +296,13 @@ test('open roster consumes monitor snapshots, updates elapsed time and detaches 
     assert.equal(calls, reads + 1, 'the existing monitor supplies exactly one shared read');
     assert.match(rendered(), /Idle.*Completed/); assert.match(rendered(), /c release idle \(1\)/);
     snapshot = [{ ...agent, phase: 'waiting', questions: [{ id: 'q', method: 'confirm', title: 'Current question' }] }];
-    t.mock.timers.tick(800); h.state.listeners.at(-1)('i');
+    t.mock.timers.tick(800); h.state.customs.at(-1).component.handleInput('i');
     assert.match(rendered(), /Current question/); assert.match(rendered(), /r reply/);
     snapshot = [{ ...agent, phase: 'closed', runtimeClosed: true }];
     const beforeRelease = redraws; t.mock.timers.tick(800);
     assert(redraws > beforeRelease, 'the pane redraws even when all outer status rows disappear');
     assert.match(rendered(), /Subagents \(0\)/); assert.match(rendered(), /h history/);
-    h.state.listeners.at(-1)('q'); await running;
+    h.state.customs.at(-1).component.handleInput('q'); await running;
     const closedRedraws = redraws;
     snapshot = [{ ...agent, role: 'replacement', phase: 'idle' }]; t.mock.timers.tick(800);
     assert.equal(redraws, closedRedraws, 'closed panes receive no snapshots or redraws');
@@ -294,9 +364,10 @@ test('roster history resumes original sessions, releases only idle children, and
   await pane.press('h'); assert.match(pane.render(), /Subagents \(1\)/);
   await pane.press('i'); await pane.press('s');
   await pane.press(keys.escape); await pane.running;
-  assert.equal(h.customCalls, 0, 'the roster replaces neither the input box nor the transcript');
+  assert.equal(h.viewerCalls, 0);
+  assert(h.state.customs.filter(entry => entry.roster).every(entry => entry.options?.overlay === true), 'rosters use the native overlay');
   assert.match(h.editors[0], /Resume worker/);
-  assert.equal(h.widgetCalls.filter(call => call.key === 'cli-subagents-agents').at(-1).content, undefined, 'the pane is removed from above the editor');
+  assert(h.state.customs.every(entry => !entry.active), 'the roster closes before host dialogs and after dismissal');
   await waitUntil('resumed report', () => h.messages.some((entry) => entry.message.content.includes('panel-token')));
   const resumed = await waitForIdle(h.manager, agent.id);
   assert.equal(resumed.sessionId, sessionId, 'resume must retain the original session');
@@ -472,7 +543,7 @@ test('shortcut selects a running child and opens its live conversation directly'
   const pane = await h.openAgents({ shortcut: true });
   await pane.press(keys.down); await pane.press(keys.enter);
   await pane.press(keys.escape); await pane.running;
-  assert.equal(h.customCalls, 1, 'the shortcut opens the roster pane, and only the viewer is an overlay');
+  assert.equal(h.viewerCalls, 1, 'the shortcut opens the selected conversation once');
   assert.equal(h.manager.get(first.id).phase,'running');
   assert.equal(h.manager.get(second.id).phase,'running');
 });
@@ -518,7 +589,7 @@ test('conversation is wired to live worker logs and remains open after completio
   const pane = await h.openAgents();
   await pane.press(keys.enter);
   await pane.press(keys.escape); await pane.running;
-  assert.equal(h.customCalls, 1, 'closing the viewer returns to the pane instead of a second overlay');
+  assert.equal(h.viewerCalls, 1, 'closing the viewer returns to the roster without reopening the viewer');
   assert.equal(h.manager.get(agent.id).phase, 'idle');
   assert.equal(h.manager.get(agent.id).lastStatus, 'completed');
   assert.equal(h.manager.eventLogs(agent.id).length, 1);
@@ -566,7 +637,7 @@ test('the viewer reads a bounded tail, pages older history on demand and reuses 
   await pane.press(keys.enter);
   await pane.press(keys.enter);
   await pane.press(keys.escape); await pane.running;
-  assert.equal(h.customCalls, 2, 'each open uses one viewer overlay');
+  assert.equal(h.viewerCalls, 2, 'each open uses one viewer overlay');
   assert.deepEqual(fs.readFileSync(logFile), before, 'reading history must never rewrite the event log');
 });
 
@@ -681,8 +752,9 @@ test('session shutdown dismisses a live viewer without stopping its child or reo
   const pane = await h.openAgents();
   await pane.press(keys.enter);
   await pane.running;
-  assert.equal(h.customCalls, 1, 'shutdown must not reopen the roster');
-  assert.equal(h.widgetCalls.filter(call => call.key === 'cli-subagents-agents').at(-1).content, undefined, 'the pane is removed at shutdown');
+  assert.equal(h.viewerCalls, 1);
+  assert.equal(h.state.customs.filter(entry => entry.roster).length, 1, 'shutdown must not reopen the roster');
+  assert(h.state.customs.every(entry => !entry.active), 'shutdown dismisses every native surface');
   assert.equal(h.manager.get(agent.id).phase, 'running');
   assert.equal(processAlive(h.manager.get(agent.id).workerPid), true);
 });
