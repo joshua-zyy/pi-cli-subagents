@@ -139,15 +139,18 @@ test('idle batch reports partial failure per captured target without retrying su
     return result;
   });
   try {
-    h.open(); h.press('c'); await waitUntil('three idle action records', () => h.messages.length === 3, 2000);
+    h.open(); h.press('c'); await waitUntil('batch summary', () => h.notices.some(notice => notice.type === 'warning' && targets.every(target => notice.message.includes(target.id))), 2000);
+    assert.equal(h.messages.length, 1, 'one confirmation produces one passive Human action');
     assert.match(confirmation.title, /idle/i);
     for (const target of targets) assert(confirmation.message.includes(target.id));
     assert.deepEqual(calls, targets.map(({ id, runId, runtimeId }) => ({ id, onlyIdle: true, expected: { runId, runtimeId } })));
     assert(h.messages.every(entry => entry.options.triggerTurn === false && entry.message.details.ids === undefined));
-    assert.deepEqual(h.messages.map(entry => entry.message.details.runId), targets.map(target => target.runId));
-    assert.match(h.messages[0].message.content, /fixture target changed/);
-    assert.match(h.messages[1].message.content, /Native processes released/);
-    assert.match(h.messages[2].message.content, /unconfirmed/i);
+    const message = h.messages[0].message;
+    assert.deepEqual(message.details.batch, { total: 3, released: 1, unconfirmed: 2, notAttempted: 0, unknown: 0, interrupted: false });
+    for (const target of targets) for (const value of [target.id, target.runId, target.runtimeId]) assert(message.content.includes(value));
+    assert.match(message.content, /fixture target changed/);
+    assert.match(message.content, /Native processes released/);
+    assert.match(message.content, /unconfirmed/i);
     const summary = h.notices.find(notice => targets.every(target => notice.message.includes(target.id)));
     assert(summary); assert.equal(summary.type, 'warning');
   } finally { await h.close(); }
@@ -181,14 +184,16 @@ test('single idle release carries captured identity through confirmation and kee
   }finally{await h.close();}
 });
 
-test('successful batch release shows a concise count while preserving full passive action receipts', {timeout:5000}, async t=>{
-  const {h,targets,released}=idleBatch(t,2),calls=[];
+test('successful nine-target release produces one action with complete per-target evidence', {timeout:5000}, async t=>{
+  const {h,targets,released}=idleBatch(t,9),calls=[];
   t.mock.method(AgentManager.prototype,'close',async(id,onlyIdle,expected)=>{
     calls.push({id,onlyIdle,expected});return released(targets.find(target=>target.id===id));
   });
   try{
-    h.open();h.press('c');await waitUntil('batch records',()=>h.messages.length===2,2000);
-    assert.equal(calls.length,2);assert(h.notices.some(notice=>notice.type==='info'&&notice.message==='Released 2 idle subagents.'));
+    h.open();h.press('c');await waitUntil('batch completion',()=>h.notices.some(notice=>notice.message==='Released 9 idle subagents.'),2000);
+    assert.equal(calls.length,9);assert.equal(h.messages.length,1);
+    assert.deepEqual(h.messages[0].message.details.batch, {total:9,released:9,unconfirmed:0,notAttempted:0,unknown:0,interrupted:false});
+    for(const target of targets)for(const value of [target.id,target.runId,target.runtimeId])assert(h.messages[0].message.content.includes(value));
     assert(h.messages.every(entry=>entry.options.triggerTurn===false&&/Native processes released/.test(entry.message.content)));
   }finally{await h.close();}
 });
@@ -206,8 +211,33 @@ test('parent switch during idle batch stops further releases and retains the in-
     assert.equal(fs.existsSync(path.join(h.originalParent + '.subagents', targets[1].id, 'human-actions')), false);
     h.activate(h.originalParent); await waitUntil('original idle-release record', () => h.messages.length === 1, 2000);
     assert.equal(h.messages[0].parent, h.originalParent); assert.equal(h.messages[0].options.triggerTurn, false);
+    assert.deepEqual(h.messages[0].message.details.batch, {total:2,released:1,unconfirmed:0,notAttempted:1,unknown:0,interrupted:true});
+    assert(h.messages[0].message.content.includes(targets[1].id));
+    assert.match(h.messages[0].message.content,/not attempted/i);
     assert.deepEqual(calls, [targets[0].id], 'reopening the parent never replays the batch');
   } finally { finish.resolve(released(targets[0])); await h.close(); }
+});
+
+test('monitor ticks cannot publish a partial batch or lose its late outcome after a rapid parent return', { timeout: 5000 }, async t => {
+  const {h,targets,released}=idleBatch(t,3),entered=Promise.withResolvers(),finish=Promise.withResolvers(),calls=[];
+  t.mock.timers.enable({apis:['setInterval']});
+  t.mock.method(AgentManager.prototype,'close',async id=>{
+    calls.push(id);if(id===targets[1].id){entered.resolve();return finish.promise;}return released(targets.find(target=>target.id===id));
+  });
+  try {
+    h.activate(h.originalParent);h.open();h.press('c');await entered.promise;
+    t.mock.timers.tick(800);assert.equal(h.messages.length,0,'a running batch must not emit its first result as a separate card');
+    const folder=path.join(h.originalParent+'.subagents',targets[0].id,'human-actions');
+    const file=path.join(folder,fs.readdirSync(folder).find(name=>name.endsWith('.json')));
+    const progress=JSON.parse(fs.readFileSync(file,'utf8'));assert.equal(progress.batch.complete,false);
+    assert.deepEqual(progress.batch.targets.map(target=>target.status),['released','pending','pending']);
+    h.events.get('session_shutdown')();h.activate(path.join(h.root,'other-parent.jsonl'));h.activate(h.originalParent);
+    t.mock.timers.tick(800);assert.equal(h.messages.length,0,'reopening the parent cannot acknowledge an unfinished batch');
+    finish.resolve(released(targets[1]));await h.wait();t.mock.timers.tick(800);
+    assert.equal(h.messages.length,1);assert.deepEqual(calls,[targets[0].id,targets[1].id]);
+    assert.deepEqual(h.messages[0].message.details.batch,{total:3,released:2,unconfirmed:0,notAttempted:1,unknown:0,interrupted:true});
+    t.mock.timers.tick(1600);assert.equal(h.messages.length,1);
+  } finally {finish.resolve(released(targets[1]));await h.close();t.mock.timers.reset();}
 });
 
 test('parent switch while confirming idle batch prevents every release', { timeout: 5000 }, async t => {

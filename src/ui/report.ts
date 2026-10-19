@@ -1,6 +1,7 @@
 import { getMarkdownTheme, keyText, type MessageRenderer } from "@earendil-works/pi-coding-agent";
 import { Container, Markdown, Spacer, stripTerminalSequences, truncateToWidth } from "@earendil-works/pi-tui";
 import type { Report } from "../types.js";
+import type { HumanActionBatchSummary } from "../human-actions.js";
 import { oneLine } from "./format.js";
 
 type DisplayReport = Pick<Report, "agentId" | "status">;
@@ -29,7 +30,17 @@ export const renderReportMessage: MessageRenderer = (message, { expanded, output
 
 /** Human receipts remain passive and complete; this header never guesses success from their prose. */
 export const renderHumanActionMessage: MessageRenderer = (message, options, theme) => {
-  const details = message.details as { agentId?: string; role?: string } | undefined;
+  const details = message.details as { agentId?: string; role?: string; batch?: HumanActionBatchSummary } | undefined;
+  const batch = details?.batch;
+  if (batch && typeof batch.interrupted === "boolean" && Number.isInteger(batch.total) && batch.total > 0 &&
+    [batch.released, batch.unconfirmed, batch.notAttempted, batch.unknown].every(value => Number.isInteger(value) && value >= 0) &&
+    batch.released + batch.unconfirmed + batch.notAttempted + batch.unknown === batch.total) {
+    const counts = [[batch.unconfirmed, "unconfirmed"], [batch.unknown, "unrecorded"], [batch.notAttempted, "not attempted"], [batch.released, "released"]]
+      .filter(([count]) => Number(count) > 0).map(([count, label]) => `${count} ${label}`).join(" · ");
+    const warning = batch.unconfirmed > 0 || batch.unknown > 0 || batch.interrupted;
+    const title = `${options.expanded ? "▾" : "▸"} Human action · Batch idle release (${batch.total}) · ${counts}${batch.interrupted ? " · interrupted" : ""}`;
+    return renderCard(message, options, theme, theme.fg(warning ? "warning" : "dim", title));
+  }
   const identity = typeof details?.agentId === "string" && typeof details.role === "string"
     ? ` · ${oneLine(details.role, 40)} ${oneLine(details.agentId, 8)}` : "";
   return renderCard(message, options, theme, theme.fg("dim", `${options.expanded ? "▾" : "▸"} Human action${identity}`));

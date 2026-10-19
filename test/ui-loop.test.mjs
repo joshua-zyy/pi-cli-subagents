@@ -355,10 +355,11 @@ test('idle batch refuses a newly busy captured target, releases its idle sibling
   assert.equal(h.manager.get(active.id).phase, 'running'); assert.equal(h.manager.get(waiting.id).phase, 'waiting');
   assert.deepEqual([first, second].map(state => JSON.stringify(h.manager.getResult(state.id, state.runId))), results);
   const human = h.messages.filter(entry => entry.message.customType === 'cli-subagents-human-action');
-  assert.equal(human.length, 2); assert(human.every(entry => entry.options.triggerTurn === false));
-  assert.equal(human.find(entry => entry.message.details.agentId === a.id).message.details.runId, first.runId);
-  assert.match(human.find(entry => entry.message.details.agentId === a.id).message.content, /unconfirmed/i);
-  assert.match(human.find(entry => entry.message.details.agentId === b.id).message.content, /Native processes released/);
+  assert.equal(human.length, 1); assert(human.every(entry => entry.options.triggerTurn === false));
+  assert.deepEqual(human[0].message.details.batch, { total: 2, released: 1, unconfirmed: 1, notAttempted: 0, unknown: 0, interrupted: false });
+  for (const value of [a.id, first.runId, first.runtimeId, b.id, second.runId, second.runtimeId]) assert(human[0].message.content.includes(value));
+  assert.match(human[0].message.content, /unconfirmed/i);
+  assert.match(human[0].message.content, /Native processes released/);
   assert(h.notices.some(notice => notice.type === 'warning' && notice.message.includes(a.id) && notice.message.includes(b.id)));
 });
 

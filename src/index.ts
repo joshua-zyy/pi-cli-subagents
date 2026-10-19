@@ -6,7 +6,7 @@ import { getAgentDir, getMarkdownTheme, type ExtensionAPI, type ExtensionContext
 import { AgentManager } from "./manager.js";
 import { WorkspaceDecisionRequired, type ResumeOptions } from "./workspace.js";
 import { customType as reportType, deliverReports } from "./notifier.js";
-import { humanActionType, deliverHumanActions, saveHumanAction } from "./human-actions.js";
+import { humanActionType, createHumanActionBatch, deliverHumanActions, saveHumanAction, saveHumanActionBatch } from "./human-actions.js";
 import { renderReportMessage, renderHumanActionMessage } from "./ui/report.js";
 import { CLI_CHOICES, loadRoles, mergeRoles } from "./roles.js";
 import { detectClis, probeCatalog, type ModelCatalog } from "./cli-discovery.js";
@@ -630,33 +630,57 @@ ${view(state, args.action === "interrupt")}`);
     } finally { setOverlay(false); viewer?.dispose(); lease.release(); dismissPanel = undefined; }
   }
 
-  /** Release every captured idle target the roster selected once, reporting one outcome per target. */
+  /** One confirmation produces one passive action; every captured target keeps its own outcome. */
   async function releaseIdleTargets(ctx: ExtensionContext, manager: AgentManager, epoch: number, targets: AgentView[]): Promise<PanelStep> {
     if (!targets.length) return "next";
     const confirmed = await ctx.ui.confirm("Release idle subagent processes?", targets
       .map(target => `${oneLine(target.role, 120)} ${target.id} (run ${target.runId})`).join("\n")
       + "\n\nRelease only these captured idle runtimes. This can stop background work; sessions, files and completed results are retained. Changed or busy targets are refused, not retried.");
     if (!confirmed || epoch !== sessionEpoch) return "next";
-    const outcomes: string[] = [];
+    const outcomes: string[] = [], batch = createHumanActionBatch(manager, targets);
     let uncertain = false;
-    for (const target of targets) {
-      if (epoch !== sessionEpoch) return "stop";
-      let result = target, message: string;
+    const persist = () => {
       try {
-        result = await manager.close(target.id, true, { runId: target.runId, runtimeId: target.runtimeId! });
-        message = receiptText(result);
-        if (result.receipt?.status !== "released") uncertain = true;
+        saveHumanActionBatch(manager, batch);
+        if (batch.batch.complete && epoch === sessionEpoch) deliverHumanActions(manager, pi, ctx, humanPending);
       } catch (error) {
-        uncertain = true;
-        message = `Idle release request unconfirmed: ${(error as Error).message}\nInspect before retrying.`;
+        console.error("[pi-cli-subagents] Human batch action recording/delivery failed:", error);
+        if (epoch === sessionEpoch) try {
+          if (ctx.sessionManager.getSessionFile() === manager.parentFile)
+            ctx.ui.notify(`The parent action receipt is not confirmed: ${(error as Error).message}`, "warning");
+        } catch { /* A replaced parent UI is no longer available. */ }
       }
-      // Use the captured target on refusal, not a later run from a fresh list.
-      recordHumanAction(ctx, manager, result, `Batch idle release: ${message}`, epoch);
-      outcomes.push(`${oneLine(target.role, 120)} ${target.id}: ${message}`);
+    };
+    try {
+      for (const [index, target] of targets.entries()) {
+        if (epoch !== sessionEpoch) return "stop";
+        let result = target, message: string, released = false;
+        try {
+          result = await manager.close(target.id, true, { runId: target.runId, runtimeId: target.runtimeId! });
+          message = receiptText(result);
+          released = result.receipt?.status === "released";
+          if (!released) uncertain = true;
+        } catch (error) {
+          uncertain = true;
+          message = `Idle release request unconfirmed: ${(error as Error).message}\nInspect before retrying.`;
+        }
+        const item = batch.batch.targets[index];
+        item.status = released ? "released" : "unconfirmed";
+        item.text = message + (result.receipt ? `\nOperation receipt: ${JSON.stringify(result.receipt)}` : "");
+        persist();
+        outcomes.push(`${oneLine(target.role, 120)} ${target.id}: ${message}`);
+      }
+      if (epoch !== sessionEpoch) return "stop";
+      ctx.ui.notify(uncertain ? outcomes.join("\n") : `Released ${targets.length} idle subagent${targets.length === 1 ? "" : "s"}.`, uncertain ? "warning" : "info");
+      return "next";
+    } finally {
+      for (const item of batch.batch.targets) if (item.status === "pending") {
+        item.status = "not-attempted";
+        item.text = "Not attempted: the batch stopped before processing this captured target.";
+      }
+      batch.batch.complete = true;
+      persist();
     }
-    if (epoch !== sessionEpoch) return "stop";
-    ctx.ui.notify(uncertain ? outcomes.join("\n") : `Released ${targets.length} idle subagent${targets.length === 1 ? "" : "s"}.`, uncertain ? "warning" : "info");
-    return "next";
   }
 
   /** Confirm one captured interrupt, idle release, or uncertain-runtime recovery. */
