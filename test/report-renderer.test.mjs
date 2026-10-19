@@ -63,6 +63,38 @@ test('human actions default to one expandable line without changing evidence or 
   }
 });
 
+test('one batch Human action exposes result counts while preserving every expanded receipt', () => {
+  const renderer=registration().get('cli-subagents-human-action');
+  for(const batch of [
+    {total:9,released:9,unconfirmed:0,notAttempted:0,unknown:0,interrupted:false},
+    {total:3,released:1,unconfirmed:2,notAttempted:0,unknown:0,interrupted:false},
+    {total:3,released:1,unconfirmed:0,notAttempted:1,unknown:1,interrupted:true},
+  ]) {
+    const message={role:'custom',customType:'cli-subagents-human-action',timestamp:1,display:true,
+      details:{actionId:'batch-action',batch},content:'BATCH_BODY_MARKER\nFULL_RECEIPT\nThe words success and released are not metadata.'};
+    const original=JSON.stringify(message),llm=convertToLlm([message]),c=new CustomMessageComponent(message,renderer),collapsed=text(c,220);
+    assert.equal(collapsed.split('\n').filter(line=>line.trim()).length,1);
+    assert.match(collapsed,/Human action.*Batch idle release/); assert.match(collapsed,new RegExp(`${batch.released} released`));
+    if(batch.unconfirmed)assert.match(collapsed,new RegExp(`${batch.unconfirmed} unconfirmed`));
+    if(batch.notAttempted)assert.match(collapsed,/1 not attempted/);
+    if(batch.unknown)assert.match(collapsed,/1 unrecorded/);
+    if(batch.interrupted)assert.match(collapsed,/interrupted/);
+    assert.doesNotMatch(collapsed,/BATCH_BODY_MARKER|FULL_RECEIPT/);
+    c.setExpanded(true);assert.match(text(c),/FULL_RECEIPT/);
+    assert.equal(JSON.stringify(message),original);assert.deepEqual(convertToLlm([message]),llm);
+  }
+});
+
+test('invalid batch counts never turn receipt prose into a successful batch title', () => {
+  const renderer=registration().get('cli-subagents-human-action');
+  for(const batch of [null,{}, {total:2,released:9,unconfirmed:0,notAttempted:0,unknown:0,interrupted:false},
+    {total:2,released:1,unconfirmed:-1,notAttempted:2,unknown:0,interrupted:false}]) {
+    const message={role:'custom',customType:'cli-subagents-human-action',timestamp:1,display:true,details:{batch},content:'Everything released successfully'};
+    const c=new CustomMessageComponent(message,renderer);
+    assert.doesNotMatch(text(c),/Batch idle release|released|success/);c.setExpanded(true);assert.match(text(c),/Everything released/);
+  }
+});
+
 test('completed cards expand complete bodies without redundant links and preserve clipped result locators', () => {
   for (const clipped of [false, true]) {
     const r = report();

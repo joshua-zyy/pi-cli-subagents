@@ -7,7 +7,7 @@ import { randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { syncBuiltinESMExports } from 'node:module';
 import { AgentSession } from '@earendil-works/pi-coding-agent';
-import { humanActionType, saveHumanAction, deliverHumanActions } from '../dist/human-actions.js';
+import { humanActionType, createHumanActionBatch, saveHumanAction, saveHumanActionBatch, deliverHumanActions } from '../dist/human-actions.js';
 import { deliveredIds } from '../dist/notifier.js';
 import { readJson, writeJson } from '../dist/storage.js';
 import { tempDir } from './helpers/tmp.mjs';
@@ -22,7 +22,7 @@ function setup() {
     getBranch: () => { throw Error('receipts use the whole session, not just its active branch'); } } };
   h.pi = { sendMessage: (message, options) => sent.push({ message, options }) };
   h.agent = () => {
-    const agent = { id: randomUUID(), runId: randomUUID(), role: 'worker', phase: 'idle', lastStatus: 'completed' };
+    const agent = { id: randomUUID(), runId: randomUUID(), runtimeId: randomUUID(), role: 'worker', phase: 'idle', lastStatus: 'completed' };
     writeJson(path.join(manager.root, agent.id, 'spec.json'), { version: 1, id: agent.id, parentFile, roleName: agent.role });
     return agent;
   };
@@ -33,6 +33,11 @@ function setup() {
     const name = fs.readdirSync(folder).find(name => !before.includes(name));
     const file = path.join(folder, name);
     return { agent, file, record: readJson(file) };
+  };
+  h.batch = (count = 2) => {
+    const targets = Array.from({ length: count }, h.agent), record = createHumanActionBatch(manager, targets);
+    const file = path.join(manager.root, targets[0].id, 'human-actions', `${record.id}.json`);
+    return { targets, record, file };
   };
   h.deliver = (pending = h.pending) => deliverHumanActions(manager, h.pi, h.ctx, pending);
   return h;
@@ -55,6 +60,136 @@ function sdkHost(h, streaming) {
   };
   return { host, events, calls };
 }
+
+test('batch progress is atomic, captures plain identities, and stays undelivered until sealed', t => {
+  const h = setup(), targets = Array.from({ length: 9 }, h.agent);
+  for (const target of targets) { target.configuration = { secret: 'fixture-only' }; target.toJSON = () => { throw Error('never serialize an AgentView'); }; }
+  const before = targets.map(({ id, runId, runtimeId, role }) => ({ id, runId, runtimeId, role }));
+  const record = createHumanActionBatch(h.manager, targets), folder = path.join(h.manager.root, targets[0].id, 'human-actions');
+  assert.deepEqual(fs.readdirSync(folder), [`${record.id}.json`]);
+  h.deliver(); assert.equal(h.sent.length, 0); assert.equal(h.pending.size, 0);
+  const rename = fs.renameSync; let publications = 0;
+  const mock = t.mock.method(fs, 'renameSync', (temporary, file) => {
+    const next = readJson(temporary);
+    assert.equal(next.id, record.id); assert.equal(next.batch.targets.filter(target => target.status === 'released').length, publications + 1);
+    publications++; return rename(temporary, file);
+  }); syncBuiltinESMExports();
+  try {
+    for (const target of record.batch.targets) {
+      target.status = 'released'; target.text = `RECEIPT ${target.runtimeId}`; saveHumanActionBatch(h.manager, record); h.deliver();
+      assert.equal(h.sent.length, 0, 'monitor ticks cannot publish a partially filled batch');
+    }
+  } finally { mock.mock.restore(); syncBuiltinESMExports(); }
+  assert.equal(publications, 9);
+  targets[0].runId = randomUUID(); targets[0].role = 'changed';
+  record.batch.complete = true; saveHumanActionBatch(h.manager, record); h.deliver(); h.deliver();
+  assert.equal(h.sent.length, 1); assert.deepEqual(h.sent[0].options, { triggerTurn: false });
+  assert.deepEqual(h.sent[0].message.details.batch, { total: 9, released: 9, unconfirmed: 0, notAttempted: 0, unknown: 0, interrupted: false });
+  assert.equal(h.sent[0].message.details.agentId, undefined, 'a batch is not attributed to just its storage anchor');
+  for (const target of before) for (const value of [target.id, target.runId, target.runtimeId]) assert(h.sent[0].message.content.includes(value));
+  assert(!fs.readFileSync(path.join(folder, `${record.id}.json`), 'utf8').includes('fixture-only'));
+  assert.deepEqual(fs.readdirSync(folder), [`${record.id}.json`]);
+});
+
+test('different batches remain separate and synchronous receipt callbacks deduplicate each whole action', () => {
+  const h = setup(), a = h.batch(), b = h.batch();
+  for (const { record } of [a, b]) {
+    record.time = 1;
+    for (const item of record.batch.targets) { item.status = 'released'; item.text = 'Native release receipt'; }
+    record.batch.complete = true; saveHumanActionBatch(h.manager, record);
+  }
+  h.pi.sendMessage = (message, options) => { h.sent.push({ message, options }); h.entries.push({ type: 'custom_message', ...message }); h.deliver(); };
+  h.deliver(); h.deliver(new Set());
+  assert.equal(h.sent.length, 2); assert.deepEqual(new Set(h.sent.map(row => row.message.details.actionId)), new Set([a.record.id, b.record.id]));
+  assert.equal(h.pending.size, 0); assert.deepEqual([...deliveredIds(h.ctx)], []);
+});
+
+for (const streaming of [false, true]) test(`a complete batch uses one passive SDK message while ${streaming ? 'busy' : 'idle'}`, async () => {
+  const h = setup(), { record, file } = h.batch();
+  for (const item of record.batch.targets) { item.status = 'released'; item.text = 'Native release receipt'; }
+  record.batch.complete = true; saveHumanActionBatch(h.manager, record);
+  const { host, calls } = sdkHost(h, streaming);
+  h.deliver(); h.deliver(); await Promise.all(calls);
+  assert.equal(h.sent.length, 1); assert.equal(host._pendingNextTurnMessages.length, 0);
+  if (streaming) {
+    assert.equal(host._pendingCustomMessages.length, 1); assert.equal(h.entries.length, 0);
+    host._pendingCustomMessages = []; host.isStreaming = false; h.deliver(new Set()); await Promise.all(calls);
+    assert.equal(h.sent.length, 2, 'only the unacknowledged notification is replayed');
+  }
+  assert.equal(h.entries.length, 1); assert.equal(h.entries[0].details.actionId, record.id);
+  assert.equal(h.entries[0].details.batch.released, 2); assert.equal(fs.existsSync(file), true);
+  h.deliver(new Set()); await Promise.all(calls); assert.equal(h.entries.length, 1);
+});
+
+test('a dead batch writer recovers one interrupted notification without inventing unrecorded outcomes', () => {
+  const h = setup(), targets = Array.from({ length: 2 }, h.agent), module = new URL('../dist/human-actions.js', import.meta.url).href;
+  const id = execFileSync(process.execPath, ['--input-type=module', '-e', `
+    const {createHumanActionBatch,saveHumanActionBatch}=await import(${JSON.stringify(module)});
+    const manager=${JSON.stringify(h.manager)}, record=createHumanActionBatch(manager,${JSON.stringify(targets)});
+    record.batch.targets[0].status='released'; record.batch.targets[0].text='Confirmed first receipt';
+    saveHumanActionBatch(manager,record); console.log(record.id);
+  `], { encoding: 'utf8', windowsHide: true, timeout: 10000 }).trim();
+  const file = path.join(h.manager.root, targets[0].id, 'human-actions', `${id}.json`), evidence = fs.readFileSync(file);
+  h.current = 'another parent'; h.deliver(); assert.equal(h.sent.length, 0);
+  h.current = h.manager.parentFile; h.deliver(); h.deliver();
+  assert.equal(h.sent.length, 1);
+  assert.deepEqual(h.sent[0].message.details.batch, { total: 2, released: 1, unconfirmed: 0, notAttempted: 0, unknown: 1, interrupted: true });
+  assert.match(h.sent[0].message.content, /Confirmed first receipt/); assert.match(h.sent[0].message.content, /Outcome was not recorded/);
+  assert(h.sent[0].message.content.includes(targets[1].id)); assert.deepEqual(fs.readFileSync(file), evidence);
+});
+
+test('unknown batch-writer liveness leaves its evidence pending without blocking a healthy single action', t => {
+  const h = setup(), { file } = h.batch(), good = h.add('healthy single action'), evidence = fs.readFileSync(file), kill = process.kill;
+  t.mock.method(console, 'error', () => {});
+  t.mock.method(process, 'kill', function (pid, signal) { if (pid === process.pid && signal === 0) throw Object.assign(Error('unknown access'), { code: 'EPERM' }); return kill.call(process, pid, signal); });
+  h.deliver(); assert.deepEqual(h.sent.map(row => row.message.details.actionId), [good.record.id]);
+  assert.deepEqual(fs.readFileSync(file), evidence);
+});
+
+test('a failed progress publication keeps the last durable batch and never publishes memory-only success', t => {
+  const h = setup(), { record, file } = h.batch(), evidence = fs.readFileSync(file);
+  record.batch.targets[0].status = 'released'; record.batch.targets[0].text = 'Actual first outcome';
+  const mock = t.mock.method(fs, 'renameSync', () => { throw Error('fixture publication failed'); }); syncBuiltinESMExports();
+  try { assert.throws(() => saveHumanActionBatch(h.manager, record), /publication failed/); }
+  finally { mock.mock.restore(); syncBuiltinESMExports(); }
+  assert.deepEqual(fs.readFileSync(file), evidence); h.deliver(); assert.equal(h.sent.length, 0);
+  saveHumanActionBatch(h.manager, record);
+  record.batch.targets[1].status = 'not-attempted'; record.batch.targets[1].text = 'Not attempted after parent replacement';
+  record.batch.complete = true; saveHumanActionBatch(h.manager, record); h.deliver();
+  assert.equal(h.sent.length, 1); assert.equal(h.sent[0].message.details.batch.notAttempted, 1);
+});
+
+test('malformed batch shapes and foreign members are isolated without consuming their action receipts', t => {
+  const h = setup(), { record, file } = h.batch(), good = h.add('healthy sibling');
+  for (const item of record.batch.targets) { item.status = 'released'; item.text = 'Native release receipt'; }
+  record.batch.complete = true; saveHumanActionBatch(h.manager, record);
+  const bad = [
+    { ...record.batch, ownerPid: 0 }, { ...record.batch, complete: 'yes' }, { ...record.batch, targets: [] },
+    { ...record.batch, targets: [record.batch.targets[0], record.batch.targets[0]] },
+    { ...record.batch, targets: record.batch.targets.map(item => ({ ...item, runtimeId: 'bad' })) },
+    { ...record.batch, targets: record.batch.targets.map(item => ({ ...item, status: 'pending', text: '' })) },
+    { ...record.batch, targets: [record.batch.targets[0], { ...record.batch.targets[1], agentId: randomUUID() }] },
+  ];
+  const files = bad.map(batch => { const id = `ha-${randomUUID()}`, target = path.join(path.dirname(file), `${id}.json`); writeJson(target, { ...record, id, batch }); return target; });
+  const diagnostics = []; t.mock.method(console, 'error', (...args) => diagnostics.push(args));
+  h.deliver();
+  assert.deepEqual(new Set(h.sent.map(row => row.message.details.actionId)), new Set([record.id, good.record.id]));
+  assert.equal(diagnostics.length, files.length); assert(files.every(file => fs.existsSync(file)));
+  assert(h.sent.every(row => row.message.details.ids === undefined));
+});
+
+test('a linked non-anchor batch member cannot authorize or redirect a batch notification', t => {
+  const h = setup(), { record, targets, file } = h.batch();
+  for (const item of record.batch.targets) { item.status = 'released'; item.text = 'Native release receipt'; }
+  record.batch.complete = true; saveHumanActionBatch(h.manager, record);
+  const member = path.join(h.manager.root, targets[1].id), outside = path.join(h.cwd, 'outside-member'), evidence = fs.readFileSync(file);
+  fs.renameSync(member, outside); fs.symlinkSync(outside, member, process.platform === 'win32' ? 'junction' : 'dir');
+  t.mock.method(console, 'error', () => {});
+  try {
+    assert.throws(() => saveHumanActionBatch(h.manager, record), /Invalid human-action source/);
+    h.deliver(); assert.equal(h.sent.length, 0); assert.deepEqual(fs.readFileSync(file), evidence);
+  } finally { fs.unlinkSync(member); }
+});
 
 test('human actions atomically publish selected plain fields without serializing an agent or configuration', t => {
   const h = setup(), agent = h.agent(), text = 'Human response: literal 雪\nsecond line';
