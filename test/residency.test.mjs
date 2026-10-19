@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import { connect } from 'node:net';
 import { once } from 'node:events';
@@ -15,11 +15,11 @@ import { tempDir } from './helpers/tmp.mjs';
 const fixture = name => fileURLToPath(new URL(`./fixtures/${name}.mjs`, import.meta.url));
 const pi = { command: process.execPath, args: [fixture('pi')] };
 const role = { description: 'fixture only', instructions: 'test' };
-function setup(t, flags = [], piFlags = []) {
+function setup(t, flags = [], piFlags = [], Manager = AgentManager) {
   const cwd = tempDir('residency'), parent = path.join(cwd, 'parent.jsonl'), home = path.join(cwd, 'home');
   fs.mkdirSync(home); fs.writeFileSync(path.join(home, 'fixture-home'), ''); fs.writeFileSync(parent, '{}\n');
   const codex = { launch: { command: process.execPath, args: [fixture('codex'), ...flags] }, home };
-  const m = new AgentManager(parent, { ...pi, args: [...pi.args, ...piFlags] }, codex);
+  const m = new Manager(parent, { ...pi, args: [...pi.args, ...piFlags] }, codex);
   t.after(async () => { for (const s of m.list()) if (processAlive(s.workerPid)) await m.close(s.id); });
   return { cwd, parent, home, m, codex };
 }
@@ -168,6 +168,94 @@ test('a prior logical question cannot answer a later run reusing the native tool
   assert.notEqual(old.id, current.id);
   await assert.rejects(m.reply(first.id, old.id, { value: 'Unit' }), /ended|exist|pending/);
   await m.reply(first.id, current.id, { value: 'Integration' }); assert.match((await idle(m, first.id)).text, /Integration/);
+});
+
+/** Gate the real adapter return, not its native acknowledgement or the worker's state writer. */
+async function gatedStartup(t, mode = 'after') {
+  const copy = path.join(tempDir('i015-dist'), 'dist');
+  fs.cpSync(fileURLToPath(new URL('../dist', import.meta.url)), copy, { recursive: true });
+  fs.renameSync(path.join(copy, 'codex-adapter.js'), path.join(copy, 'codex-native.js'));
+  fs.writeFileSync(path.join(copy, 'codex-adapter.js'), `
+    import fs from 'node:fs';
+    import path from 'node:path';
+    import { CodexAdapter as Native } from './codex-native.js';
+    import { waitUntil } from './storage.js';
+    export class CodexAdapter extends Native {
+      constructor(options) { super(options); this.gates=path.join(options.spec.codexHome,'start-gates'); this.observer=options.onEvent; }
+      async start(message, runId) {
+        const before=${JSON.stringify(mode)}==='before'||${JSON.stringify(mode)}==='mixed'&&message.startsWith('HOLD');
+        if(before) { this.observer({type:'accepted',runId:'foreign-run'}); this.observer({type:'accepted'}); }
+        else await super.start(message,runId);
+        fs.writeFileSync(path.join(this.gates,runId+'.ready'),'');
+        await waitUntil('fixture start-return gate',()=>fs.existsSync(path.join(this.gates,runId+'.release'))||fs.existsSync(path.join(this.gates,'release-all')),5000);
+        if(before) await super.start(message,runId);
+        // The worker's await continuation drains before this check-phase marker.
+        setImmediate(()=>fs.writeFileSync(path.join(this.gates,runId+'.drained'),''));
+      }
+    }
+  `);
+  const { AgentManager: Manager } = await import(pathToFileURL(path.join(copy, 'manager.js')).href);
+  const h = setup(t, [], [], Manager), gates = path.join(h.home, 'start-gates'); fs.mkdirSync(gates);
+  const ready = async previous => waitUntil('native start-return gate reached', () => {
+    const state = h.m.list()[0];
+    return state && state.runId !== previous && fs.existsSync(path.join(gates,state.runId+'.ready')) ? state : undefined;
+  }, 5000);
+  const requests = () => fs.readFileSync(path.join(h.home,'requests.jsonl'),'utf8').trim().split('\n').map(JSON.parse);
+  const acknowledged = async state => waitUntil('native ACK in this run raw log', () => {
+    const request = requests().findLast(row=>row.method==='turn/start');
+    const records = fs.readFileSync(state.logFile,'utf8').split('\n').flatMap(line=>{try{return [JSON.parse(line)];}catch{return [];}});
+    return request && records.some(row=>row.id===request.id&&typeof row.result?.turn?.id==='string'&&row.result.turn.id.trim());
+  }, 5000);
+  return { ...h, ready, requests, acknowledged,
+    release: state => fs.writeFileSync(path.join(gates,state.runId+'.release'),''),
+    drained: state => waitUntil('worker await continuation drained',()=>fs.existsSync(path.join(gates,state.runId+'.drained')),5000),
+    releaseAll: () => fs.writeFileSync(path.join(gates,'release-all'),'') };
+}
+
+test('I-015 native ACK survives completion before worker start returns, initially and on a resident run', {timeout:15000}, async t=>{
+  const h=await gatedStartup(t),pending=[];
+  try {
+    const start=h.m.spawn('worker',{...role,cli:'codex',model:'fixture'},h.cwd,'REMEMBER alpha');pending.push(start);void start.catch(()=>{});
+    const first=await h.ready();await h.acknowledged(first);
+    const started=await start;for(const key of ['id','runId','runtimeId'])assert.equal(started[key],first[key],key);receipt(started,'start','accepted');
+    assert.equal(first.accepted,true);assert.equal(first.phase,'idle');assert.equal(first.lastStatus,'completed');
+    const original=JSON.stringify(h.m.getResult(first.id,first.runId));
+    h.release(first);await h.drained(first);
+    const send=h.m.send(first.id,'RECALL');pending.push(send);void send.catch(()=>{});
+    const next=await h.ready(first.runId);await h.acknowledged(next);
+    assert.equal(next.accepted,true,'native receipt must be durable before the resident control handler resumes');
+    assert.equal(next.phase,'idle');assert.equal(next.lastStatus,'completed');
+    h.release(next);receipt(await send,'send','accepted');
+    assert.equal((await idle(h.m,first.id)).text,'alpha');
+    assert.equal(JSON.stringify(h.m.getResult(first.id,first.runId)),original);
+    assert.equal(h.requests().filter(row=>row.method==='turn/start').length,2,'no retry or replay');
+    for(const key of ['workerPid','cliPid','runtimeId','sessionId'])assert.equal(next[key],first[key],key);
+  } finally {h.releaseAll();await Promise.allSettled(pending);}
+});
+
+test('I-015 unbound signals and a rejected native start never become acceptance', {timeout:15000}, async t=>{
+  const h=await gatedStartup(t,'before'),pending=[];
+  try {
+    const start=h.m.spawn('worker',{...role,cli:'codex',model:'fixture'},h.cwd,'REJECT');pending.push(start);void start.catch(()=>{});
+    const state=await h.ready();assert.equal(state.accepted,false);assert.equal(state.phase,'starting');
+    assert.equal(h.requests().filter(row=>row.method==='turn/start').length,0,'the native request is still gated');
+    h.release(state);const result=await start;receipt(result,'start','unconfirmed');
+    assert.equal(result.accepted,false);assert.equal(result.lastStatus,'failed');assert.match(result.error,/fixture rejected submission/);
+  } finally {h.releaseAll();await Promise.allSettled(pending);}
+});
+
+test('I-015 an older start continuation cannot acknowledge a newer gated run', {timeout:15000}, async t=>{
+  const h=await gatedStartup(t,'mixed'),pending=[];
+  try {
+    const start=h.m.spawn('worker',{...role,cli:'codex',model:'fixture'},h.cwd,'REMEMBER alpha');pending.push(start);void start.catch(()=>{});
+    const first=await h.ready();await start;
+    const send=h.m.send(first.id,'HOLD second');pending.push(send);void send.catch(()=>{});
+    const next=await h.ready(first.runId);assert.equal(next.accepted,false);
+    h.release(first);await h.drained(first);
+    const current=h.m.get(first.id);assert.equal(current.runId,next.runId);assert.equal(current.accepted,false,'the old await must not confirm a new run');
+    assert.equal(current.phase,'starting');assert.equal(h.requests().filter(row=>row.method==='turn/start').length,1);
+    h.release(next);receipt(await send,'send','accepted');
+  } finally {h.releaseAll();await Promise.allSettled(pending);}
 });
 
 for (const cli of ['pi', 'codex']) test(`${cli} keeps one worker/CLI and distinct results across idle turns`, { timeout: 25000 }, async t => {
