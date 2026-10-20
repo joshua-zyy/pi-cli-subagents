@@ -135,7 +135,7 @@ test('Claude public query and parent reply preserve the native task, report fiel
 test('Claude native rule-forced questions show the signal to the parent and still accept one complete human form', {timeout:20000}, async t=>{
   const {m,cwd,parent,done}=setup(t);let multiPrompts=0,input;
   const {ctx,commands,notices,messages}=publicApi(parent,cwd,{
-    theme:{fg:(_,text)=>text,bold:text=>text},setWidget(){},onTerminalInput(fn){input=fn;return()=>{input=undefined;};},
+    theme:{fg:(_,text)=>text,bold:text=>text},setWidget(key,content){if(key==='cli-subagents-agents'&&typeof content==='function')content({terminal:{rows:35,columns:120},requestRender(){}},ctx.ui.theme);},onTerminalInput(fn){input=fn;return()=>{input=undefined;};},
     custom(factory){return new Promise(resolve=>{
       const component=factory({terminal:{rows:35,columns:120},requestRender(){}},ctx.ui.theme,{},resolve);
       input=data=>component.handleInput(data);

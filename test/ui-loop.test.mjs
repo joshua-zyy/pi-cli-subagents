@@ -55,7 +55,12 @@ function harness(t, tui) {
       theme: { getThinkingBorderColor: () => (text) => text, fg: (_color, text) => text, bg: (_color, text) => text, bold: (text) => text },
       notify(message, type) { state.notices.push({ message, type }); },
       setStatus() {},
-      setWidget(key, content, options) { state.widgetCalls.push({ key, content, options }); },
+      setWidget(key, content, options) {
+        state.widgetCalls.push({ key, content, options });
+        if(key!=='cli-subagents-agents')return;
+        const prior=state.customs.findLast(entry=>entry.roster&&entry.active);if(prior)prior.active=false;
+        if(typeof content==='function')state.customs.push({component:content(surfaceTui,ctx.ui.theme),options,active:true,roster:true,widgetFactory:content});
+      },
       onTerminalInput(listener) {
         state.listeners.push(listener); const remove = tui?.addInputListener?.(listener);
         return () => { state.listeners.splice(state.listeners.indexOf(listener), 1); remove?.(); };
@@ -146,14 +151,14 @@ function harness(t, tui) {
       const press = (key) => waitUntil(`the agents panel to accept ${JSON.stringify(key)}`, () => {
         const entry = current();
         if (!entry?.active) return undefined;
-        entry.component.handleInput(key); return { consume: true };
+        return state.listeners.at(-1)?.(key);
       });
       return { running, render: (width = 100) => current().component.render(width).join('\n'), press };
     },
   };
 }
 
-test('fullscreen host keeps the roster frame and selected identity visible through resize with sibling widgets', async t => {
+test('fixed dock keeps its frame, input and selected identity through resize and internal navigation', async t => {
   const terminal = { rows: 35, columns: 160, kittyProtocolActive: false,
     start(input, resize) { this.input = input; this.resize = resize; }, stop() {}, async drainInput() {},
     write() {}, moveBy() {}, hideCursor() {}, showCursor() {}, clearLine() {}, clearFromCursor() {}, clearScreen() {}, setTitle() {}, setProgress() {} };
@@ -172,39 +177,47 @@ test('fullscreen host keeps the roster frame and selected identity visible throu
       if (call.content === undefined) slots.delete(call.key); else slots.set(call.key, call.content);
     }
     return ['', ...[...slots.values()].flatMap(content => {
-      if (!components.has(content)) components.set(content, content(tui, theme));
+      if (!components.has(content)) components.set(content, h.state.customs.find(entry=>entry.widgetFactory===content)?.component??content(tui, theme));
       return components.get(content).render(width);
     })];
   } };
+  let editorRows=3;const editorKeys=[];
+  const editor={focused:false,render:()=>['EDITOR','INPUT',...Array(editorRows-3).fill('WRAPPED-DRAFT'),'EDITOR'],invalidate(){},handleInput:key=>editorKeys.push(key)};
   const { root } = createChatViewport({ document: fixed(['CHAT']), pendingMessages: fixed([]), status: fixed([]), widgetsAbove,
-    editor: fixed(['EDITOR', 'INPUT', 'EDITOR']), footer: fixed(Array(4).fill('FOOTER')) });
-  tui.setLayoutRoot(root); tui.start();
+    editor, footer: fixed(Array(2).fill('FOOTER')) });
+  tui.setLayoutRoot(root);tui.setFocus(editor);tui.start();
   let pane;
   try {
     h.start();
-    h.ctx.ui.setWidget('fixture-status', () => fixed(Array(10).fill('STATUS')));
     h.ctx.ui.setWidget('fixture-todos', () => fixed(Array(6).fill('TODO')));
     pane = await h.openAgents();
     for (let i = 0; i < 6; i++) terminal.input(keys.down);
-    for (const [columns, rows] of [[160, 35], [100, 30], [60, 24], [40, 12], [30, 8], [180, 45]]) {
+    for (const [columns, rows, draftRows=3] of [[160, 35], [100, 30], [60, 24], [60, 16, 7], [40, 12], [40, 10], [180, 45]]) {
+      editorRows=draftRows;
+      // External widgets cannot all fit a ten-line terminal; exercise coexistence where room exists.
+      h.ctx.ui.setWidget('fixture-todos',rows>=24?()=>fixed(Array(6).fill('TODO')):undefined);
       terminal.columns = columns; terminal.rows = rows; terminal.resize(); tui.renderNow(true);
       const screen = tui.getScreenLines().map(stripTerminalSequences);
       assert(screen.some(line => line.includes('›') && line.includes('agent006')), `selected identity clipped at ${columns}x${rows}`);
       assert(screen.some(line => /^╭─+╮$/.test(line)), `top frame clipped at ${columns}x${rows}`);
       assert(screen.some(line => /^╰─+╯$/.test(line)), `bottom frame clipped at ${columns}x${rows}`);
       assert(screen.every(line => visibleWidth(line) <= columns && !/[\r\n]/.test(line)));
+      assert.equal(tui.hasOverlay(),false);assert(screen.includes('INPUT'));assert(screen.some(line=>line.includes('CHAT')));
+      assert(screen.findIndex(line=>/^╰─+╯$/.test(line))<screen.indexOf('INPUT'));
       if (rows === 45) for (const agent of agents) assert(screen.some(line => line.includes(agent.id)), `roomy viewport unnecessarily hides ${agent.id}`);
     }
-    terminal.rows = 12; terminal.columns = 60; terminal.resize();
+    h.ctx.ui.setWidget('fixture-todos',undefined);terminal.rows = 10; terminal.columns = 60; terminal.resize();
     for (let i = 0; i < agents.length; i++) terminal.input(keys.up);
+    let selected=0;
     for (const direction of [keys.down, keys.up]) for (let i = 0; i < agents.length; i++) {
       tui.renderNow(true);
-      const selected = h.state.customs.at(-1).component.selection;
-      assert(tui.getScreenLines().map(stripTerminalSequences).some(line => line.includes('›') && line.includes(agents[selected].id)));
+      assert(tui.getScreenLines().map(stripTerminalSequences).some(line=>line.includes('›')&&line.includes(agents[selected].id)));
       terminal.input(direction);
+      selected=Math.max(0,Math.min(agents.length-1,selected+(direction===keys.down?1:-1)));
     }
     terminal.input(keys.escape); await pane.running; tui.renderNow(true);
-    assert(!tui.hasOverlay(), 'Esc disposes the native overlay and restores host focus');
+    assert(!tui.hasOverlay());assert.equal(tui.getFocusedComponent(),editor,'the pane never replaces parent editor focus');
+    terminal.input('z');assert.deepEqual(editorKeys,['z'],'navigation is consumed and Esc restores ordinary input');
   } finally {
     h.handlers.session_shutdown?.(); if (pane) await pane.running; tui.stop();
   }
@@ -254,16 +267,17 @@ test('open roster shares the status widget animation clock without extra reads o
     const pane = h.state.customs.at(-1).component;
     const reads = calls, renders = redraws;
     for (let frame = 0; frame < 4; frame++) {
-      assert(outer.render(160).join('\n').includes(`${SPINNER[frame]} worker`));
+      assert.deepEqual(outer.render(160),[],'the open roster hides the duplicate activity summary without stopping its clock');
       assert(pane.render(160).join('\n').includes(`${SPINNER[frame]} worker`), `roster frame ${frame}`);
       if (frame < 3) t.mock.timers.tick(FRAME_INTERVAL_MS);
     }
     assert.equal(calls, reads, 'animation must not poll the manager');
     assert.equal(redraws - renders, 3, 'one shared 80ms timer requests rendering, not a second pane timer');
-    pane.handleInput('q'); await running;
+    h.state.listeners.at(-1)('q'); await running;
     const closedRenders = redraws;
     t.mock.timers.tick(FRAME_INTERVAL_MS);
     assert.equal(redraws, closedRenders + 1, 'closing the pane leaves only the existing outer animation');
+    assert(outer.render(160).join('\n').includes(`${SPINNER[4]} worker`),'closing the roster restores the active summary');
     h.handlers.session_shutdown(); const stopped = redraws;
     t.mock.timers.tick(1000); assert.equal(redraws, stopped, 'shutdown stops the shared animation');
   } finally {
@@ -297,13 +311,13 @@ test('open roster consumes monitor snapshots, updates elapsed time and detaches 
     assert.equal(calls, reads + 1, 'the existing monitor supplies exactly one shared read');
     assert.match(rendered(), /Idle.*Completed/); assert.match(rendered(), /c release idle \(1\)/);
     snapshot = [{ ...agent, phase: 'waiting', questions: [{ id: 'q', method: 'confirm', title: 'Current question' }] }];
-    t.mock.timers.tick(800); h.state.customs.at(-1).component.handleInput('i');
+    t.mock.timers.tick(800); h.state.listeners.at(-1)('i');
     assert.match(rendered(), /Current question/); assert.match(rendered(), /r reply/);
     snapshot = [{ ...agent, phase: 'closed', runtimeClosed: true }];
     const beforeRelease = redraws; t.mock.timers.tick(800);
     assert(redraws > beforeRelease, 'the pane redraws even when all outer status rows disappear');
     assert.match(rendered(), /Subagents \(0\)/); assert.match(rendered(), /h history/);
-    h.state.customs.at(-1).component.handleInput('q'); await running;
+    h.state.listeners.at(-1)('q'); await running;
     const closedRedraws = redraws;
     snapshot = [{ ...agent, role: 'replacement', phase: 'idle' }]; t.mock.timers.tick(800);
     assert.equal(redraws, closedRedraws, 'closed panes receive no snapshots or redraws');
@@ -366,7 +380,7 @@ test('roster history resumes original sessions, releases only idle children, and
   await pane.press('i'); await pane.press('s');
   await pane.press(keys.escape); await pane.running;
   assert.equal(h.viewerCalls, 0);
-  assert(h.state.customs.filter(entry => entry.roster).every(entry => entry.options?.overlay === true), 'rosters use the native overlay');
+  assert(h.state.customs.filter(entry => entry.roster).every(entry => entry.options?.placement === 'aboveEditor'&&entry.options?.overlay===undefined), 'rosters use the public above-editor widget');
   assert.match(h.editors[0], /Resume worker/);
   assert(h.state.customs.every(entry => !entry.active), 'the roster closes before host dialogs and after dismissal');
   await waitUntil('resumed report', () => h.messages.some((entry) => entry.message.content.includes('panel-token')));

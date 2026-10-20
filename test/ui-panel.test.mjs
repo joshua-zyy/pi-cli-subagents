@@ -150,9 +150,14 @@ test('the pane is framed like the role editor, in every view', () => {
   assert.match(painted[0], /^<╭─+╮>$/); assert.match(painted[1], /^<│> /);
 });
 
-test('native pane budget follows terminal height instead of capping a roomy roster', () => {
-  assert.equal(paneRows(120, 'list'), 84);
-  assert.equal(paneRows(35, 'list'), 24);
+test('fixed pane budgets dock chrome before content and expands without an artificial item cap', () => {
+  assert.equal(paneRows(120, 'list'), 40);
+  assert.equal(paneRows(35, 'list'), 11);
+  for(const mode of ['list','detail']){
+    assert.equal(paneRows(10,mode),3,'ten lines fit a frame and selection above the normal dock');
+    assert.equal(paneRows(11,mode,1),3,'a question adds one footer line');
+    assert(paneRows(24,mode,2)<=15,'extra parent/footer rows consume the same budget');
+  }
   assert.equal(paneRows(35, 'detail'), 24);
   for (const height of [1, 2, 4, 8, 24, 35, 120]) for (const mode of ['list', 'detail']) {
     assert(paneRows(height, mode) >= 1 && paneRows(height, mode) <= height);
@@ -214,7 +219,7 @@ test('roomy bounded rosters show all nine instances without an artificial row ca
   const agents = Array.from({ length: 9 }, (_, i) => view({ id: `agent00${i}`, startedAt: i }));
   const p = panel(agents, { rows: () => paneRows(height, 'list') });
   for (let i = 0; i < 8; i++) p.instance.handleInput(keys.down);
-  for (height of [45, 30, 60]) {
+  for (height of [45, 60, 120]) {
     const rendered = text(p.framed(140));
     for (const agent of agents) assert(rendered.includes(agent.id), `height ${height} unnecessarily hides ${agent.id}`);
     assert.doesNotMatch(rendered, /[↑↓] \d+ more/);

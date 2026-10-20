@@ -100,6 +100,7 @@ export class StatusWidget {
   private frame = 0;
   private tui: WidgetTui | undefined;
   private registered = false;
+  private hidden = false;
   private interval: NodeJS.Timeout | undefined;
   private disposed = false;
   private lastError: string | undefined;
@@ -117,6 +118,13 @@ export class StatusWidget {
 
   /** Editor panes share this clock; they must not start a second animation timer. */
   get animationFrame(): number { return this.frame; }
+
+  /** Keep the existing animation/snapshot clock, but avoid duplicating the open roster. */
+  setHidden(hidden: boolean): void {
+    if (this.disposed) return;
+    this.hidden = hidden;
+    this.tui?.requestRender();
+  }
 
   update(): void {
     if (this.disposed) return;
@@ -155,7 +163,7 @@ export class StatusWidget {
     this.host.setWidget(this.key, (tui, theme) => {
       this.tui = tui;
       return {
-        render: (width: number) => statusLines(this.snapshot, { now: Date.now(), frame: this.frame, width, theme }),
+        render: (width: number) => this.hidden ? [] : statusLines(this.snapshot, { now: Date.now(), frame: this.frame, width, theme }),
         invalidate: () => {},
       };
     });

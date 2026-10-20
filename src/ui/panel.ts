@@ -25,19 +25,21 @@ const DETAIL_MIN_ROWS = 12;
 const PANE_SHARE = 0.7;
 
 /**
- * Bound the native overlay to the current terminal, not the widget dock's unknown allocation.
- * A short roster uses only the rows it needs; a roomy viewport must not impose an eight-item cap.
+ * Keep the roster compact above the editor; details use a larger share for readable results.
  */
-export function paneRows(terminalRows: number, mode: "list" | "detail"): number {
+export function paneRows(terminalRows: number, mode: "list" | "detail", extraDockRows = 0): number {
   const rows = Number.isFinite(terminalRows) && terminalRows > 0 ? Math.floor(terminalRows) : 24;
-  const wanted = Math.max(mode === "detail" ? DETAIL_MIN_ROWS : 6, Math.floor(rows * PANE_SHARE));
-  return Math.max(1, Math.min(rows - 4, wanted));
+  const wanted = mode === "detail"
+    ? Math.max(DETAIL_MIN_ROWS, Math.floor(rows * PANE_SHARE))
+    : Math.max(6, Math.floor(rows / 3));
+  // Chat (1), widget spacer (1), editor (3), normal footer (2); known extra dock rows also count.
+  return Math.max(1, Math.min(rows - 7 - extraDockRows, wanted));
 }
 
 const isText = (value: string | undefined): value is string => typeof value === "string" && value.trim().length > 0;
 
 /**
- * Snapshot-based /agents roster inside a native Pi overlay.
+ * Snapshot-based /agents roster, rendered above the editor like the role settings pane.
  * It returns actions; the command handler performs send/close/reply after the pane closes.
  */
 export class AgentsPanel {
