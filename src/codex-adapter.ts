@@ -422,6 +422,9 @@ export class CodexAdapter implements CliAdapter {
       // turn; a stale turn/started must never switch our foreground identity.
       const staged = this.staged!; this.staged = undefined;
       for (const record of staged) this.record(record);
+      // Install staged blocking interactions first. Completion is queued on `completion`,
+      // so this bound ACK still reaches the worker before its terminal publication.
+      this.emit({ type: "accepted" });
     })();
     try { await this.starting; }
     catch (error) { this.poisoned = new Error(`Codex start is uncertain; stop/release before new work: ${(error as Error).message}`); throw this.poisoned; }

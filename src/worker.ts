@@ -64,6 +64,11 @@ async function run(dir: string, runId: string): Promise<void> {
     if (!ending && state.phase !== "unreachable") state.phase = blocking ? "waiting" : runOpen ? state.accepted ? "running" : "starting" : "idle";
     if (!blocking || ending || state.phase === "unreachable") { unblockStartup?.(); unblockStartup = undefined; }
   };
+  // A late start continuation may belong to a run that has already been replaced.
+  function acknowledgeStart(capturedRunId: string): void {
+    if (capturedRunId !== runId || state.accepted) return;
+    state.accepted = true; refreshPhase(); if (!released) save();
+  }
   let commandQueue = Promise.resolve();
   const timers = new Map<string, NodeJS.Timeout>();
   let resolveFinished!: () => void;
@@ -135,6 +140,7 @@ async function run(dir: string, runId: string): Promise<void> {
 
   function event(record: AdapterEvent): void {
     if (ending || (record.runId !== undefined && record.runId !== runId)) return;
+    if (record.type === "accepted" && record.runId !== undefined) acknowledgeStart(record.runId);
     if (record.type === "uncertain") { state.phase = "unreachable"; state.error = record.error; save(); }
     if (record.type === "activity") {
       const label = state.lastActivity, phase = state.phase;
@@ -191,8 +197,8 @@ async function run(dir: string, runId: string): Promise<void> {
       delete state.error; delete state.resultFile; delete state.lastStatus; delete state.lastActivity;
       save(); endpoint();
       try {
-        runCaptured = true; await rpc.start(input.message, runId); state.accepted = true; refreshPhase(); save();
-        receipt = { operation: "start", status: "accepted", runId, runtimeId };
+        runCaptured = true; await rpc.start(input.message, next); acknowledgeStart(next);
+        receipt = { operation: "start", status: "accepted", runId: next, runtimeId };
       }
       catch (error) { await release(true, { status: "failed", text: finalText, error: (error as Error).message }); throw error; }
     } else if (input.type === "interrupt") {
@@ -317,9 +323,10 @@ async function run(dir: string, runId: string): Promise<void> {
     while (!ending && state.phase !== "unreachable" && state.questions.some(q => q.isBlocking !== false))
       await new Promise<void>(resolve => { unblockStartup = resolve; });
     if (!ending && state.phase !== "unreachable") {
+      const captured = runId;
       runCaptured = true;
-      await rpc.start(start.message, runId);
-      state.accepted = true; refreshPhase(); if (!released) save();
+      await rpc.start(start.message, captured);
+      acknowledgeStart(captured);
     }
     await finished;
   } catch (error) {

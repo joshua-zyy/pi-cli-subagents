@@ -71,6 +71,41 @@ test('Codex confirmed steer rejection does not poison a healthy active turn', as
   assert.equal(events.some(e => e.type === 'uncertain'), false);
 });
 
+test('Codex publishes the bound native acknowledgement before completion, including failed turns', async t=>{
+  const {client}=setup(t),{c,events}=client();await c.ready();
+  for(const [runId,message,status] of [['one','REMEMBER alpha','completed'],['two','FAIL','failed']]) {
+    await c.start(message,runId);assert.equal((await runSettled(events,runId)).status,status);
+    assert.deepEqual(events.filter(event=>event.runId===runId&&['accepted','settled'].includes(event.type)).map(event=>event.type),['accepted','settled']);
+  }
+});
+
+test('Codex installs staged blocking approvals before exposing the native acknowledgement', async t=>{
+  const {client}=setup(t),{c,events}=client(undefined,['--delay-start']);await c.ready();
+  await c.start('MCP_APPROVAL','bound');
+  const question=events.findIndex(event=>event.type==='question'&&event.runId==='bound');
+  const accepted=events.findIndex(event=>event.type==='accepted'&&event.runId==='bound');
+  assert(question>=0);assert(accepted>question,'a staged blocking request must be visible before acceptance is published');
+});
+
+test('Codex acknowledgement persistence failure rejects startup and blocks replay', async t=>{
+  const {client}=setup(t),{c,events}=client();await c.ready();const record=c.options.onEvent;
+  c.options.onEvent=event=>{if(event.type==='accepted')throw Error('fixture ACK persistence failed');record(event);};
+  await assert.rejects(c.start('HOLD','bound'),/fixture ACK persistence failed/);
+  await assert.rejects(c.start('REPLAY','next'),/fixture ACK persistence failed/);
+  await assert.rejects(c.send('REPLAY','steer'),/fixture ACK persistence failed/);
+  await c.stop();await c.closed;assert.notEqual(c.child.exitCode??c.child.signalCode,null);
+});
+
+test('Codex never acknowledges a missing, blank or invalid native turn ID', async t=>{
+  const {client}=setup(t);
+  for(const payload of [{},{turn:{id:''}},{turn:{id:' '}},{turn:{id:42}}]) {
+    const {c,events}=client();await c.ready();const request=c.request.bind(c);let starts=0;
+    t.mock.method(c,'request',(method,params)=>method==='turn/start'?(starts++,Promise.resolve(payload)):request(method,params));
+    await assert.rejects(c.start('must not be accepted','bound'),/did not acknowledge a turn ID/);
+    assert.equal(starts,1);assert.equal(events.some(event=>event.type==='accepted'),false);await c.stop();
+  }
+});
+
 test('Codex role without a model inherits the native default and is not pinned against provider fallback', async t => {
   const { client, requests, spec } = setup(t, { role: { cli: 'codex', description: 'test', instructions: 'Do only the assigned work.' } });
   const { c, events } = client(); const session = await c.ready();
@@ -786,7 +821,9 @@ test('Codex still closes after both question and failure-event persistence throw
     if (event.type === 'question') failed = true;
     if (failed) throw new Error('fixture persistent event failure');
   };
-  await c.start('APPROVAL', 'failed-sink');
+  // The failed sink now also rejects acknowledgement persistence; startup must surface that error.
+  await assert.rejects(c.start('APPROVAL', 'failed-sink'), /fixture persistent event failure/);
+  assert.equal(failed, true, 'the original question persistence failure must still be exercised');
   await waitUntil('fixture CLI closed after event failure', () => c.child.exitCode !== null || c.child.signalCode !== null, 10_000);
   await c.closed;
   assert.equal(c.approvals.size, 0);

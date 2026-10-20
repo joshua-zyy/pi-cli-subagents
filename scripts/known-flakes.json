@@ -6,12 +6,6 @@
       "test": "multiple approvals without cancellation receipts do not delay worker interruption",
       "ledger": "I-007",
       "note": "Timing-sensitive interruption path; isolated reruns pass. Not a product assertion change."
-    },
-    {
-      "file": "residency.test.mjs",
-      "test": "codex keeps one worker/CLI and distinct results across idle turns",
-      "ledger": "I-015",
-      "note": "Receipt status race under load; isolated reruns pass."
     }
   ]
 }

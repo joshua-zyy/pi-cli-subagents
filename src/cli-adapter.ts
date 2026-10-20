@@ -2,6 +2,8 @@ import type { Exit } from "./pi-process.js";
 import type { AgentSpec, Control, Delivery, NativeSession, Question, SessionHandle } from "./types.js";
 
 export type AdapterEvent =
+  /** Native input acknowledgement, not a successful execution outcome. */
+  | { type: "accepted"; runId?: string }
   | { type: "uncertain"; error: string; runId?: string }
   | { type: "activity"; detail: string; runId?: string }
   | { type: "question"; question: Question; runId?: string; runtimeScoped?: true }
