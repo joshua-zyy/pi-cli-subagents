@@ -13,7 +13,7 @@ directory or pass an existing `cwd`; directory isolation and Git workflows remai
 
 ## Requirements
 
-- Pi, tested to load and register on 0.87.1, 1.0.1, 1.1.0 and 1.2.0
+- Pi, tested to load and register on 0.87.1, 1.0.1, 1.1.0, 1.2.0 and 1.3.0
 - Node.js 22.19.0 or newer
 - For Codex or Claude Code subagents, the matching CLI installed and logged in; Pi subagents need
   nothing extra
@@ -166,10 +166,14 @@ Dispatch happens through the parent agent's tools and this panel. There is no `@
 The local suite passes without calling a model. Real CLI and model acceptance has been recorded for
 eight historical rounds covering Codex and Claude approvals, task questions, original-session
 resume, and the now-retired managed-worktree integration; those rounds can be replayed read-only
-but do not validate the replacement cwd-only interface. It has not been run on Linux or
-macOS, on the full interactive TUI, or against the newest CLI versions, which have moved past the
-ones those rounds were recorded on. Read the local pass as a statement about this repository's logic,
-not about your installed CLIs.
+but do not validate the replacement cwd-only interface.
+
+A separate real task on Windows with Pi 1.3.0 verified a Pi parent and Pi child using the cwd-only
+interface: two resident turns in one native session, parent-managed Git isolation, release before
+integration, post-merge tests and cleanup. No worktree-specific skill was loaded. This is one behavior
+witness, not a reliability or cost benchmark. Codex/Claude are covered by local fixtures for the new
+interface, not a fresh real-model run. Released-session resume, approvals, the full interactive TUI,
+Linux/macOS and newer backend versions were not revalidated by this task.
 
 ## Credits
 
