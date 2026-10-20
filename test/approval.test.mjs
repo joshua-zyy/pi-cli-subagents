@@ -26,7 +26,7 @@ test('parent tools and the human agents panel answer the same original request',
   let confirmations=0, input;
   const ctx = {cwd, mode:'tui', hasUI:true, isProjectTrusted:()=>false,
     sessionManager:{ getSessionFile:()=>parent, getEntries:()=>[] },
-    ui:{theme:{fg:(_,text)=>text,bold:text=>text},setWidget(){},onTerminalInput(fn){input=fn;return()=>{input=undefined;};},
+    ui:{theme:{fg:(_,text)=>text,bold:text=>text},setWidget(key,content){if(key==='cli-subagents-agents'&&typeof content==='function')content({terminal:{rows:35,columns:120},requestRender(){}},ctx.ui.theme);},onTerminalInput(fn){input=fn;return()=>{input=undefined;};},
       custom(factory){return new Promise(resolve=>{
         const component=factory({terminal:{rows:35,columns:120},requestRender(){}},ctx.ui.theme,{},resolve);
         input=data=>component.handleInput(data);

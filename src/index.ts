@@ -1,7 +1,7 @@
 import { Type } from "@earendil-works/pi-ai";
 import { closeSync, openSync, readSync, statSync } from "node:fs";
 import path from "node:path";
-import { Key, matchesKey } from "@earendil-works/pi-tui";
+import { Key, matchesKey, type Component } from "@earendil-works/pi-tui";
 import { getAgentDir, getMarkdownTheme, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { AgentManager } from "./manager.js";
 import { WorkspaceDecisionRequired, type ResumeOptions } from "./workspace.js";
@@ -279,6 +279,9 @@ export default function extension(pi: ExtensionAPI): void {
     catch (error) { console.error("[pi-cli-subagents] Status refresh failed; retrying:", error); }
   }
   function stopMonitor(): void {
+    // Clear the old pane while its context is still valid; late finalizers must
+    // not remove a replacement session's pane.
+    if (active?.ctx.mode === "tui") active.ctx.ui.setWidget(AGENTS_PANEL_KEY, undefined);
     sessionEpoch++;
     humanPending.clear();
     dismissPanel?.(); dismissPanel = undefined;
@@ -569,6 +572,8 @@ ${view(state, args.action === "interrupt")}`);
   let panelBusy = false;
   /** Widget slot for the role editor, rendered by Pi in the area just above the editor. */
   const ROLE_SETTINGS_KEY = "cli-subagents-role-settings";
+  /** The roster uses the same slot, so both panes sit above the editor instead of over it. */
+  const AGENTS_PANEL_KEY = "cli-subagents-agents";
   type PaneWidget = { terminal: { rows: number }; requestRender(): void };
   /** What one roster action still owes the command loop: another iteration, or nothing after a session change. */
   type PanelStep = "next" | "stop";
@@ -722,56 +727,73 @@ ${view(state, args.action === "interrupt")}`);
   }
 
   async function openAgents(ctx: ExtensionContext): Promise<void> {
-      // Interactive rosters need their own viewport; sibling widgets can clip an above-editor pane.
+      // The roster is a widget above the editor, so it needs Pi's TUI layout and raw input.
       if (ctx.mode !== "tui") { ctx.ui.notify("The panel requires a TUI; parent tools remain available through subagent_query, subagent and subagent_reply.", "error"); return; }
       // Keep one panel/action loop per extension instance so concurrent commands cannot compete for input.
       if (panelBusy) { ctx.ui.notify("The agent panel is already open or processing an action; wait or close it with Esc.", "warning"); return; }
       panelBusy = true;
       const epoch = sessionEpoch;
       const monitor = active?.file === ctx.sessionManager.getSessionFile() ? active : undefined;
+      let panel: AgentsPanel | undefined;
+      let widget: PaneWidget | undefined;
+      let editorRows = 3;
       let overlayActive = false;
+      // Unset while a host dialog or the conversation overlay owns the keyboard, so this listener
+      // never swallows a dialog's input.
+      let deliver: ((data: string) => void) | undefined;
+      const refresh = () => widget?.requestRender();
       // A modal overlay does not bubble input to Pi's editor. Route Ctrl+C to
       // the public parent abort API, never to the selected child's interrupt.
       const stopInput = ctx.ui.onTerminalInput((data) => {
         if (epoch !== sessionEpoch) return undefined;
         if (matchesKey(data, "ctrl+c")) {
-          if (!overlayActive) return undefined;
+          if (!overlayActive && !deliver) return undefined;
           if (ctx.isIdle()) dismissPanel?.(); else ctx.abort();
           return { consume: true };
         }
-        return undefined;
+        if (!deliver) return undefined;
+        deliver(data); refresh(); return { consume: true };
       });
+      const theme = ctx.ui.theme;
       const frameColor = (text: string) => ctx.ui.theme.getThinkingBorderColor(ctx.thinkingLevel ?? "off")(text);
       try {
+        ctx.ui.setWidget(AGENTS_PANEL_KEY, (tui) => {
+          widget = tui;
+          // TuiBase exposes this public getter, but the common TUI interface omits it.
+          const editor: Component | null = "getFocusedComponent" in tui && typeof tui.getFocusedComponent === "function"
+            ? tui.getFocusedComponent() : null;
+          return { render: (width: number) => {
+            if (!panel) return [];
+            editorRows = Math.max(3, editor?.render(width).length ?? 3);
+            return panel.render(width);
+          }, invalidate: () => {} };
+        }, { placement: "aboveEditor" });
         const manager = parentManager(ctx, launch);
+        monitor?.widget?.setHidden(true);
         while (epoch === sessionEpoch) {
           let agents: AgentView[] = [];
           try { agents = manager.list(); }
           catch (error) { ctx.ui.notify((error as Error).message, "error"); return; }
           if (!agents.length) { ctx.ui.notify("No subagents in this session.", "info"); return; }
-          let action: PanelAction | undefined;
-          overlayActive = true;
-          try {
-            action = await ctx.ui.custom<PanelAction | undefined>((tui, theme, _kb, done) => {
-              let settled = false;
-              const finish = (result: PanelAction | undefined) => {
-                if (settled) return;
-                settled = true;
-                if (monitor) monitor.updatePanel = undefined;
-                done(result);
-              };
-              dismissPanel = () => finish(undefined);
-              const panel: AgentsPanel = new AgentsPanel(agents, theme, finish, {
-                rows: () => paneRows(tui.terminal.rows, panel.mode), frameColor,
-                frame: () => monitor?.widget?.animationFrame ?? 0,
-              });
-              if (monitor) monitor.updatePanel = (snapshot) => { panel.update(snapshot); tui.requestRender(); };
-              return panel;
-            }, { overlay: true, overlayOptions: { width: "100%", maxHeight: "100%", anchor: "center" } });
-          } finally {
-            overlayActive = false; dismissPanel = undefined;
-            if (monitor) monitor.updatePanel = undefined;
-          }
+          let action = await new Promise<PanelAction | undefined>((resolve) => {
+            let settled = false;
+            const done = (result: PanelAction | undefined) => {
+              if (settled) return;
+              settled = true; deliver = undefined;
+              if (monitor) monitor.updatePanel = undefined;
+              resolve(result);
+            };
+            // Esc during shutdown must still release this loop.
+            dismissPanel = () => done(undefined);
+            panel = new AgentsPanel(agents, theme, done, { rows: () => paneRows(widget?.terminal.rows ?? 24, panel?.mode ?? "list",
+              editorRows - 3 + (agents.some(agent => agent.questions?.length) ? 1 : 0) + (ctx.isIdle?.() === false ? 1 : 0)), frameColor,
+              frame: () => monitor?.widget?.animationFrame ?? 0 });
+            if (monitor) monitor.updatePanel = (snapshot) => { agents = snapshot; panel?.update(snapshot); refresh(); };
+            deliver = (data) => panel?.handleInput(data);
+            refresh();
+          });
+          dismissPanel = undefined;
+          panel = undefined; refresh();
           if (!action || epoch !== sessionEpoch) return;
           try {
             // The conversation overlay hands back the next action, so a key pressed inside the viewer is
@@ -793,9 +815,11 @@ ${view(state, args.action === "interrupt")}`);
       } catch (error) { if (epoch === sessionEpoch) ctx.ui.notify((error as Error).message, "error"); }
       finally {
         if (monitor) monitor.updatePanel = undefined;
-        overlayActive = false;
+        panel = undefined; widget = undefined; deliver = undefined;
         stopInput();
         dismissPanel = undefined; panelBusy = false;
+        monitor?.widget?.setHidden(false);
+        if (epoch === sessionEpoch) ctx.ui.setWidget(AGENTS_PANEL_KEY, undefined);
       }
   }
   pi.registerCommand("agents", {

@@ -40,7 +40,9 @@ function harness(t, beforePhase = 'completed', decision = 'none') {
   let listener, viewer, roster, running, ticks = 0;
   const ctx = {cwd:root, mode:'tui', isProjectTrusted:()=>false,isIdle:()=>true,abort(){throw Error('unexpected parent abort');},
     sessionManager:{getSessionFile:()=>parent,getEntries:()=>entriesByParent.get(parent) ?? []},
-    ui:{theme, notify:(message,type)=>notices.push({message,type}), setWidget(){}, setStatus(){ticks++;},
+    ui:{theme, notify:(message,type)=>notices.push({message,type}), setWidget(key,content){
+      if(key==='cli-subagents-agents'&&typeof content==='function')content({terminal:{rows:35,columns:400},requestRender(){}},theme);
+    }, setStatus(){ticks++;},
       onTerminalInput(fn){listener=fn;return()=>{listener=undefined;};},
       editor:async()=> 'FOLLOW_UP', select:async()=> 'sync — update workspace from parent', confirm:async()=>true,
       custom(factory){return new Promise(resolve=>{
@@ -80,6 +82,37 @@ function idleBatch(t, count = 3) {
     receipt: { operation: 'stop', status: 'released', runId: target.runId, runtimeId: target.runtimeId } });
   return { h, targets, released };
 }
+
+test('agents uses only the public above-editor widget and detaches its input on dismissal',async t=>{
+  const h=harness(t),calls=[],setWidget=h.ctx.ui.setWidget;
+  h.ctx.ui.setWidget=(key,content,options)=>{calls.push({key,content,options});setWidget(key,content);};
+  h.ctx.ui.custom=()=>{throw Error('roster must not open a custom screen or overlay');};
+  try{
+    h.open();await new Promise(setImmediate);
+    const pane=calls.find(call=>call.key==='cli-subagents-agents'&&typeof call.content==='function');
+    assert(pane);assert.equal(pane.options?.placement,'aboveEditor');
+    assert.equal(h.ctx.ui.supportsWidgetViewport,undefined);
+    assert.deepEqual(h.input('\u001b[B'),{consume:true});
+    h.press('\u001b');await h.wait();
+    assert.equal(calls.filter(call=>call.key==='cli-subagents-agents').at(-1).content,undefined);
+    assert.throws(()=>h.input('z'),TypeError,'the listener is removed rather than swallowing parent input');
+  }finally{await h.close();}
+});
+
+test('widget registration failure releases input ownership and allows reopening the roster',async t=>{
+  const h=harness(t),setWidget=h.ctx.ui.setWidget;let fail=true;
+  h.ctx.ui.setWidget=(key,content,...rest)=>{
+    if(key==='cli-subagents-agents'&&typeof content==='function'&&fail){fail=false;throw Error('fixture widget failure');}
+    return setWidget(key,content,...rest);
+  };
+  try{
+    h.open();await h.wait();
+    assert(h.notices.some(notice=>notice.message==='fixture widget failure'));
+    assert.throws(()=>h.input('z'),TypeError);
+    h.open();h.press('\u001b');await h.wait();
+    assert(!h.notices.some(notice=>/already open/.test(notice.message)));
+  }finally{await h.close();}
+});
 
 test('uncertain runtime release requires explicit confirmation and preserves captured identity', { timeout: 10000 }, async t => {
   for (const scenario of ['cancel', 'release', 'changed', 'refused']) {

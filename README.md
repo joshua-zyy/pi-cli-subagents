@@ -121,7 +121,7 @@ screenshot below predates this filtering:
 
 ![The subagent roster under the parent's reply](https://raw.githubusercontent.com/joshua-zyy/pi-cli-subagents/main/docs/assets/subagent-running-ui.png)
 
-`/agents` browses those instances, opens one conversation, and releases idle runtimes:
+`/agents` is a fixed pane above the input, not an overlay. It resizes with the terminal and scrolls the instance list internally; the duplicate activity summary is hidden while it is open. It browses instances, opens conversations, and releases idle runtimes. The screenshot below predates the fixed-pane layout:
 
 ![The /agents panel](https://raw.githubusercontent.com/joshua-zyy/pi-cli-subagents/main/docs/assets/subagent-panel.png)
 

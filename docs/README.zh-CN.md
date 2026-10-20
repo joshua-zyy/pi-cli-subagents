@@ -83,7 +83,7 @@ Pi 子进程可通过 `subagent_ask_parent` 向主 agent 提出一个任务问�
 
 ![主 agent 回复下方的实例列表](https://raw.githubusercontent.com/joshua-zyy/pi-cli-subagents/main/docs/assets/subagent-running-ui.png)
 
-`/agents` 可浏览同一批实例、打开某个对话，并释放空闲运行时。
+`/agents` 是输入框上方的固定面板，不是浮层；随终端尺寸伸缩，列表在面板内部滚动，打开期间隐藏重复的活动摘要。它仍可浏览同一批实例、打开对话并释放空闲运行时。下图来自固定面板改动之前。
 
 ![`/agents` 面板](https://raw.githubusercontent.com/joshua-zyy/pi-cli-subagents/main/docs/assets/subagent-panel.png)
 
