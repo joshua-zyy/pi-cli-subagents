@@ -4,7 +4,6 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import extension from '../dist/index.js';
 import { waitUntil, processAlive } from '../dist/storage.js';
@@ -28,7 +27,7 @@ function waitForIdle(manager, id, lastStatus = 'completed') {
   });
 }
 
-/** Native restart and workspace handoff need release, not just a finished run. */
+/** Native restart needs release, not just a finished run. */
 async function closeCompleted(manager, id) {
   const idle = await waitForIdle(manager, id);
   const closed = await manager.close(id);
@@ -657,105 +656,42 @@ test('the viewer reads a bounded tail, pages older history on demand and reuses 
   assert.deepEqual(fs.readFileSync(logFile), before, 'reading history must never rewrite the event log');
 });
 
-test('roster pane and inline messages cannot bypass managed workspace review or integration guards', { timeout: 30_000 }, async t => {
+test('roster and inline messages refuse legacy managed continuation without baseline dialogs', { timeout: 30000 }, async t => {
   const h = harness(t); h.start();
-  const repo = path.join(h.state.cwd, 'repo'); fs.mkdirSync(repo);
-  const git = (...args) => execFileSync('git', ['-C', repo, ...args], { windowsHide: true });
-  git('init', '-q'); git('config', 'user.name', 'Test'); git('config', 'user.email', 'test@example.invalid');
-  git('config', 'core.autocrlf', 'false');
-  fs.writeFileSync(path.join(repo, 'base.txt'), 'base\n'); git('add', '.'); git('commit', '-qm', 'fixture');
-  h.ctx.cwd = repo;
-  const ws = JSON.parse(await h.invoke('subagent', { action: 'workspace_create' }));
-  const worker = json(await h.invoke('subagent', { action: 'start', role: 'worker', task: 'CWD', workspace: ws.id }));
+  const worker = await h.spawn('REMEMBER legacy-ui');
   await closeCompleted(h.manager, worker.id);
-  const reviewer = json(await h.invoke('subagent', { action: 'start', role: 'reviewer', task: 'HOLD review', workspace: ws.id }));
+  const file = path.join(h.manager.root, worker.id, 'spec.json');
+  const spec = { ...JSON.parse(fs.readFileSync(file, 'utf8')), workspace: randomUUID(),
+    workspaceBaseline: { commit: 'a'.repeat(40), revision: 2 } };
+  fs.writeFileSync(file, JSON.stringify(spec));
+  const saved = fs.readFileSync(file);
   h.editorAnswer = 'CWD';
-  const occupied = await h.openAgents();
-  await occupied.press('h'); await occupied.press('i'); await occupied.press('s');
-  await occupied.press(keys.escape); await occupied.running;
-  assert.ok(h.notices.some(notice => /occupied/.test(notice.message)));
-  assert.equal(h.manager.get(worker.id).runCount, 1);
-  await h.manager.send(reviewer.id, 'review complete');
-  await closeCompleted(h.manager, reviewer.id);
-  fs.writeFileSync(path.join(ws.path, 'base.txt'), 'new\n');
-  await h.invoke('subagent', { action: 'workspace_integrate', workspace: ws.id });
-  const integrated = await h.openAgents();
-  await integrated.press('h'); await integrated.press('i'); await integrated.press('s');
-  await integrated.press(keys.escape); await integrated.running;
-  assert.ok(h.notices.some(notice => /integrated/.test(notice.message)));
+  const roster = await h.openAgents();
+  await roster.press('h'); await roster.press('i'); await roster.press('s');
+  await roster.press(keys.escape); await roster.running;
+  assert.ok(h.notices.some(notice => /managed workspaces are retired/i.test(notice.message)));
   h.state.scripts.push(async viewer => {
-    await waitUntil('viewer ready', () => viewer.render(120).join('\n').includes(worker.id.slice(0, 8)));
+    await waitUntil('legacy viewer ready', () => viewer.render(120).join('\n').includes(worker.id.slice(0, 8)));
     viewer.handleInput(keys.enter);
     for (const key of 'CWD') viewer.handleInput(key);
     viewer.handleInput(keys.enter);
-    await waitUntil('inline baseline dialog after closing viewer', () => h.state.selections.length >= 2);
+    await waitUntil('inline legacy refusal', () => /managed workspaces are retired/i.test(viewer.render(120).join('\n')));
+    viewer.handleInput('q');
   });
   const inline = await h.openAgents();
   await inline.press('h'); await inline.press(keys.enter);
   await inline.press(keys.escape); await inline.running;
   assert.equal(h.manager.get(worker.id).runCount, 1);
   assert.equal(h.manager.get(worker.id).sessionId, worker.sessionId);
-});
-
-test('TUI sync requires dirty-state confirmation and inline continuation preserves the original session', { timeout: 40_000 }, async t => {
-  const h = harness(t); h.start();
-  const repo = path.join(h.state.cwd, 'repo'); fs.mkdirSync(repo);
-  const git = (...args) => execFileSync('git', ['-C', repo, ...args], { windowsHide: true, encoding: 'utf8' });
-  git('init', '-q'); git('config', 'user.name', 'Test'); git('config', 'user.email', 'test@example.invalid'); git('config', 'core.autocrlf', 'false');
-  fs.writeFileSync(path.join(repo, 'base.txt'), 'base\n'); git('add', '.'); git('commit', '-qm', 'fixture');
-  h.ctx.cwd = repo;
-  const ws = JSON.parse(await h.invoke('subagent', { action: 'workspace_create' }));
-  const worker = json(await h.invoke('subagent', { action: 'start', role: 'worker', task: 'CWD', workspace: ws.id }));
-  await closeCompleted(h.manager, worker.id);
-  fs.writeFileSync(path.join(ws.path, 'base.txt'), 'integrated\n'); await h.invoke('subagent', { action: 'workspace_integrate', workspace: ws.id });
-  fs.writeFileSync(path.join(repo, 'parent-new.txt'), 'new parent content');
-  h.state.selectAnswer = (_title, choices) => choices[1]; h.state.confirmAnswer = false; h.editorAnswer = 'CWD';
-  const declined = await h.openAgents();
-  await declined.press('h'); await declined.press('i'); await declined.press('s');
-  await declined.press(keys.escape); await declined.running;
-  assert.match(h.confirms.at(-1).message, /parent-new.txt/);
-  assert.equal(h.manager.get(worker.id).runCount, 1);
-  assert.equal(fs.existsSync(path.join(ws.path, 'parent-new.txt')), false, 'declining inheritance must not change the worktree');
-  h.state.confirmAnswer = true;
-  h.state.scripts.push(async viewer => {
-    await waitUntil('viewer ready', () => viewer.render(120).join('\n').includes(worker.id.slice(0, 8)));
-    viewer.handleInput(keys.enter);
-    for (const key of 'CWD') viewer.handleInput(key);
-    viewer.handleInput(keys.enter);
-  });
-  const inline = await h.openAgents();
-  await inline.press('h'); await inline.press(keys.enter);
-  await inline.press(keys.escape); await inline.running;
-  const resumed = await waitForIdle(h.manager, worker.id);
-  assert.equal(resumed.runCount, 2);
-  assert.notEqual(resumed.runId, worker.runId);
-  assert.equal(h.manager.get(worker.id).sessionId, worker.sessionId);
-  assert.equal(fs.readFileSync(path.join(ws.path, 'parent-new.txt'), 'utf8'), 'new parent content');
-  assert.equal(git('-C', ws.path, 'status', '--porcelain'), '');
-  assert.ok(h.messages.some(entry => entry.message.customType === 'cli-subagents-human-action' && /workspace baseline: sync/.test(entry.message.content)));
-  assert.equal(h.editors.length, 1, 'inline text is retained when the viewer closes for a baseline dialog');
-});
-
-test('TUI refuses parent changes made after the inheritance dialog was displayed', { timeout: 30_000 }, async t => {
-  const h = harness(t); h.start();
-  const repo = path.join(h.state.cwd, 'repo'); fs.mkdirSync(repo);
-  const git = (...args) => execFileSync('git', ['-C', repo, ...args], { windowsHide: true });
-  git('init', '-q'); git('config', 'user.name', 'Test'); git('config', 'user.email', 'test@example.invalid'); git('config', 'core.autocrlf', 'false');
-  fs.writeFileSync(path.join(repo, 'base.txt'), 'base\n'); git('add', '.'); git('commit', '-qm', 'fixture');
-  h.ctx.cwd = repo;
-  const ws = JSON.parse(await h.invoke('subagent', { action: 'workspace_create' }));
-  const worker = json(await h.invoke('subagent', { action: 'start', role: 'worker', task: 'CWD', workspace: ws.id }));
-  await closeCompleted(h.manager, worker.id);
-  fs.writeFileSync(path.join(ws.path, 'base.txt'), 'integrated\n'); await h.invoke('subagent', { action: 'workspace_integrate', workspace: ws.id });
-  h.state.selectAnswer = (_title, choices) => choices[1]; h.editorAnswer = 'CWD';
-  h.ctx.ui.confirm = async () => { fs.writeFileSync(path.join(repo, 'unconfirmed.txt'), 'arrived during dialog'); return true; };
-  const rejected = await h.openAgents();
-  await rejected.press('h'); await rejected.press('i'); await rejected.press('s');
-  await rejected.press(keys.escape); await rejected.running;
-  assert.ok(h.notices.some(notice => /confirmed snapshot/.test(notice.message)));
-  assert.equal(h.manager.get(worker.id).runCount, 1);
-  assert.equal(fs.existsSync(path.join(ws.path, 'unconfirmed.txt')), false);
-  assert.equal(h.manager.workspaces.get(ws.id).baseCommit, ws.baseCommit);
+  assert.deepEqual(fs.readFileSync(file), saved);
+  assert.equal(h.state.selections.length, 0);
+  assert.equal(h.confirms.length, 0);
+  const refused = h.messages.filter(entry => entry.message.customType === 'cli-subagents-human-action');
+  assert.equal(refused.length, 2);
+  for (const entry of refused) {
+    assert.match(entry.message.content, /Input request refused.*No input was sent/s);
+    assert.doesNotMatch(entry.message.content, /unconfirmed|may already have run/);
+  }
 });
 
 test('session shutdown dismisses a live viewer without stopping its child or reopening the roster', { timeout: 15000 }, async t => {

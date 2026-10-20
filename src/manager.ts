@@ -7,13 +7,10 @@ import os from "node:os";
 import { control, ControlRejectedError } from "./control.js";
 import { readActivity } from "./activity.js";
 import { codexHome, codexLaunch } from "./codex-launch.js";
-import { CodexAdapter } from "./codex-adapter.js";
-import { inspectPiSession } from "./pi-adapter.js";
 import { claudeLaunch } from "./claude-launch.js";
 import { inspectClaudeSession } from "./claude-adapter.js";
 import { nativeSession } from "./cli-adapter.js";
 import { validateRoleFile } from "./roles.js";
-import { WorkspaceDecisionRequired, WorkspaceStore, type ResumeOptions } from "./workspace.js";
 import { directories, jsonFiles, processAbsent, processAlive, readJson, shorten, waitUntil, writeJson, writeJsonExclusive } from "./storage.js";
 import type { AgentSpec, AgentState, AgentView, Control, ControlResult, Delivery, Endpoint, Launch, NativeSession, OperationReceipt, ReclaimRecord, Report, Role, SessionHandle, StartRequest, TaskRun } from "./types.js";
 
@@ -127,13 +124,11 @@ function summarize(message: string | undefined, limit = 200): string | undefined
 export class AgentManager {
   readonly root: string;
   readonly parentFile: string;
-  readonly workspaces: WorkspaceStore;
   private historyCache = new Map<string, { version: string; json: string; bytes: number }>();
   private historyCacheBytes = 0;
   constructor(parentFile: string, private readonly launch: Launch, private readonly codex?: { launch: Launch; home: string }, private readonly claude?: { launch: Launch; home: string }) {
     this.parentFile = path.resolve(parentFile);
     this.root = `${this.parentFile}.subagents`;
-    this.workspaces = new WorkspaceStore(this.parentFile);
   }
 
   private directory(id: string): string {
@@ -448,28 +443,24 @@ export class AgentManager {
     } catch { /* A submitted input with unreadable state remains unconfirmed, even without a lock. */ }
   }
 
-  async spawn(roleName: string, role: Role, cwd: string, message: string, workspace?: string): Promise<AgentView> {
+  async spawn(roleName: string, role: Role, cwd: string, message: string): Promise<AgentView> {
+    if (arguments.length > 4) throw new Error("Managed workspace arguments are retired; pass only cwd to start a subagent.");
     if (!message.trim()) throw new Error("Task must not be empty");
     role = validateRoleFile({ launch: role }, "Subagent role").launch;
-    const id = randomUUID(), dir = this.directory(id);
+    const id = randomUUID(), dir = path.join(this.root, id);
     const admission = this.admit(id, { newRuntime: true });
-    const start = async (directory: string, baseline?: AgentSpec["workspaceBaseline"], notice?: string): Promise<AgentView> => {
-      directory = path.resolve(directory);
-      if (!statSync(directory).isDirectory()) throw new Error("cwd must be an existing directory");
+    try {
+      cwd = path.resolve(cwd);
+      if (!statSync(cwd).isDirectory()) throw new Error("cwd must be an existing directory");
       const selected = role.cli === "codex" ? this.codex ?? { launch: codexLaunch(), home: codexHome() } :
         role.cli === "claude" ? this.claude ?? { launch: claudeLaunch(), home: process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), ".claude") } : undefined;
       const spec: AgentSpec = { version: role.cli === "claude" ? 3 : selected ? 2 : 1,
         ...(selected ? role.cli === "claude" ? { cli: "claude", claudeHome: path.resolve(selected.home) } : { cli: "codex", codexHome: path.resolve(selected.home) } : {}),
-        id, parentFile: this.parentFile, cwd: directory, roleName, role,
-        launch: selected?.launch ?? this.launch, createdAt: Date.now(), ...(workspace ? { workspace, workspaceBaseline: baseline } : {}) };
+        id, parentFile: this.parentFile, cwd, roleName, role,
+        launch: selected?.launch ?? this.launch, createdAt: Date.now() };
       mkdirSync(dir, { recursive: true, mode: 0o700 });
       writeJson(path.join(dir, "spec.json"), spec);
-      return this.start(id, notice ? `${message}\n\n[Workspace baseline]\n${notice}` : message, admission);
-    };
-    try {
-      if (workspace !== undefined) return await this.workspaces.runAgent(workspace, id, (ws, notice) => start(ws.cwd, { commit: ws.baseCommit, revision: ws.revision }, notice));
-      this.workspaces.assertShared(cwd);
-      return await start(cwd);
+      return await this.start(id, message, admission);
     } finally { this.settleAdmission(admission); }
   }
 
@@ -518,8 +509,6 @@ export class AgentManager {
   }
 
   private diagnostic(id: string, operation: string, error: unknown, state?: Pick<AgentState, "runId" | "runtimeId">): Error {
-    // Workspace choices carry revision/inheritance proof needed by the human UI.
-    if (error instanceof WorkspaceDecisionRequired) return error;
     // Transport/server errors may already carry the actual captured identity.
     if (error instanceof Error && (error.message.startsWith(`Subagent ${id},`) || error.message.includes(`for subagent ${id},`))) return error;
     if (!state) { try { state = this.get(id); } catch { /* Do not hide the original failure with a diagnostic read. */ } }
@@ -543,35 +532,14 @@ export class AgentManager {
     }
   }
 
-  async send(id: string, message: string, mode: Delivery = "steer", options: ResumeOptions = {}): Promise<AgentView> {
+  async send(id: string, message: string, mode: Delivery = "steer"): Promise<AgentView> {
+    if (arguments.length > 3) throw new Error("Managed workspace options are retired; send accepts only id, message and mode.");
     if (!message.trim()) throw new Error("Message must not be empty");
     const spec = this.spec(id);
-    if (!spec.workspace && (options.baseline !== undefined || options.includeUncommitted !== undefined)) throw new Error("Baseline choices require a managed workspace");
-    const beforeSync = async (): Promise<void> => {
+    if (spec.workspace !== undefined) throw new Error(`Managed workspaces are retired; cannot send to legacy instance ${id} (workspace ${spec.workspace}). History remains readable. Only protocol v3 instances retain reply, interrupt and stop; older protocols remain read-only and require verified manual process cleanup. Release its runtime and inspect the retained workspace records before explicitly adopting its directory; do not start a replacement to bypass this refusal.`);
+    try {
       let state = this.get(id);
-      if (["starting", "running", "waiting", "stopping", "unreachable"].includes(state.phase)) throw new Error("Cannot sync a running or uncertain instance; wait for it to finish or inspect it first");
-      if (state.phase === "idle") { await this.close(id, true); state = this.get(id); }
-      await this.waitForRelease(state, "Sync writer release", 15_000);
-      const session = state.session;
-      if (!session || session.cli !== (spec.cli ?? "pi")) throw new Error("No resumable original session; cannot sync for continuation");
-      if (session.cli === "pi") {
-        if (!existsSync(session.sessionFile)) throw new Error(`Original session file is missing: ${session.sessionFile}; no synchronization was performed`);
-        try { await inspectPiSession(session); }
-        catch (error) { throw new Error(`Pi original-session preflight failed; no synchronization was performed. ${(error as Error).message}`); }
-      } else if (session.cli === "claude") {
-        try { inspectClaudeSession(spec, session); }
-        catch (error) { throw new Error(`Claude original-session preflight failed; no synchronization was performed. ${(error as Error).message}`); }
-      } else {
-        const logFile = path.join(this.directory(id), `preflight-${randomUUID()}.jsonl`);
-        try {
-          await new CodexAdapter({ spec, session, logFile, onEvent: () => {} }).inspectSession();
-        } catch (error) { throw new Error(`Codex original-thread preflight failed; no synchronization was performed. ${(error as Error).message}; inspect ${logFile}`); }
-      }
-    };
-    const send = async (notice?: string): Promise<AgentView> => {
-      const prompt = notice ? `${message}\n\n[Workspace baseline]\n${notice}` : message;
-      let state = this.get(id);
-      if (state.phase === "unreachable") throw new Error(state.error);
+      if (state.protocolVersion !== 3 || state.phase === "unreachable") throw new Error(state.error);
       if (state.phase === "idle") {
         // A new run on a resident instance takes a turn slot too; the instance is already visible, so
         // the reservation is settled against its new run id instead of its existence.
@@ -580,7 +548,7 @@ export class AgentManager {
         try {
           const reservation = admitting.get(admission);
           if (reservation) reservation.submitted = true;
-          const result = await this.request(id, { type: "start", message: prompt }, state);
+          const result = await this.request(id, { type: "start", message }, state);
           return this.view(id, result, result.receipt && { ...result.receipt, operation: "send" });
         }
         catch (error) { rejected = error instanceof ControlRejectedError; throw error; }
@@ -588,7 +556,7 @@ export class AgentManager {
       }
       if (["starting", "running", "waiting"].includes(state.phase)) {
         if (spec.cli === "codex" && mode === "followUp") throw new Error("Codex followUp while running is not supported; wait for this run to finish");
-        const result = await this.request(id, { type: "send", message: prompt, mode });
+        const result = await this.request(id, { type: "send", message, mode });
         return this.view(id, result, result.receipt);
       }
       await this.waitForRelease(state, "Previous worker release", 15_000);
@@ -599,24 +567,8 @@ export class AgentManager {
       if (session.cli === "claude") inspectClaudeSession(spec, session);
       // Resuming a released instance starts a new runtime, so it needs a free slot like spawn does.
       const admission = this.admit(id, { priorRunId: state.runId, newRuntime: true });
-      try { return await this.start(id, prompt, admission, session, "send"); }
+      try { return await this.start(id, message, admission, session, "send"); }
       finally { this.settleAdmission(admission); }
-    };
-    try {
-      const current = this.get(id);
-      if (current.protocolVersion !== 3) throw new Error(current.error);
-      if (!spec.workspace) return await send();
-      return await this.workspaces.runAgent(spec.workspace, id, async (ws, notice) => {
-        const state = await send(notice);
-        if (state.accepted || state.phase === "completed" || state.lastStatus === "completed") {
-          const workspaceBaseline = { commit: ws.baseCommit, revision: ws.revision };
-          writeJson(path.join(this.directory(id), "spec.json"), { ...spec, workspaceBaseline });
-          return { ...state, workspaceBaseline };
-        }
-        // send() already validated and normalized the raw snapshot. A closing view
-        // can be stopping + runtimeClosed while owner.lock is still being released.
-        return state;
-      }, options, beforeSync);
     } catch (error) { throw this.diagnostic(id, "send", error); }
   }
 

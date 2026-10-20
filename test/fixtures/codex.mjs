@@ -38,8 +38,6 @@ function finish(text, status = 'completed', mode = '') {
   notify('turn/completed', { threadId: thread.id, turn: { ...turn, items: [], itemsView: 'summary' } });
 }
 function execute(message) {
-  // Retain the full baseline notice in requests and native items; only dispatch the fixture task.
-  message = message.split('\n\n[Workspace baseline]\n')[0];
   if (message === 'CWD') return finish(process.cwd());
   if (message.startsWith('FILE ')) {
     const { file, content } = JSON.parse(message.slice(5));

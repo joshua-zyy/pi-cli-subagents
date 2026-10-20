@@ -119,8 +119,6 @@ function handle(cmd) {
   if (cmd.message === 'HANDLED') return response(cmd, { disposition: 'handled' });
   if (active && !cmd.streamingBehavior) return emit({ type: 'response', id: cmd.id, success: false, error: 'already running' });
   session.messages.push({ role: 'user', content: cmd.message }); save();
-  // Keep the actual baseline notice in the native transcript, then execute the fixture task.
-  if (cmd.message.includes('\n\n[Workspace baseline]\n')) cmd = { ...cmd, message: cmd.message.split('\n\n[Workspace baseline]\n')[0] };
   const disposition = active ? 'queued' : 'started';
   active = true;
   if (traceInputs) { session.fixtureActive = true; save(); }

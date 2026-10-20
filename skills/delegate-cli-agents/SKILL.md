@@ -1,6 +1,6 @@
 ---
 name: delegate-cli-agents
-description: Handle CLI subagent task questions, approvals, bounded activity/history pages, truncated or missing results, managed-worktree baselines, and interrupted sessions. Use the tool descriptions for routine dispatch and parameters.
+description: Handle CLI subagent task questions, approvals, bounded activity/history pages, truncated or missing results, and interrupted sessions. Use the tool descriptions for routine dispatch and parameters.
 ---
 
 # CLI subagent operational reference
@@ -12,7 +12,6 @@ Read the relevant reference when its condition applies, not every reference befo
 | Situation | Reference |
 | --- | --- |
 | A child asks a task question or requests permission | [approvals.md](references/approvals.md): review the full current request and only the native response rules relevant to it |
-| Create, sync or integrate a managed worktree | [workspaces.md](references/workspaces.md): read before acting |
 | Truncated/missing results, history pages, delayed reports or parent-session replay | [Results and delivery](references/recovery.md#results-and-delivery) |
 | Failed or uncertain operations, interrupted sessions, or human intervention | [recovery.md](references/recovery.md), including Human controls |
 

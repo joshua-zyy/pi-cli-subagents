@@ -9,9 +9,9 @@
 | 入口 | 范围 |
 |---|---|
 | `npm run test:fast` | 纯逻辑、UI 与转录投影，允许临时文件 I/O，不启动 CLI/Git |
-| `npm run test:domain` | 协议、adapter、存储和 Git 工作区，使用本地替身 |
+| `npm run test:domain` | 协议、adapter 和存储，使用本地替身 |
 | `npm run test:acceptance:local` | manager、扩展入口、UI、审批和恢复的本地闭环 |
-| `npm run test:acceptance:slow` | manager、驻留和工作区的重型本地进程验收 |
+| `npm run test:acceptance:slow` | manager 和驻留的重型本地进程验收 |
 | `npm test` | 上述四层的并集，不包含真实模型验收 |
 | `npm run test:list` | 仅列出全部本地测试，并明确未运行真实验收 |
 
@@ -24,7 +24,7 @@
 node scripts/test.mjs domain --list
 
 # 仅运行该层的指定文件，不隐式运行 fast 层
-npm run test:domain -- workspace.test.mjs
+npm run test:domain -- storage-race.test.mjs
 npm run test:acceptance:local -- extension.test.mjs tool-receipts.test.mjs
 ```
 
@@ -53,7 +53,7 @@ node test/acceptance/audit.mjs .test-output/manual-acceptance/<case>/case.mjs
 | `fast` | 纯逻辑与记录替身，不启动子进程 | ~27s |
 | `domain` | 本地 Git、持久化和 adapter 的夹具验证 | ~94s |
 | `acceptance-local` | 使用本地 CLI 夹具的 manager/UI 闭环 | ~125s |
-| `acceptance-slow` | 三个重型进程验收文件：`manager`、`residency`、`workspace-manager` | ~165s |
+| `acceptance-slow` | 重型进程验收文件：`manager`、`residency`（历史耗时包含现已退役的 `workspace-manager`） | ~165s |
 
 `npm run gates` 只构建一次，依次运行 check、fast、domain、acceptance-local，并输出各门禁耗时和统一退出码。`npm run gates -- --slow` 增加 acceptance-slow，用于收尾验收。此前分开执行这些入口会重复构建四次，每次约 4 秒。
 
@@ -74,6 +74,35 @@ Node 测试运行器使用 `--test-concurrency=1`，不修改父进程环境或�
 仅对 SDK `1.0.1` 的 `pi-codemode` 使用同版本 override：其 `^1.0.1` 范围会解析到移除了 `MCP_TYPESCRIPT_PREAMBLE` 的新版，导致 SDK 导入失败。不能只因 audit 清零就删除这个兼容约束；变更后须验证真实导入和加载器。
 
 升级后用干净的 `npm ci --ignore-scripts` 验证实际安装树与 `npm audit`，不要只检查锁文件字面值。就地升级可能残留旧嵌套依赖；按当前 manifest 重建干净锁后再验收。复用既有隔离解包加载器与本地 worker 夹具，分别检查开发 SDK 和实际宿主；这些 PASS 不代表真实模型验收。
+
+## 托管工作区退役覆盖
+
+已退休 `workspace.test.mjs` 的 Git 管理合同及专属租约、快照、keep/sync、checkpoint 与确认 UI 测试，
+不以删测掩盖仍需保留的会话行为。`cwd.test.mjs` 复用三后端本地 CLI 夹具，覆盖普通子目录、驻留续轮、
+释放后原会话与记忆恢复、用户自行创建/提交的分支式 worktree、失败恢复的原生身份和文件保留。
+原控制器退出、原生元数据拒绝等通用行为仍由 manager/adapter 测试覆盖。
+
+`tool-contract` 验证 schema 与直接执行均拒绝旧动作/字段；`manager-recovery` 验证三后端旧托管记录
+在所有状态下先于派发与改写拒绝 send，且实际 pending reply、interrupt、stop 与结果读取保留。
+`residency` 保留 closing 响应规范化、身份拒绝和不重发；query/UI/usage/角色的通用断言保留。
+查询闭环在不可读旧工作区清单存在时仍成功，不启动 Git 扫描。以上均为离线本地证据，不证明模型会
+自行组织 Git 协作，后者须单独进行有证据的真实任务验收。
+
+### cwd-only 真实行为见证（2026-10-20）
+
+实现提交 `6749d2a` 在 Windows / Pi 1.3.0 的原测试目录与原包路径上完成一次真实父 Pi → 子 Pi 任务。
+原测试配置未改；使用临时 agent home 和一次性 Git 仓库，不加载 skill。父模型自己创建分支式 worktree、
+通过 `cwd` 派发，同一实例/原生会话完成单单位时长解析和复合表达式两轮真实代码/测试修改。收到两次结果
+后确认 `released`，父级检查 diff、运行测试、提交、合并、在集成目录重跑测试并正常清理 worktree/分支。
+两个哨兵及原配置哈希未变，worker/CLI 均已退出，未使用监督器补做任务或清理。
+
+只读审计器返回 PASS，4 项可变效果检查已执行、0 项不可用；清理后的子目录只断言预期不存在，未声称
+继续检查其已删除文件。第一轮父测 57/57，第二轮及集成后均 95/95；插件自身另经 check/build 和四层
+456/152/88/78（共 774）项本地测试。独立评审复核代码及增量用例，不能混称其独立重跑了全部四层。
+
+原始父会话、两轮 request/result/native 日志、Git 命令与只读 case 保留为本地证据，不随包发布。
+本次仅证明一条真实 Git/cwd 协作路径可完成，不推导节省 token/费用、普遍发现率或目录并发安全；不构成
+Codex/Claude 真实模型、释放后恢复、审批、人工 TUI 或其它操作系统的重新验收。
 
 ## 转录读取兼容性变更
 
@@ -110,7 +139,7 @@ Pi 的 `handled` 失败释放说明只指初始输入，以及 idle/原会话恢
 
 依据 [官方会话恢复文档](https://platform.claude.com/docs/en/agent-sdk/sessions) 和 [官方 SDK 的文件头 cwd 提取](https://github.com/anthropics/claude-agent-sdk-python/blob/main/src/claude_agent_sdk/_internal/sessions.py)，沿用现有 native-resume 接线，不引入 SDK 依赖。既有 adapter 域测试覆盖动态目录和拒绝边界；manager 本地替身覆盖自然完成及 stop 后同身份恢复、历史记忆和固定启动目录。真实 Claude 续聊仍须单独授权；cwd 预检与驻留生命周期分别验收，前者通过不代表真实驻留能力通过。
 
-Claude 驻留验收复用原 adapter/manager/workspace 替身：同 worker/CLI 多轮、初始化只出现一次、队列多结果合成一轮结果、后台屏障、旧 UUID/旧问题隔离、显式中断与自然完成竞态、取消排队输入、回执缺失及超时后的新工作拒绝。运行中 steer/followUp 对应原生 priority next/later，不发送隐式 interrupt；忙碌消息要求 msg_lifecycle_v1，独立中断要求 interrupt_receipt_v1 和 interrupt_cancel_queued_v1。中断回执和原生终态都确认后才返回 settled；背景工作仍未收口时不能假装 idle。idle 保留工作区 writer，交接/集成前仍须 stop；stop 释放资源而不删历史。真实 Claude 驻留、多轮消息和中断、人工 TUI 均未运行。
+Claude 驻留验收复用原 adapter/manager 与 cwd 替身：同 worker/CLI 多轮、初始化只出现一次、队列多结果合成一轮结果、后台屏障、旧 UUID/旧问题隔离、显式中断与自然完成竞态、取消排队输入、回执缺失及超时后的新工作拒绝。运行中 steer/followUp 对应原生 priority next/later，不发送隐式 interrupt；忙碌消息要求 msg_lifecycle_v1，独立中断要求 interrupt_receipt_v1 和 interrupt_cancel_queued_v1。中断回执和原生终态都确认后才返回 settled；背景工作仍未收口时不能假装 idle。idle 仍拥有运行时，目录交接/清理前须确认释放；stop 释放资源而不删历史。真实 Claude 驻留、多轮消息和中断、人工 TUI 均未运行。
 
 ## 角色默认值回显
 
@@ -146,7 +175,7 @@ Claude 驻留验收复用原 adapter/manager/workspace 替身：同 worker/CLI �
 ## 测试分层选择规则
 
 1. 日常修改运行 fast 层和相关 domain 文件；修改 `src/index.ts` 等共享入口或通知、回执时，还须运行对应本地验收。
-2. 修改原生 CLI adapter 时，运行相关 adapter 域测试及 manager/workspace 本地验收；这不自动授权真实模型调用。
+2. 修改原生 CLI adapter 时，运行相关 adapter 域测试及 manager/cwd 本地验收；这不自动授权真实模型调用。
 3. 无 CI 时，收尾至少运行完整 fast 和 domain 层。修改共享结构、跨层契约或测试入口后，用 `npm test` 执行全量本地回归。
 4. 新增测试前更新 manifest，按真实依赖分类，不按文件名分类。`core.test.mjs`、`tool-receipts.test.mjs` 等少数文件混合了多个层次，不应只为分类而重构内容。
 5. fast 层总耗时 20 秒是复核阈值，不是失败门禁。超出时先检查机器负载、依赖和分类；不为时间或数量目标删除保护性覆盖。删除或合并测试须有独立反例或变异验证证据。

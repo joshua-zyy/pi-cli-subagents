@@ -1,38 +1,36 @@
 # CLI Subagent 三工具接口
 
-当前入口为 `subagent`、`subagent_query`、`subagent_reply`：工作区 create/integrate 已并入 `subagent` 的显式动作，能力、记录格式和安全校验不变，不保留旧工作区工具别名。下文四工具阶段的提交、测试数字与测量保留为历史证据，不代表本次合并的真实模型验收。
+当前入口为 `subagent`、`subagent_query`、`subagent_reply`。产品给父 Pi 提供由用户 Pi、Codex CLI、Claude Code 承载的持久子代理会话，不接管 Git 或目录生命周期。托管工作区动作与专用参考已退役；下文四工具阶段的提交、测试数字与测量只保留为历史证据。
 
 The current scope covers only CLI subagent dispatch and management by the parent Pi agent. `@role` and a new direct user dispatch entry point are deferred; the existing user management UI remains. This document refines the product goals and does not authorize further code changes, real dispatch or model calls.
 
 ## 1. Design conclusion
 
-使用三个根对象工具：`subagent` 管理实例及工作区，`subagent_query` 只读查询，`subagent_reply` 答复原请求。动态角色目录仍直接放在调度工具说明里；合并入口不删除原生会话、历史结果或工作区能力，也不新增不透明 options。
+使用三个根对象工具：`subagent` 管理实例，`subagent_query` 只读查询，`subagent_reply` 答复原请求。动态角色目录仍直接放在调度工具说明里；保留原生会话与历史结果，不新增不透明 options。
 
 | Tool | Operations | Existing capability source |
 |---|---|---|
-| `subagent` | `start` / `send` / `interrupt` / `stop` / `reclaim` / `workspace_create` / `workspace_integrate` | Instance lifecycle and existing `WorkspaceStore.create` / `integrate` |
+| `subagent` | `start` / `send` / `interrupt` / `stop` / `reclaim` | Native CLI instance lifecycle |
 | `subagent_query` | `list` / `get` / `result` / `activity` | Existing inventory/result reads plus bounded projected history |
 | `subagent_reply` | Answer one specific request; no action required | `respond_to_permission` |
 
-Do not add automatic task assignment, automatic instance reuse, model overrides, mandatory reviews, automatic retries or an automatic worktree policy. Workspace actions remain available normally; the user and parent agent decide whether to use them, without an additional opt-in switch.
+Do not add automatic task assignment, automatic instance reuse, model overrides, mandatory reviews, automatic retries or an automatic worktree policy. Users and agents choose and manage working directories independently; there is no worktree-specific tool or skill.
 
 The following is a logical parameter contract, not the final TypeBox/JSON Schema code. Each action has its own required and allowed fields; inapplicable fields must be rejected rather than silently ignored. The implementation uses a root-object schema with additional action-level field checks before execution. Local interface tests have passed; neither documentation examples nor local success establish compatibility with every model endpoint.
 
-## 2. `subagent`：实例生命周期与工作区
+## 2. `subagent`：实例生命周期
 
 ### 2.1 Parameters
 
 | action | Required | Optional | Semantics |
 |---|---|---|---|
-| `start` | `role`, `task` | `cwd` or `workspace` | Create an instance and execute its first task; cwd and workspace are mutually exclusive |
-| `send` | `id`, `message` | `mode`, `baseline`, `includeUncommitted` | Deliver instructions while running, or begin a new run in the same native session after completion |
+| `start` | `role`, `task` | `cwd` | Create an instance in an existing directory and execute its first task |
+| `send` | `id`, `message` | `mode` | Deliver instructions while running, or begin a new run in the same native session after completion |
 | `interrupt` | `id` | None | End only the captured current turn, retaining a usable runtime; unsupported backends reject |
 | `stop` | `id` | None | Release native resources of an instance with no accepted turn in flight; a turn in flight must be interrupted first, because releasing would discard it. Retains the native session and history; do not delete files or roll back changes |
 | `reclaim` | `id`, `runtimeId` | None | Free the **accounting** of one unreachable runtime whose recorded worker and CLI are both reliably gone. Not a native release: it confirms no native release, leaves `state.json` and `owner.lock` untouched, and does not make the instance resumable. Refuses when either pid exists or its absence cannot be established (only an `ESRCH` observation counts), when ownership conflicts, when `cliPid` is missing, or when the named runtime is not the recorded one. Evidence covers only the two recorded pids: any process the CLI started is outside its scope, and a reclaim never claims those descendants have stopped |
-| `workspace_create` | None | `includeUncommitted: { reason }` | 从当前 Pi cwd 所属仓库的已提交 HEAD 创建托管工作树；见 §5 |
-| `workspace_integrate` | `workspace` | None | 向原父目录集成该工作区的待集成改动；见 §5 |
 
-`start` defaults to the current Pi working directory; when workspace is specified, resolve its actual path from the record. The role must exist in the current effective configuration. Resolve CLI, provider and model from role configuration; do not expose per-run model-routing parameters. task/message must be non-empty.
+`start.cwd` selects an existing directory, absolute or relative to the current Pi cwd; omission inherits that cwd. No worktree, branch or snapshot is created. The frozen cwd is retained on continuation. The role must exist in the current effective configuration. Resolve CLI, provider and model from role configuration; do not expose per-run model-routing parameters. task/message must be non-empty.
 
 Claude 任务与追加输入的 JSON 编码字符串最多 1 MiB，超限在原生输入发送前拒绝。恢复时按完整行读取原转录的起始身份，头部读取最多 4 MiB，尾部校验最多 64 KiB；长首条任务仍须满足原 sessionId 与启动 cwd 校验，不用后续匹配行替代起始身份。
 
@@ -56,11 +54,9 @@ Control endpoints and startup requests require protocol v3, runtimeId and an exp
 
 Ordinary Pi dialogs can originate during startup or while idle, and their wire format does not establish task ownership. Known blocking startup dialogs are answered before the first prompt without blocking the reply control queue; dialogs observed later are still forwarded and survive normal task completion. Explicit interruption invalidates dialogs observed in that turn, while earlier runtime dialogs remain pending; release cancels all. Logical `subagent_ask_parent` IDs include the host run ID, so a repeated native tool-call ID cannot make an old answer apply to a later run. These are lifetime/correlation rules, not authorization evidence.
 
-`baseline: keep | sync` and `includeUncommitted: { reason }` apply only to managed workspaces. Continuing an instance after integration or a baseline change requires an explicit baseline choice. Sync cannot run on an active instance or overwrite unintegrated changes. Under the workspace lease, it closes only the target idle writer, confirms release, preflights the original session, then synchronizes and resumes. Invalid confirmation metadata is rejected before closing; later preflight/content refusals can leave the runtime closed, with no new run and no automatic replay. Integrate refuses any remaining writer, including idle, until explicitly stopped. The reason records the caller's explanation; it is not proof that the extension has established user authorization.
-
 ### 2.2 Results and errors
 
-Keep existing instance information: `id`, `runId`, `role`, `cli`, `phase`, `cwd`, known native session identity, pending requests, and workspace / workspaceBaseline where applicable. Include errors and locations as needed, not the entire native configuration or credentials.
+Keep existing instance information: `id`, `runId`, `role`, `cli`, `phase`, `cwd`, known native session identity, pending requests, and legacy workspace / workspaceBaseline as read-only historical metadata where present. Include errors and locations as needed, not the entire native configuration or credentials.
 
 Do not introduce an ambiguous `success: true` that collapses all states:
 
@@ -88,7 +84,7 @@ The existing `AgentState.accepted` describes receipt of the run's initial task, 
 - **旧变量**：`PI_CLI_SUBAGENTS_MAX_RUNTIMES` 继续表示 **resident**；它的 `0` 由非法变为合法。旧变量与新 `MAX_RESIDENT` 同时出现即**拒绝**（即使数值相同），避免隐含优先级；旧变量与新 `MAX_ACTIVE` 可以同时配置。
 - **破坏性变更（必须显式声明）**：旧合同为「变量缺失 = 不启用上限」，现改为「未配置即 4 / 12」。要恢复旧行为须同时设置 `MAX_ACTIVE=0` 与 `MAX_RESIDENT=0`。
 - **占用口径（resident）**：runtime 从创建那一刻起占一个名额，直到**释放被确认**（`phase=closed` 且 `runtimeClosed=true`）才归还。`starting/running/waiting/stopping/idle` 与带终态的 `completed/failed/stopped` 全占；`closed` 但缺 `runtimeClosed` 的未确认释放**仍占**；记录不可读（`unreachable`）**仍占**。
-- **唯一例外：`reclaim`**。不可达 runtime 只有在**显式** `reclaim` 且 worker 与 CLI 两个记录 PID 都得到 `ESRCH` 观察后，才停止计入 active/resident。凭据写在实例目录的 `reclaims/<runtimeId>.json`（一 runtime 一份，**创建后不覆盖**；重复调用仅在身份与所有权仍匹配时返回原证据，否则拒绝）。生效条件（同时满足）：记录内容绑定当前父会话、实例与**同一个** `runtimeId`；证据结构完整且判据为 `ESRCH`；`owner.lock` **不存在**或 runtimeId 与 pid 均与记录一致。以下情形**回收记录不生效**且该 runtime 继续占位：当前 `owner.lock` 属于另一个 runtime（所有权冲突）、`phase` 不是 `unreachable`、内容无效或不可解析。回收不影响未结算的准入预留，也不解除 workspace 写入排他或允许恢复原会话。**证据边界**：`reclaim` 只处理记录中的 `workerPid` 与 `cliPid`；CLI 派生的孙进程（后台 server、长跑任务）既不在记录里也不在证据范围内，所以"账目已回收"不等于"该 runtime 启动的所有工作都已停止"。`subagent_query` 的 `get`/`list` 会返回 `reclaimed: { at, evidence, nativeReleaseConfirmed:false, continuation:"blocked" }`（`at` 为观察时间；`evidence` 含两个 PID 与 `ESRCH` 判据），因此回收后的实例在查询里仍可辨别，而不会看起来像已正常关闭。
+- **唯一例外：`reclaim`**。不可达 runtime 只有在**显式** `reclaim` 且 worker 与 CLI 两个记录 PID 都得到 `ESRCH` 观察后，才停止计入 active/resident。凭据写在实例目录的 `reclaims/<runtimeId>.json`（一 runtime 一份，**创建后不覆盖**；重复调用仅在身份与所有权仍匹配时返回原证据，否则拒绝）。生效条件（同时满足）：记录内容绑定当前父会话、实例与**同一个** `runtimeId`；证据结构完整且判据为 `ESRCH`；`owner.lock` **不存在**或 runtimeId 与 pid 均与记录一致。以下情形**回收记录不生效**且该 runtime 继续占位：当前 `owner.lock` 属于另一个 runtime（所有权冲突）、`phase` 不是 `unreachable`、内容无效或不可解析。回收不影响未结算的准入预留，也不授予目录接管权限或允许恢复原会话。**证据边界**：`reclaim` 只处理记录中的 `workerPid` 与 `cliPid`；CLI 派生的孙进程（后台 server、长跑任务）既不在记录里也不在证据范围内，所以"账目已回收"不等于"该 runtime 启动的所有工作都已停止"。`subagent_query` 的 `get`/`list` 会返回 `reclaimed: { at, evidence, nativeReleaseConfirmed:false, continuation:"blocked" }`（`at` 为观察时间；`evidence` 含两个 PID 与 `ESRCH` 判据），因此回收后的实例在查询里仍可辨别，而不会看起来像已正常关闭。
 - **计数来源**：每次准入都从磁盘重算（`manager.list()`），因此跨 controller / 跨工具调用一致。
 - **准入点**（三条）：新建实例（`start`）、对**已释放实例**的 `send` 恢复、以及**对 `idle` 实例开启新 run 的 `send`**。最后一条只判 active、不判 resident——该实例已经占着 runtime 名额，新 run 不新增 runtime。
 - **并发**：每次准入成功先做一次**进程内轮次预留**，直到该轮次的 runId 对磁盘可见；预留按「实例 + 前一个 runId」判定撤销，所以「实例已在列表中可见」本身**不会**撤销预留（`idle` 实例天然可见）。无法确认结果（超时、丢回执等）不因 `finally` 或旧 idle 状态就归还名额，也不接受同实例的替换输入；须等磁盘出现该轮次、原 runtime 确认释放，或有完整拒绝/未提交证据。完整 HTTP 拒绝且旧轮仍为已结算状态时归还预留，但拒绝本身不证明没有文件等副作用。
@@ -98,11 +94,11 @@ The existing `AgentState.accepted` describes receipt of the run's initial task, 
 ### 2.4 Examples
 
 ```json
-{"action":"start","role":"implementer","task":"Complete the specified change","workspace":"<workspace-id>"}
+{"action":"start","role":"implementer","task":"Complete the specified change","cwd":"<existing-directory>"}
 ```
 
 ```json
-{"action":"send","id":"<agent-id>","message":"Continue working on this issue","baseline":"keep"}
+{"action":"send","id":"<agent-id>","message":"Continue working on this issue"}
 ```
 
 ```json
@@ -115,12 +111,12 @@ The example role name does not require the extension to provide that built-in ro
 
 | action | Required | Optional | Returns |
 |---|---|---|---|
-| `list` | None | None | Compact metadata for this parent's instances and the managed-workspace inventory, without report bodies |
+| `list` | None | None | Compact metadata for this parent's instances, without report bodies |
 | `get` | `id` | None | State, recent task history, pending requests and a bounded result preview for the specified instance |
 | `result` | `id`, `runId` | `offset`, `limit` | Pages of the specified run's original final report |
 | `activity` | `id` | `cursor`, `limit`, `maxBytes` | Recent projected entries, then older pages via the returned cursor |
 
-Keep the workspace inventory in `list` so reusable workspaces and their occupation can be discovered without a separate workspace-list tool. `get` may include necessary information about the instance's associated workspace; do not add cross-parent-session scanning.
+`list` and `get` return `{ agents }`, without a workspace inventory or Git scan. Legacy workspace metadata may remain on an instance; do not add cross-parent-session scanning.
 
 The result action retains the current pagination contract: offset defaults to 0; limit defaults to and cannot exceed 12000 UTF-16 code units. Return `agentId`, `runId`, `status`, `time`, `error`, `offset`, `totalLength`, `nextOffset` and `text`. Keep id/runId fixed and follow nextOffset until null.
 
@@ -200,39 +196,22 @@ The response is one `control_response` bound to the original request/tool-use/me
 
 Local parser, protocol, public-tool, audit and human-entry tests cover this mapping. Native startup and extracted admission-helper probes are separate from a real Claude turn: no model-driven `AskUserQuestion` round trip is claimed or authorized by this document. The extracted admission helper belongs to a native strict-policy branch; its activation on this stdio launch path, including its rejection and quoting behavior, has not been established. The extension applies its own checks without relying on native enforcement. The public SDK reference is [Handle approvals and user input](https://platform.claude.com/docs/en/agent-sdk/user-input); the stricter bounds and card-field rules were checked against the installed 2.1.283 executable.
 
-## 5. `subagent` 的工作区动作
+## 5. Working directories and legacy managed records
 
-| action | Required | Optional | Returns |
-|---|---|---|---|
-| `workspace_create` | None | `includeUncommitted: { reason }` | Workspace id, path/cwd, baseline, revision, state, parent-directory uncommitted changes and occupation information |
-| `workspace_integrate` | `workspace` | None | workspace, status, changedFiles and patchFile where applicable |
+新实例只使用已有 `cwd`，普通目录、clone 和用户自行管理的 worktree 均可。扩展不创建、同步、合并、锁定或删除这些目录，也不提供 worktree 专用 skill。目录不是权限沙箱；共享文件、基线变化与 Git 工作流由用户及 agent 协调。
 
-Create uses the repository containing the current Pi working directory. It defaults to committed HEAD and must not silently inherit uncommitted changes. Inheriting all current uncommitted changes requires explicit authorization. Do not add creation from arbitrary refs, branches or PRs in this phase.
+### Removed contract
 
-Integrate applies the workspace's unintegrated changes to the original parent directory, retaining records and patches. It does not change the parent's index, HEAD or branches, or automatically commit, push or remove the worktree. Return states remain `applied | already_integrated | no_changes`.
+`workspace_create`、`workspace_integrate` 及 `workspace`、`baseline`、`includeUncommitted` 输入已删除，schema 和直接工具执行都拒绝，不保留别名或自动重映射。`WorkspaceStore`、`ResumeOptions` 和旧 manager 方法参数不再提供；直接调用 manager 的旧额外参数也会拒绝。查询不返回工作区清单、不读取旧工作区 journal、不执行 Git。
 
-Preserve these technical boundaries:
+退役的保障包括目录级 runtime 租约、未提交快照、增量 patch 集成、keep/sync、基线通知和集成备份。普通 Git 或操作指导不等价替代这些保障。会话级原生身份、审批、准入、结果与释放合同不变。
 
-1. Correct workspace ownership and repository identity; operation locks and execution occupation are checked.
-2. Valid baselines and sync records; unfinished or uncertain operations cannot be retried blindly.
-3. Conflicts and parent-file changes are checked before applying; previously integrated increments are not applied again.
-4. Starting or continuing in the same workspace uses the same occupation checks; raw cwd cannot bypass known managed-workspace constraints.
-5. Errors retain enough recovery evidence; do not automatically delete files, restore old baselines or force-apply patches.
+### Existing records
 
-Workspace lifecycle is independent of any one agent: a workspace may pass to another instance after the previous one finishes. Do not automatically classify the new instance as a reviewer or enforce a role order.
-
-Source-review correction: `WorkspaceStore.apply()` checks occupation, repository, baseline, patches and conflicts, but has no hard gate that reads reviewer results or checks PASS. Earlier independent-review requirements primarily lived in tool descriptions and the skill. The four-tool migration made that workflow wording neutral while preserving technical safety checks.
-
-### Parallel isolation example
-
-```text
-workspace.create -> W1        workspace.create -> W2
-subagent.start(workspace=W1)  subagent.start(workspace=W2)
-          Each runs independently; results return automatically
-Check results according to the user's workflow, then workspace.integrate each
-```
-
-此处 workspace.* 只是文档简写，实际调用使用 `subagent({action: "workspace_create"})` 或 `subagent({action: "workspace_integrate", workspace})`。这不是自动默认流水线；无需隔离的任务仍可指定 cwd 或使用当前目录。
+1. 旧 `spec.workspace` 实例的 `send` 在所有状态下统一拒绝，先于原生调用、准入、新 run 或 spec 改写；不自动降级为 cwd，不创建替代实例。
+2. 历史、结果、目录和 `workspace/workspaceBaseline` 元数据保留。当前协议的 reply/interrupt/stop 仍可使用，原有过期、授权、忙碌 stop 与身份检查不放宽；reply 可能让已接受任务继续执行，不是只读操作。旧协议限制仍按升级合同处理。
+3. 明确采用旧目录前，释放旧使用者，检查 `<parent-session>.subagents/workspaces/<id>/` 内记录和其中引用的 journal、patch、backup。未完成或 uncertain 的集成/同步须先人工核查，不能盲重放、还原或删除锁。
+4. 由用户明确决定保留、集成或采用原目录后，才转入普通 Git/cwd 流程。不自动移动 HEAD、建分支、迁移记录或删除文件；不得把另起实例当作绕过拒绝。新 cwd 派发不再检查旧目录租约，不应据此推断接管安全。
 
 ## 6. Role discovery and automatic return
 
@@ -256,7 +235,7 @@ The extension does not decide that the parent must implement, review or integrat
 
 ## 7. Migration strategy and verification gates
 
-只暴露三个当前工具，不并列保留旧七工具或 `subagent_workspace` 别名。旧工作区调用必须改为 `subagent` 的 `workspace_create` / `workspace_integrate`；不自动重映射或重放。外部按工具名配置的允许列表需复核新的动作边界，本次不改用户设置。同步说明、技能和测试，但不迁移既有工作区数据。
+只暴露三个当前工具，不保留旧工具或工作区 action 的别名。删除工作区输入和专用参考，保留通用会话参考。外部允许列表与旧自动化须自行调整；本次不改用户配置、不重映射或重放旧调用、不迁移既有工作区数据。
 
 Preserve original sessions, instance IDs, run IDs, role snapshots and workspace records. Renaming tools must not create new instances or rewrite old reports. Old tool-call hints in historical notifications remain original history. Current usage guidance names only supported tools. Read historical notifications using their original instance/run IDs with `subagent_query`, without editing old evidence.
 
@@ -265,16 +244,16 @@ Preserve original sessions, instance IDs, run IDs, role snapshots and workspace 
 | Tool definitions | Only three tools exposed; role catalog reflects effective configuration; action-level validation rejects unknown or inapplicable fields |
 | Lifecycle mapping | Start creates a new instance; send continues the original identity; unsupported modes fail explicitly; timeouts/rejections do not trigger automatic replacement |
 | Queries and replies | Queries have no execution side effects; full results can be reconstructed; reply ownership, expiration, type and humanOnly behavior do not regress |
-| Workspaces | Two instances use separate worktrees; one workspace supports sequential handoff; conflict rejection, incremental integration and baseline continuation remain correct |
+| Working directories and retirement | Three-backend cwd continuation and original-session resume; retired inputs reject before execution; legacy metadata/results remain readable and current-protocol cleanup remains available |
 | Notifications and compatibility | Delivery to the original parent; waiting-request steering and routine follow-up queuing; recovery redelivery; old instances and runs remain readable; historical notifications are unchanged |
 
 Issues such as roles being overridable but not currently removable, uncertain startup receipts, and corrupt reports affecting a notification batch are separate from merging tools. Verify them with counterexamples and separate increments rather than packing every reliability fix into a tool rename.
 
 During the four-tool migration, serialized name/description/parameters JSON fell from 6,279 to 5,147 bytes. That measurement preceded the dynamic role catalog and is not a final token count. Having 4 tools rather than 7 does not by itself mean correct usage is easier. Continue to prioritize local tests and fake CLIs; real calls require separate authorization.
 
-## 8. Current evidence and unverified items
+## 8. Historical migration evidence and unverified items
 
-The contracts were checked against `src/index.ts`, `src/types.ts`, `src/manager.ts`, `src/notifier.ts`, `src/worker.ts`, `src/roles.ts`, `src/workspace.ts` and the existing skill. This draft introduced no runtime types, state tables, databases or queue implementations.
+The contracts were checked against `src/index.ts`, `src/types.ts`, `src/manager.ts`, `src/notifier.ts`, `src/worker.ts`, `src/roles.ts` and the existing skill. `src/workspace.ts` has since been retired; its former guarantees are not current capabilities. This draft introduced no runtime types, state tables, databases or queue implementations.
 
 Implementation commits: `4b46bdc` (four-tool migration), `29de2e4` (effective role catalog) and `b406426` (follow-up notifications). At that baseline, all 385/385 local tests and typecheck/build passed, as did tool-refresh probes using the project's dependency and the installed Pi loader. Notification tests use actual SDK routing methods with controlled execution stubs, covering busy queuing, original-run redelivery after queue loss and persisted-receipt deduplication; this is not acceptance of the complete model loop.
 

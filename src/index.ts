@@ -4,7 +4,6 @@ import path from "node:path";
 import { Key, matchesKey, type Component } from "@earendil-works/pi-tui";
 import { getAgentDir, getMarkdownTheme, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { AgentManager } from "./manager.js";
-import { WorkspaceDecisionRequired, type ResumeOptions } from "./workspace.js";
 import { customType as reportType, deliverReports } from "./notifier.js";
 import { humanActionType, createHumanActionBatch, deliverHumanActions, saveHumanAction, saveHumanActionBatch } from "./human-actions.js";
 import { renderReportMessage, renderHumanActionMessage } from "./ui/report.js";
@@ -185,18 +184,20 @@ export default function extension(pi: ExtensionAPI): void {
     recordHumanAction(ctx, manager, agent, `${action}: ${input}\n${receiptText(agent)}\nObserved ${viewStatus(agent).label}; instance: ${agent.id}; run: ${agent.runId}.`, epoch);
   }
 
-  async function sendAndRecord(ctx: ExtensionContext, manager: AgentManager, id: string, message: string, epoch: number, action: string, options: ResumeOptions = {}): Promise<AgentView> {
+  async function sendAndRecord(ctx: ExtensionContext, manager: AgentManager, id: string, message: string, epoch: number, action: string): Promise<AgentView> {
     if (epoch !== sessionEpoch) throw new Error("Parent session changed before input request; no input sent.");
     const before = manager.get(id);
-    const input = `"${oneLine(message, 400)}"${options.baseline ? ` (workspace baseline: ${options.baseline})` : ""}`;
+    const input = `"${oneLine(message, 400)}"`;
     let state: AgentView;
-    try { state = await manager.send(id, message, "steer", options); }
+    try { state = await manager.send(id, message, "steer"); }
     catch (error) {
-      if (!(error instanceof WorkspaceDecisionRequired)) {
-        let observed = before;
-        try { observed = manager.get(id); } catch { /* Retain the last known identity. */ }
-        recordHumanAction(ctx, manager, observed, `Input request unconfirmed: ${input}\n${(error as Error).message}\nInspect the instance before retrying; work may already have run.`, epoch);
-      }
+      let observed = before;
+      try { observed = manager.get(id); } catch { /* Retain the last known identity. */ }
+      // The legacy marker is immutable: send rejects it before dispatch, not at an uncertain transport boundary.
+      const detail = before.workspace !== undefined
+        ? `Input request refused: ${input}\n${(error as Error).message}\nNo input was sent.`
+        : `Input request unconfirmed: ${input}\n${(error as Error).message}\nInspect the instance before retrying; work may already have run.`;
+      recordHumanAction(ctx, manager, observed, detail, epoch);
       throw error;
     }
     recordHumanInput(ctx, manager, state, input, action, epoch);
@@ -325,45 +326,32 @@ export default function extension(pi: ExtensionAPI): void {
 
   const registerSubagent = (catalog: string): void => pi.registerTool({
     name: "subagent", label: "CLI subagent",
-    description: `Start or continue a persistent CLI subagent. send keeps the same native session: idle starts a new run; closed resumes the original session. interrupt ends the captured run without releasing its runtime; Claude also cancels that run's queued inputs. stop releases a runtime that has no accepted turn in flight; while a turn is in flight it refuses, because releasing would discard that turn — interrupt it first. reclaim frees the accounting of one unreachable runtime whose recorded worker and CLI are both reliably gone: it confirms no native release, leaves the lock and history untouched, and does not make the instance resumable. Sessions, history and results are retained. Answer pending interactions with subagent_reply.\n\nworkspace_create/workspace_integrate manage detached Git worktrees of the parent repository or of the repository at cwd; read the delegate-cli-agents workspaces reference before either. Inherit ALL uncommitted parent changes only with explicit authorization.\n\nGive the goal, necessary context, authorized scope and acceptance criteria; a new instance has not seen this conversation. Let the child choose its approach unless required behavior constrains it.\n\nReports return automatically. Do not sleep or poll for completion; continue independent work or end this turn. Receipts do not prove execution or success. Inspect uncertain outcomes before retrying; do not bypass refusals with replacement instances or edited records.\n\n${catalog}`,
+    description: `Start or continue a persistent CLI subagent. send keeps the same native session: idle starts a new run; closed resumes the original session. interrupt ends the captured run without releasing its runtime; Claude also cancels that run's queued inputs. stop releases a runtime that has no accepted turn in flight; while a turn is in flight it refuses, because releasing would discard that turn — interrupt it first. reclaim frees the accounting of one unreachable runtime whose recorded worker and CLI are both reliably gone: it confirms no native release, leaves the lock and history untouched, and does not make the instance resumable. Sessions, history and results are retained. Answer pending interactions with subagent_reply.\n\nGive the goal, necessary context, authorized scope and acceptance criteria; a new instance has not seen this conversation. Let the child choose its approach unless required behavior constrains it.\n\nReports return automatically. Do not sleep or poll for completion; continue independent work or end this turn. Receipts do not prove execution or success. Inspect uncertain outcomes before retrying; do not bypass refusals with replacement instances or edited records.\n\n${catalog}`,
     parameters: Type.Object({
-      action: Type.Union([Type.Literal("start"), Type.Literal("send"), Type.Literal("interrupt"), Type.Literal("stop"), Type.Literal("reclaim"), Type.Literal("workspace_create"), Type.Literal("workspace_integrate")], { description: "interrupt requires native captured-turn confirmation; unsupported capabilities reject. send to a stopping instance waits for release before attempting original-session resume; uncertain release rejects. reclaim frees the accounting of one unreachable runtime whose recorded worker and CLI are both reliably gone; it never claims a native release and never makes the instance resumable." }),
+      action: Type.Union([Type.Literal("start"), Type.Literal("send"), Type.Literal("interrupt"), Type.Literal("stop"), Type.Literal("reclaim")], { description: "interrupt requires native captured-turn confirmation; unsupported capabilities reject. send to a stopping instance waits for release before attempting original-session resume; uncertain release rejects. reclaim frees the accounting of one unreachable runtime whose recorded worker and CLI are both reliably gone; it never claims a native release and never makes the instance resumable." }),
       role: Type.Optional(Type.String({ description: "start only, required: configured role name" })),
       task: Type.Optional(Type.String({ description: "start only, required: task and authorized scope" })),
-      cwd: Type.Optional(Type.String({ description: "start/workspace_create: absolute, or relative to the parent cwd; start: mutually exclusive with workspace" })),
-      workspace: Type.Optional(Type.String({ description: "start/workspace_integrate: managed workspace ID; required for workspace_integrate; start excludes cwd" })),
+      cwd: Type.Optional(Type.String({ description: "start only: existing directory, absolute or relative to the parent cwd; defaults to the parent cwd" })),
       id: Type.Optional(Type.String({ description: "send/interrupt/stop/reclaim only, required: existing instance ID" })),
       runtimeId: Type.Optional(Type.String({ description: "reclaim only, required: the exact runtime ID reported by subagent_query get; a different runtime is refused so a retry cannot silently move to a newer owner" })),
       message: Type.Optional(Type.String({ description: "send only, required: follow-up goal, new context and changed constraints; repeat the full task only when needed" })),
       mode: Type.Optional(Type.Union([Type.Literal("steer"), Type.Literal("followUp")], { description: "send only, defaults to steer. Running Pi: steer supplies input before a subsequent model request without cancelling the in-flight tool; followUp waits until the current execution has no more tool calls. Running Codex supports steer only. Claude maps steer to non-aborting next input and followUp to later input; native receipt capabilities are required. This selects child input delivery, not parent report delivery." })),
-      baseline: Type.Optional(Type.Union([Type.Literal("keep"), Type.Literal("sync")], { description: "managed-workspace send only, required when a changed baseline needs acknowledgement. keep uses current workspace files; it does not restore remembered files. sync updates from the parent, refuses active, staged or unintegrated work and other runtime owners, and closes the target idle runtime before preflight; a later refusal may leave it closed. Child session memory may be stale after either choice." })),
-      includeUncommitted: Type.Optional(Type.Object({ reason: Type.String({ minLength: 1, description: "workspace_create or send with sync only: why ALL current uncommitted parent changes are authorized for inheritance" }) }, { additionalProperties: false })),
     }, { additionalProperties: false }),
     async execute(_id, args, _signal, _update, ctx) {
-      if (args.action === "workspace_create") {
-        checkFields(args, ["action"], ["cwd", "includeUncommitted"]);
-        return content(JSON.stringify(await parentManager(ctx, launch).workspaces.create(path.resolve(ctx.cwd, args.cwd ?? ctx.cwd), { includeUncommitted: args.includeUncommitted })));
-      }
-      if (args.action === "workspace_integrate") {
-        checkFields(args, ["action", "workspace"]);
-        return content(JSON.stringify(await parentManager(ctx, launch).workspaces.integrate(args.workspace!)));
-      }
       if (args.action === "start") {
-        checkFields(args, ["action", "role", "task"], ["cwd", "workspace"]);
-        if (args.workspace !== undefined && args.cwd !== undefined) throw new Error("Pass workspace or cwd, not both");
+        checkFields(args, ["action", "role", "task"], ["cwd"]);
         const roles = loadRoles(getAgentDir(), ctx.cwd, ctx.isProjectTrusted());
         if (!Object.hasOwn(roles, args.role!)) throw new Error(`Unknown role: ${args.role}; available: ${Object.keys(roles).join(", ")}`);
         const resolved = roles[args.role!];
-        const state = await parentManager(ctx, launch).spawn(args.role!, inheritParentModel(resolved, ctx), path.resolve(ctx.cwd, args.cwd ?? ctx.cwd), args.task!, args.workspace);
+        const state = await parentManager(ctx, launch).spawn(args.role!, inheritParentModel(resolved, ctx), path.resolve(ctx.cwd, args.cwd ?? ctx.cwd), args.task!);
         const result = `Subagent ${state.phase}: ${view(state)}
 ${receiptText(state)}`;
         if (hasFailure(state)) throw new Error(`${result}\nInspect the instance before retrying; work may already have run.`);
         return content(state.receipt?.status === "accepted" || state.receipt?.status === "queued" ? `${result}\n${REPORT_GUIDANCE}` : result);
       }
       if (args.action === "send") {
-        checkFields(args, ["action", "id", "message"], ["mode", "baseline", "includeUncommitted"]);
-        const state = await parentManager(ctx, launch).send(args.id!, args.message!, (args.mode ?? "steer") as Delivery,
-          { baseline: args.baseline, includeUncommitted: args.includeUncommitted });
+        checkFields(args, ["action", "id", "message"], ["mode"]);
+        const state = await parentManager(ctx, launch).send(args.id!, args.message!, (args.mode ?? "steer") as Delivery);
         const result = `Subagent ${state.phase} after input request: ${view(state)}
 ${receiptText(state)}`;
         if (hasFailure(state)) throw new Error(`${result}\nInspect the instance before retrying; work may already have run.`);
@@ -375,7 +363,7 @@ ${receiptText(state)}`;
         return content(`${receiptText(state)}
 ${view(state)}`);
       }
-      if (args.action !== "stop" && args.action !== "interrupt") throw new Error("Unknown subagent action; use start, send, interrupt, stop, reclaim, workspace_create or workspace_integrate");
+      if (args.action !== "stop" && args.action !== "interrupt") throw new Error("Unknown subagent action; use start, send, interrupt, stop or reclaim");
       checkFields(args, ["action", "id"]);
       const manager = parentManager(ctx, launch);
       let captured: { runId: string; runtimeId?: string } | undefined;
@@ -398,7 +386,7 @@ ${view(state, args.action === "interrupt")}`);
   registerSubagent("Role catalog loads at session start.");
   pi.registerTool({
     name: "subagent_query", label: "Query CLI subagents",
-    description: "Inspect this parent's instances without starting or resuming them. idle still owns processes; closed retains the native session. lastStatus describes the last run, not resource release.\n\nlist returns metadata and workspaces; get includes pending requests, a bounded result preview and optional reported usage; usageComplete=false means unknown, not zero. Usage is neither live telemetry nor a bill. If truncated, use result with the original id/runId and follow nextOffset until null; never substitute another run. activity is a paged history projection, not the full final report.\n\nRead complete evidence and verify claims before reporting success.",
+    description: "Inspect this parent's instances without starting or resuming them. idle still owns processes; closed retains the native session. lastStatus describes the last run, not resource release.\n\nlist returns instance metadata; get includes pending requests, a bounded result preview and optional reported usage; usageComplete=false means unknown, not zero. Usage is neither live telemetry nor a bill. If truncated, use result with the original id/runId and follow nextOffset until null; never substitute another run. activity is a paged history projection, not the full final report.\n\nRead complete evidence and verify claims before reporting success.",
     parameters: Type.Object({
       action: Type.Union([Type.Literal("list"), Type.Literal("get"), Type.Literal("result"), Type.Literal("activity")]),
       id: Type.Optional(Type.String({ description: "get/result/activity only, required: instance ID" })),
@@ -433,7 +421,7 @@ ${view(state, args.action === "interrupt")}`);
       // Only `get` carries the on-demand native usage projection; list and receipts stay unchanged.
       const agents = await Promise.all((args.action === "get" ? [manager.get(args.id!)] : manager.list()).map(async state =>
         ({ ...visible(state, args.action === "get"), ...(args.action === "get" ? await reportedUsage(manager, state.id, state, signal) : {}) })));
-      return content(JSON.stringify({ agents, workspaces: await manager.workspaces.list() }));
+      return content(JSON.stringify({ agents }));
     },
   });
   pi.registerTool({
@@ -544,31 +532,6 @@ ${view(state, args.action === "interrupt")}`);
     if (epoch === sessionEpoch) ctx.ui.notify(`Human response accepted for subagent ${id}`, "info");
   }
 
-  async function sendHuman(ctx: ExtensionContext, manager: AgentManager, id: string, message: string, epoch: number, action: string): Promise<AgentView | undefined> {
-    let state: AgentView;
-    let options: ResumeOptions = {};
-    try { state = await sendAndRecord(ctx, manager, id, message, epoch, action); }
-    catch (error) {
-      if (!(error instanceof WorkspaceDecisionRequired) || error.decision !== "baseline") throw error;
-      if (epoch !== sessionEpoch) return;
-      ctx.ui.notify(error.message, "warning");
-      const choice = await ctx.ui.select("Choose workspace baseline", ["keep — current workspace, no parent sync", "sync — update workspace from parent"]);
-      if (!choice || epoch !== sessionEpoch) return;
-      options = { baseline: choice.startsWith("keep") ? "keep" : "sync", expectedRevision: error.workspace.revision };
-      try { state = await sendAndRecord(ctx, manager, id, message, epoch, action, options); }
-      catch (error) {
-        if (!(error instanceof WorkspaceDecisionRequired) || error.decision !== "inherit") throw error;
-        if (epoch !== sessionEpoch) return;
-        const confirmed = await ctx.ui.confirm("Inherit these uncommitted parent changes?", `${error.parentChanges.join("\n")}\n\nConfirm only if ALL these changes are authorized for this task. The parent index, HEAD and branches will not change.`);
-        if (!confirmed || epoch !== sessionEpoch) return;
-        options = { ...options, expectedParentTree: error.parentTree,
-          includeUncommitted: { reason: "The human explicitly confirmed the displayed parent changes in the TUI." } };
-        state = await sendAndRecord(ctx, manager, id, message, epoch, action, options);
-      }
-    }
-    return state;
-  }
-
   let panelBusy = false;
   /** Widget slot for the role editor, rendered by Pi in the area just above the editor. */
   const ROLE_SETTINGS_KEY = "cli-subagents-role-settings";
@@ -613,16 +576,7 @@ ${view(state, args.action === "interrupt")}`);
           paging: { older: async (boundary) => ({ agent: manager.get(id), ...await lease.window.pageUp(files(), boundary) }),
             newer: async (boundary) => ({ agent: manager.get(id), ...await lease.window.pageDown(files(), boundary) }),
             latest: async () => ({ agent: manager.get(id), ...await lease.window.toTail(files()) }) },
-          onSend: async (message) => {
-            try {
-              const sent = await sendAndRecord(ctx, manager, id, message, epoch, "Requested input");
-              return sent;
-            }
-            catch (error) {
-              if (error instanceof WorkspaceDecisionRequired) return { kind: "message", id, resume: true, message };
-              throw error;
-            }
-          },
+          onSend: (message) => sendAndRecord(ctx, manager, id, message, epoch, "Requested input"),
           // Match Pi's input box: its border follows the main session's thinking level.
           frameColor: (text) => ctx.ui.theme.getThinkingBorderColor(ctx.thinkingLevel ?? "off")(text) });
         return viewer;
@@ -718,10 +672,9 @@ ${view(state, args.action === "interrupt")}`);
     const message = action.message ?? await ctx.ui.editor(resuming ? `Resume ${state.role} in the original session` : state.phase === "idle" ? `New task for ${state.role}` : `Message ${state.role}`, "");
     if (!message?.trim() || epoch !== sessionEpoch) return "next";
     if (!steerable) ctx.ui.notify("Starting a new turn in the original session; this can take up to about 60 seconds...", "info");
-    const sent = await sendHuman(ctx, manager, action.id, message, epoch,
+    const sent = await sendAndRecord(ctx, manager, action.id, message, epoch,
       steerable ? "Requested input" : resuming ? "Requested original-session continuation with" : "Requested a new resident task with");
     if (epoch !== sessionEpoch) return "stop";
-    if (!sent) return "next";
     ctx.ui.notify(receiptText(sent), sent.receipt?.status === "unconfirmed" ? "warning" : "info");
     return "next";
   }
