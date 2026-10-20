@@ -79,7 +79,7 @@ Pi 子进程可通过 `subagent_ask_parent` 向主 agent 提出一个任务问�
 
 ## 会话内界面
 
-主 agent 回复下方会列出每个实例的阶段与已用时间，主 agent 仍在工作时可用 `Ctrl+Alt+A` 打开同一列表。
+主 agent 回复下方只显示 starting/running/waiting/stopping 的工作；没有进行中或待回复工作时整块消失。空闲实例与已结束结果仍保留在 `Ctrl+Alt+A` 打开的 `/agents` 管理面板中，隐藏不等于释放进程。下方状态截图来自此次过滤改动之前。
 
 ![主 agent 回复下方的实例列表](https://raw.githubusercontent.com/joshua-zyy/pi-cli-subagents/main/docs/assets/subagent-running-ui.png)
 

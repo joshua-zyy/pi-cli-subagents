@@ -114,8 +114,10 @@ Pi children can ask the parent a single task question through `subagent_ask_pare
 
 ## In the session
 
-The roster under the parent's reply lists every instance with its phase and elapsed time, and
-`Ctrl+Alt+A` opens the same list while the parent is still working:
+The status area under the parent's reply shows only starting, running, waiting and stopping work;
+it disappears when no work needs attention. Idle runtimes and finished results remain available
+in `/agents`, opened with `Ctrl+Alt+A`. Hiding them does not release processes. The status
+screenshot below predates this filtering:
 
 ![The subagent roster under the parent's reply](https://raw.githubusercontent.com/joshua-zyy/pi-cli-subagents/main/docs/assets/subagent-running-ui.png)
 

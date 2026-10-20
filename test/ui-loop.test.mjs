@@ -182,7 +182,7 @@ test('fullscreen host keeps the roster frame and selected identity visible throu
   let pane;
   try {
     h.start();
-    await waitUntil('status widget', () => h.widgetCalls.some(call => call.key === 'cli-subagents'));
+    h.ctx.ui.setWidget('fixture-status', () => fixed(Array(10).fill('STATUS')));
     h.ctx.ui.setWidget('fixture-todos', () => fixed(Array(6).fill('TODO')));
     pane = await h.openAgents();
     for (let i = 0; i < 6; i++) terminal.input(keys.down);
@@ -229,10 +229,11 @@ test('one monitor tick shares one live snapshot across reports and status withou
     assert.equal(h.state.listeners.length,0,'monitoring must not intercept prompt arrow keys');
     t.mock.timers.tick(500);
     assert.equal(calls, 1, 'animation between monitor ticks must not read another snapshot');
-    // This synthetic record has no protocolVersion: legacy completion stays readable.
+    // Completion remains in manager history, not in the current-work widget.
     phase = 'completed'; t.mock.timers.tick(200);
     assert.equal(calls, 2);
-    assert.ok(components.every(component => /completed/i.test(component.render(120).join('\n'))));
+    assert.ok(components.every(component => component.render(120).length === 0));
+    assert.equal(h.widgetCalls.filter(call=>call.key==='cli-subagents').at(-1).content,undefined);
   } finally {
     h.handlers.session_shutdown?.(); t.mock.timers.reset(); AgentManager.prototype.list = original;
   }
@@ -321,23 +322,23 @@ test('open roster consumes monitor snapshots, updates elapsed time and detaches 
   }
 });
 
-test('status widget registers only in TUI, shows agents and unregisters at shutdown', { timeout: 20_000 }, async (t) => {
+test('status widget shows active work then unregisters when the worker becomes resident idle', { timeout: 20_000 }, async (t) => {
   const h = harness(t);
   h.start();
-  const agent = await h.spawn('REMEMBER widget');
-  const idle = await waitForIdle(h.manager, agent.id);
-  assert.equal(idle.protocolVersion, 3);
-  assert.equal(processAlive(idle.workerPid), true, 'run completion must leave the worker resident');
-  assert.ok(fs.existsSync(path.join(h.manager.root, agent.id, 'owner.lock')));
+  const agent = await h.spawn('HOLD widget');
   const registered = await waitUntil('widget registration', () => h.widgetCalls.find((call) => typeof call.content === 'function'));
   assert.equal(registered.key, 'cli-subagents');
   const component = registered.content({ terminal: { columns: 120 }, requestRender() {} }, theme);
   const rendered = () => component.render(120).join('\n');
   assert.match(rendered(), /worker/, 'widget must show the role');
   assert.match(rendered(), /\d+\.\d+s/, 'widget must show elapsed time');
-  // A finished run collapses to one idle row; the owner is still available for release.
-  await waitUntil('widget reflects idle completion', () => /Idle.*last Completed/.test(rendered()));
-  assert.match(rendered(), /└─ ○ worker/);
+  await h.manager.interrupt(agent.id);
+  const idle = await waitForIdle(h.manager, agent.id, 'stopped');
+  assert.equal(idle.protocolVersion, 3);
+  assert.equal(processAlive(idle.workerPid), true, 'hiding idle must not release the worker');
+  assert.ok(fs.existsSync(path.join(h.manager.root, agent.id, 'owner.lock')));
+  await waitUntil('idle removes the activity widget', () => h.widgetCalls.filter(call=>call.key==='cli-subagents').at(-1)?.content === undefined);
+  assert.equal(rendered(), '');
   component.invalidate();
   h.handlers.session_shutdown?.();
   const last = h.widgetCalls.filter(call=>call.key==='cli-subagents').at(-1);

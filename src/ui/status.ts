@@ -1,10 +1,9 @@
 import { truncateToWidth } from "@earendil-works/pi-tui";
 import type { AgentView } from "../types.js";
-import { SPINNER, canStop, isReleased, formatElapsed, isActive, isTerminal, oneLine, phaseIcon, phaseLabel, rightAlign, shortId, viewElapsed, viewStartedAt, viewStatus, type UiColor, type UiTheme } from "./format.js";
+import { SPINNER, formatElapsed, isActive, oneLine, phaseIcon, phaseLabel, rightAlign, shortId, viewElapsed, viewStartedAt, type UiColor, type UiTheme } from "./format.js";
 
 export const STATUS_KEY = "cli-subagents";
 export const MAX_STATUS_LINES = 10;
-export const FINISHED_LINGER_MS = 30_000;
 /**
  * pi-tui animates its own loader at this interval with these exact frames. Matching it keeps the
  * roster's spinner turning at the same rate as the working row the user compares it against.
@@ -16,7 +15,6 @@ export interface StatusLinesOptions {
   frame: number;
   width: number;
   theme: UiTheme;
-  lingerMs?: number;
 }
 
 export interface WidgetTui { terminal: { columns: number }; requestRender(): void }
@@ -34,26 +32,15 @@ const BODY_LIMIT = 60;
 const byStart = (a: AgentView, b: AgentView): number => viewStartedAt(a) - viewStartedAt(b);
 const shorten = (text: string, width: number): string => (width > 0 ? truncateToWidth(text, width) : text);
 
-interface Row { head: string; body?: string }
+interface Row { head: string; body: string }
 
 /** Render a snapshot without side effects; return no lines when there is nothing to display. */
 export function statusLines(agents: AgentView[], options: StatusLinesOptions): string[] {
   const { now, theme, width } = options;
-  const lingerMs = options.lingerMs ?? FINISHED_LINGER_MS;
-  const list = Array.isArray(agents) ? agents.filter(agent => !isReleased(agent)) : [];
+  const list = Array.isArray(agents) ? agents.filter(agent => isActive(agent.phase)) : [];
   const waiting = list.filter((agent) => agent.phase === "waiting").sort(byStart);
   const active = list.filter((agent) => isActive(agent.phase) && agent.phase !== "waiting").sort(byStart);
-  const idle = list.filter((agent) => agent.phase === "idle").sort(byStart);
-  const finished = list.filter((agent) => isTerminal(agent.phase) && now - agent.updatedAt <= lingerMs).sort(byStart);
-  // Prefer the most recently finished instances when space is limited.
-  const recent = [...finished].reverse();
-
-  const details = (agent: AgentView): string => {
-    const error = oneLine(agent.error, BODY_LIMIT);
-    const label = viewStatus(agent).label;
-    return error ? `${label}: ${error}` : label;
-  };
-  const row = (icon: string, color: UiColor, agent: AgentView, detail: string, activity?: string): Row => {
+  const row = (icon: string, color: UiColor, agent: AgentView, detail: string, activity: string): Row => {
     const task = oneLine(agent.task, HEAD_LIMIT);
     const role = theme.fg("text", theme.bold(agent.role));
     const left = `${theme.fg("dim", "├─")} ${theme.fg(color, icon)} ${role} ${theme.fg("dim", shortId(agent.id))}${task ? `  ${theme.fg("muted", task)}` : ""}`;
@@ -61,30 +48,25 @@ export function statusLines(agents: AgentView[], options: StatusLinesOptions): s
     const stats = theme.fg("dim", `· ${detail} · ${formatElapsed(viewElapsed(agent, now))}`);
     return {
       head: rightAlign(left, stats, width),
-      ...(activity === undefined ? {} : { body: `${theme.fg("dim", "│    ")}${theme.fg("muted", "⎿ ")}${theme.fg("dim", activity)}` }),
+      body: `${theme.fg("dim", "│    ")}${theme.fg("muted", "⎿ ")}${theme.fg("dim", activity)}`,
     };
   };
 
-  // Idle owners remain visible until explicitly released; only closed or historical results expire.
-  // Display priority: waiting for a response, active, idle, then recently finished.
+  // This is current work, not the instance inventory. Waiting still requires attention;
+  // idle resources, results and failures remain available in /agents and existing reports.
   const groups: { rows: Row[] }[] = [
     { rows: waiting.map((agent) => row(phaseIcon("waiting"), "warning", agent, "Waiting", oneLine(agent.questions?.[0]?.title, BODY_LIMIT) || "Waiting for a response")) },
     { rows: active.map((agent) => row(SPINNER[Math.abs(options.frame) % SPINNER.length], "accent", agent, phaseLabel(agent.phase), oneLine(agent.lastActivity, BODY_LIMIT) || "Starting...")) },
-    ...[idle, recent].map((group) => ({ rows: group.map((agent) => {
-      const status = viewStatus(agent);
-      return row(status.icon, status.color, agent, details(agent));
-    }) })),
   ];
 
   const heading = (): string => {
-    const counts = [[active.length, "running"], [waiting.length, "waiting"], [idle.length, "idle"], [finished.length, "ended"]]
+    const counts = [[active.length, "running"], [waiting.length, "waiting"]]
       .filter(([count]) => Number(count) > 0).map(([count, label]) => `${count} ${label}`);
-    const color = waiting.length || active.length ? "accent" : "dim";
-    return theme.fg(color, `${waiting.length || active.length ? "●" : "○"} Subagents`) +
+    return theme.fg("accent", "● Subagents") +
       (counts.length ? theme.fg("dim", ` · ${counts.join(" · ")}`) : "") +
       theme.fg("dim", " · Ctrl+Alt+A view");
   };
-  if (!waiting.length && !active.length && !idle.length && !finished.length) return [];
+  if (!list.length) return [];
 
   const budget = MAX_STATUS_LINES - 1 - 1; // One line each for heading and overflow hint
   const rows: Row[] = [];
@@ -92,7 +74,7 @@ export function statusLines(agents: AgentView[], options: StatusLinesOptions): s
   let hidden = 0;
   for (const group of groups) {
     for (const [index, entry] of group.rows.entries()) {
-      const size = entry.body ? 2 : 1;
+      const size = 2;
       if (used + size > budget) { hidden += group.rows.length - index; break; }
       used += size;
       rows.push(entry);
@@ -102,16 +84,14 @@ export function statusLines(agents: AgentView[], options: StatusLinesOptions): s
   const lastIndex = rows.length - 1;
   const body = rows.flatMap((entry, index) => {
     const isLast = index === lastIndex;
-    return entry.body
-      ? [isLast ? entry.head.replace("├─", "└─") : entry.head, isLast ? entry.body.replace("│    ", "   ") : entry.body]
-      : [isLast ? entry.head.replace("├─", "└─") : entry.head];
+    return [isLast ? entry.head.replace("├─", "└─") : entry.head, isLast ? entry.body.replace("│    ", "   ") : entry.body];
   });
   const overflow = hidden > 0 ? [theme.fg("dim", `+ ${hidden} more (/agents)`)] : [];
   return [heading(), ...body, ...overflow].map((line) => shorten(line, width));
 }
 
 /**
- * Register while there is active or idle content; only finished records have a linger period.
+ * Register only while work is in progress or awaiting a response.
  * Pi renders the component. The frame timer animates the spinner without rereading state;
  * `update()`, driven by the monitor, refreshes the snapshot.
  */
@@ -124,16 +104,14 @@ export class StatusWidget {
   private disposed = false;
   private lastError: string | undefined;
   private readonly key: string;
-  private readonly lingerMs: number;
   private readonly intervalMs: number;
 
   constructor(
     private readonly host: WidgetHost,
     private readonly read: () => AgentView[],
-    options: { key?: string; lingerMs?: number; intervalMs?: number } = {},
+    options: { key?: string; intervalMs?: number } = {},
   ) {
     this.key = options.key ?? STATUS_KEY;
-    this.lingerMs = options.lingerMs ?? FINISHED_LINGER_MS;
     this.intervalMs = options.intervalMs ?? FRAME_INTERVAL_MS;
   }
 
@@ -150,8 +128,7 @@ export class StatusWidget {
       return;
     }
     this.stopTick();
-    if (this.hasContent(Date.now())) { this.register(); this.tui?.requestRender(); }
-    else this.unregister();
+    this.unregister();
   }
 
   dispose(): void {
@@ -173,15 +150,12 @@ export class StatusWidget {
     }
   }
   private hasActive(): boolean { return this.snapshot.some((agent) => isActive(agent.phase)); }
-  private hasContent(now: number): boolean {
-    return this.snapshot.some((agent) => !isReleased(agent) && (canStop(agent.phase) || now - agent.updatedAt <= this.lingerMs));
-  }
   private register(): void {
     if (this.registered || this.disposed) return;
     this.host.setWidget(this.key, (tui, theme) => {
       this.tui = tui;
       return {
-        render: (width: number) => statusLines(this.snapshot, { now: Date.now(), frame: this.frame, width, theme, lingerMs: this.lingerMs }),
+        render: (width: number) => statusLines(this.snapshot, { now: Date.now(), frame: this.frame, width, theme }),
         invalidate: () => {},
       };
     });
@@ -199,7 +173,7 @@ export class StatusWidget {
       if (this.disposed) return;
       try {
         this.frame = (this.frame + 1) % SPINNER.length;
-        if (!this.hasActive()) { this.stopTick(); if (!this.hasContent(Date.now())) { this.unregister(); return; } }
+        if (!this.hasActive()) { this.stopTick(); this.unregister(); return; }
         this.tui?.requestRender();
       } catch (error) { console.error("[pi-cli-subagents] Status refresh failed:", error); }
     }, this.intervalMs);
