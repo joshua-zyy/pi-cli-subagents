@@ -54,9 +54,9 @@ export interface AgentSpec {
   id: string;
   parentFile: string;
   cwd: string;
-  /** Parent-owned managed workspace; absent for shared-directory instances. */
+  /** Legacy managed-workspace identity, retained for history and safe release only. */
   workspace?: string;
-  /** The code baseline explicitly delivered to this native session. */
+  /** Legacy baseline metadata; new instances do not set or update it. */
   workspaceBaseline?: { commit: string; revision: number };
   roleName: string;
   role: Role;

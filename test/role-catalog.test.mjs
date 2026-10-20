@@ -5,7 +5,6 @@ import os from 'node:os';
 import path from 'node:path';
 import extension from '../dist/index.js';
 import { AgentManager } from '../dist/manager.js';
-import { WorkspaceStore } from '../dist/workspace.js';
 
 function harness(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'role-catalog-'));
@@ -95,16 +94,10 @@ test('dispatch refuses inherited role properties but accepts an explicitly confi
   assert.deepEqual(calls, [{ name: 'constructor', resolved: configured }], 'check ownership, not a name blacklist');
 });
 
-test('instance queries and workspace operations stay independent of invalid role configuration', async t => {
+test('instance queries stay independent of invalid role configuration', async t => {
   const h = harness(t); h.write('user', { invalid: {} });
   t.mock.method(AgentManager.prototype, 'list', () => []);
-  t.mock.method(WorkspaceStore.prototype, 'list', async () => []);
   h.ctx.sessionManager.getSessionFile = () => '/fixture/parent.jsonl';
   const response = await h.tools.get('subagent_query').execute('query', { action: 'list' }, undefined, undefined, h.ctx);
-  assert.deepEqual(JSON.parse(response.content[0].text), { agents: [], workspaces: [] });
-  t.mock.method(WorkspaceStore.prototype, 'create', async () => ({ id: 'workspace' }));
-  t.mock.method(WorkspaceStore.prototype, 'integrate', async id => ({ workspace: id, status: 'no_changes' }));
-  const workspace = async args => JSON.parse((await h.tools.get('subagent').execute('workspace', args, undefined, undefined, h.ctx)).content[0].text);
-  assert.deepEqual(await workspace({ action: 'workspace_create' }), { id: 'workspace' });
-  assert.deepEqual(await workspace({ action: 'workspace_integrate', workspace: 'workspace' }), { workspace: 'workspace', status: 'no_changes' });
+  assert.deepEqual(JSON.parse(response.content[0].text), { agents: [] });
 });

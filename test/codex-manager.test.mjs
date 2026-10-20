@@ -337,9 +337,9 @@ test('Codex spawns a role without a model through the manager and inherits the n
   await release(started.id);
 });
 
-test('Codex rejects an invalid workspace and invalid defaultModeQuestions before creating instances', async t => {
+test('Codex rejects retired workspace arguments and invalid defaultModeQuestions before creating instances', async t => {
   const { cwd, manager } = setup(t);
-  await assert.rejects(manager.spawn('codex-worker', role, cwd, 'DO', 'any-workspace'), /Invalid workspace/);
+  await assert.rejects(manager.spawn('codex-worker', role, cwd, 'DO', 'any-workspace'), /workspace.*retired/i);
   for (const invalid of [{ ...role, defaultModeQuestions: 'true' }, { ...role, defaultModeQuestions: null },
     { ...role, cli: 'pi', defaultModeQuestions: false }, { ...role, cli: 'claude', defaultModeQuestions: true }])
     await assert.rejects(manager.spawn('worker', invalid, cwd, 'DO'), /defaultModeQuestions/);

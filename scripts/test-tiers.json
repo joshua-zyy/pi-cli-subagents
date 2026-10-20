@@ -49,27 +49,23 @@
     "pi-process.test.mjs",
     "process-tree.test.mjs",
     "storage-race.test.mjs",
-    "test-runner.test.mjs",
-    "workspace.test.mjs"
+    "test-runner.test.mjs"
   ],
   "acceptance-local": [
     "approval.test.mjs",
     "claude-manager.test.mjs",
-    "claude-workspace.test.mjs",
     "codex-manager.test.mjs",
-    "codex-workspace.test.mjs",
+    "cwd.test.mjs",
     "extension.test.mjs",
     "manager-history.test.mjs",
     "manager-recovery.test.mjs",
     "reclaim-lifecycle.test.mjs",
     "shutdown.test.mjs",
     "tool-receipts.test.mjs",
-    "ui-loop.test.mjs",
-    "workspace-history.test.mjs"
+    "ui-loop.test.mjs"
   ],
   "acceptance-slow": [
     "manager.test.mjs",
-    "residency.test.mjs",
-    "workspace-manager.test.mjs"
+    "residency.test.mjs"
   ]
 }

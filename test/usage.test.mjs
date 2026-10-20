@@ -6,7 +6,6 @@ import path from 'node:path';
 import { syncBuiltinESMExports } from 'node:module';
 import extension from '../dist/index.js';
 import { AgentManager } from '../dist/manager.js';
-import { WorkspaceStore } from '../dist/workspace.js';
 import { projectUsage } from '../dist/usage.js';
 import { CHUNK_BYTES } from '../dist/transcript.js';
 import { TranscriptWindow } from '../dist/transcript-window.js';
@@ -58,7 +57,6 @@ test('get reports the child own reported usage while list and reads stay unchang
   t.mock.method(AgentManager.prototype, 'get', () => claudeState);
   t.mock.method(AgentManager.prototype, 'list', () => [claudeState]);
   t.mock.method(AgentManager.prototype, 'eventLogs', () => [file]);
-  t.mock.method(WorkspaceStore.prototype, 'list', async () => []);
   for (const method of ['spawn', 'send', 'close', 'reply', 'interrupt']) t.mock.method(AgentManager.prototype, method, () => { throw Error('query attempted execution'); });
   const got = await get(invoke);
   assert.equal(got.usageComplete, true);
@@ -81,7 +79,6 @@ test('get reports codex session totals without inventing a cost', async t => {
   ].map(JSON.stringify).join('\n') + '\n');
   t.mock.method(AgentManager.prototype, 'get', () => ({ ...claudeState, cli: 'codex', session: { cli: 'codex', threadId: 'thread', sessionId: 's', codexHome: '/fixture' } }));
   t.mock.method(AgentManager.prototype, 'eventLogs', () => [file]);
-  t.mock.method(WorkspaceStore.prototype, 'list', async () => []);
   const got = await get(invoke);
   assert.equal(got.usageComplete, true);
   assert.deepEqual(got.usage, { input: 55, output: 7, cacheRead: 40, cacheWrite: 5, scope: 'session' });
@@ -99,7 +96,6 @@ test('get sums what a pi child reported and refuses a breakdown that is not comp
   let files = [full];
   t.mock.method(AgentManager.prototype, 'get', () => ({ ...claudeState, cli: 'pi', session: undefined }));
   t.mock.method(AgentManager.prototype, 'eventLogs', () => files);
-  t.mock.method(WorkspaceStore.prototype, 'list', async () => []);
   const complete = await get(invoke);
   assert.equal(complete.usageComplete, true);
   assert.deepEqual(complete.usage, { input: 150, output: 25, cacheRead: 900, cacheWrite: 10, cost: 0.5, scope: 'session' });
@@ -123,7 +119,6 @@ test('a pi total stays unusable when a later message leaves its counters unknown
     'fractional.jsonl': [full, { ...full, output: 1.5 }],
   };
   t.mock.method(AgentManager.prototype, 'get', () => ({ ...claudeState, cli: 'pi', session: undefined }));
-  t.mock.method(WorkspaceStore.prototype, 'list', async () => []);
   for (const [name, rows] of Object.entries(cases)) {
     const file = path.join(dir, name);
     fs.writeFileSync(file, rows.map(message).join('\n') + '\n');
@@ -147,7 +142,6 @@ test('a later snapshot that cannot be read replaces the earlier totals with unkn
     { method: 'thread/tokenUsage/updated', params: { threadId: 'thread', tokenUsage: { total: { inputTokens: 100, cachedInputTokens: 40, cacheWriteInputTokens: 5, outputTokens: 7 } } } },
     { method: 'thread/tokenUsage/updated', params: { threadId: 'thread', tokenUsage: {} } },
   ].map(JSON.stringify).join('\n') + '\n');
-  t.mock.method(WorkspaceStore.prototype, 'list', async () => []);
   t.mock.method(AgentManager.prototype, 'get', () => claudeState);
   t.mock.method(AgentManager.prototype, 'eventLogs', () => [claude]);
   const claudeGot = await get(invoke);
@@ -174,7 +168,6 @@ test('a query walks across runs and does not reread the log it already holds', a
   fs.writeFileSync(third, page);
   t.mock.method(AgentManager.prototype, 'get', () => claudeState);
   t.mock.method(AgentManager.prototype, 'eventLogs', () => [first, second, third]);
-  t.mock.method(WorkspaceStore.prototype, 'list', async () => []);
   const reads = [];
   const originalOpen = fsPromises.open;
   fsPromises.open = async (...args) => {
@@ -207,7 +200,6 @@ test('a query cancelled while walking pages rejects and leaves the instance answ
   fs.writeFileSync(file, rows.map(JSON.stringify).join('\n') + '\n');
   t.mock.method(AgentManager.prototype, 'get', () => claudeState);
   t.mock.method(AgentManager.prototype, 'eventLogs', () => [file]);
-  t.mock.method(WorkspaceStore.prototype, 'list', async () => []);
   const controller = new AbortController();
   const originalPageUp = TranscriptWindow.prototype.pageUp;
   t.mock.method(TranscriptWindow.prototype, 'pageUp', function (files) { controller.abort(); return originalPageUp.call(this, files); });
@@ -225,7 +217,6 @@ test('a log that vanishes or shrinks while it is read is not reported as a total
     modelUsage: { model: { inputTokens: 10, outputTokens: 2, cacheReadInputTokens: 20, cacheCreationInputTokens: 3 } } }) + '\n');
   t.mock.method(AgentManager.prototype, 'get', () => claudeState);
   t.mock.method(AgentManager.prototype, 'eventLogs', () => [file]);
-  t.mock.method(WorkspaceStore.prototype, 'list', async () => []);
   const realStat = fs.statSync;
   let mode = 'vanish', calls = 0;
   const mocked = t.mock.method(fs, 'statSync', (target, ...rest) => {
@@ -257,7 +248,6 @@ test('get walks a bounded log back to its start instead of reporting a partial t
   assert.ok(fs.statSync(file).size > 1024 * 1024, 'the fixture must exceed the first bounded window');
   t.mock.method(AgentManager.prototype, 'get', () => claudeState);
   t.mock.method(AgentManager.prototype, 'eventLogs', () => [file]);
-  t.mock.method(WorkspaceStore.prototype, 'list', async () => []);
   const got = await get(invoke);
   assert.equal(got.usageComplete, true);
   assert.equal(got.usage.input, 10);
@@ -275,7 +265,6 @@ test('get marks a log too large for the bounded window as unknown instead of a p
   assert.ok(fs.statSync(file).size > 4.5 * 1024 * 1024, 'the fixture must exceed the window byte budget');
   t.mock.method(AgentManager.prototype, 'get', () => claudeState);
   t.mock.method(AgentManager.prototype, 'eventLogs', () => [file]);
-  t.mock.method(WorkspaceStore.prototype, 'list', async () => []);
   const got = await get(invoke);
   assert.equal(got.usageComplete, false);
   assert.equal(Object.hasOwn(got, 'usage'), false, 'unread history must not be presented as a session total');
@@ -290,7 +279,6 @@ test('a missing run log keeps an older run total out of the session answer', asy
     modelUsage: { model: { inputTokens: 10, outputTokens: 2, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 } } }) + '\n');
   t.mock.method(AgentManager.prototype, 'get', () => claudeState);
   t.mock.method(AgentManager.prototype, 'eventLogs', () => [file, path.join(dir, 'deleted-run.jsonl')]);
-  t.mock.method(WorkspaceStore.prototype, 'list', async () => []);
   const got = await get(invoke);
   assert.equal(got.usageComplete, false, 'the newest run is unreadable, so no session total is knowable');
   assert.equal(Object.hasOwn(got, 'usage'), false);
@@ -306,7 +294,6 @@ test('a cancelled query rejects instead of answering with a stale total', async 
     modelUsage: { model: { inputTokens: 1, outputTokens: 1, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 } } }) + '\n');
   t.mock.method(AgentManager.prototype, 'get', () => claudeState);
   t.mock.method(AgentManager.prototype, 'eventLogs', () => [file]);
-  t.mock.method(WorkspaceStore.prototype, 'list', async () => []);
   const controller = new AbortController();
   controller.abort();
   await assert.rejects(tools.get('subagent_query').execute('cancelled', { action: 'get', id: 'a' }, controller.signal, undefined, ctx), /abort/i);
@@ -319,7 +306,6 @@ test('an unreadable log also degrades to unknown rather than failing the query',
   const { invoke } = harness();
   t.mock.method(AgentManager.prototype, 'get', () => ({ id: 'a', cli: 'pi', phase: 'running', text: 'preview', questions: [] }));
   t.mock.method(AgentManager.prototype, 'eventLogs', () => { throw Error('Invalid or outside-instance runtime log reference'); });
-  t.mock.method(WorkspaceStore.prototype, 'list', async () => []);
   const got = await get(invoke);
   assert.equal(got.usageComplete, false);
   assert.equal(got.usageNote, 'the retained log could not be read');
@@ -334,7 +320,6 @@ test('a pi gap before the first usable message keeps the later total unknown', a
   fs.writeFileSync(file, [message({ cost: { total: 0.2 } }), message({ input: 10, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 11 })].join('\n') + '\n');
   t.mock.method(AgentManager.prototype, 'get', () => ({ ...claudeState, cli: 'pi', session: undefined }));
   t.mock.method(AgentManager.prototype, 'eventLogs', () => [file]);
-  t.mock.method(WorkspaceStore.prototype, 'list', async () => []);
   const got = await get(invoke);
   assert.equal(got.usageComplete, false, 'a later complete message cannot erase an earlier gap');
   assert.equal(Object.hasOwn(got, 'usage'), false);
@@ -348,7 +333,6 @@ test('a codex snapshot with a null counter is unknown, not a zero', async t => {
   fs.writeFileSync(file, [snapshot({ inputTokens: null, cachedInputTokens: 0, cacheWriteInputTokens: 0, outputTokens: 2 })].map(JSON.stringify).join('\n') + '\n');
   t.mock.method(AgentManager.prototype, 'get', () => ({ ...claudeState, cli: 'codex', session: { cli: 'codex', threadId: 'thread', sessionId: 's', codexHome: '/fixture' } }));
   t.mock.method(AgentManager.prototype, 'eventLogs', () => [file]);
-  t.mock.method(WorkspaceStore.prototype, 'list', async () => []);
   const got = await get(invoke);
   assert.equal(got.usageComplete, false, 'null must not be read as a native zero');
   assert.equal(Object.hasOwn(got, 'usage'), false);
@@ -368,7 +352,6 @@ test('cancelling a query stops the read loop instead of only rejecting afterward
   fs.writeFileSync(file, [message('x'.repeat(300000)), message('y'.repeat(300000))].map(JSON.stringify).join('\n') + '\n');
   t.mock.method(AgentManager.prototype, 'get', () => ({ ...claudeState, cli: 'pi', session: undefined }));
   t.mock.method(AgentManager.prototype, 'eventLogs', () => [file]);
-  t.mock.method(WorkspaceStore.prototype, 'list', async () => []);
   let enter, release;
   const entered = new Promise(resolve => { enter = resolve; });
   const gate = new Promise(resolve => { release = resolve; });
@@ -402,7 +385,6 @@ test('a same-size rewrite during the read cannot mix two file versions into a to
   fs.writeFileSync(file, old);
   t.mock.method(AgentManager.prototype, 'get', () => ({ ...claudeState, cli: 'pi', session: undefined }));
   t.mock.method(AgentManager.prototype, 'eventLogs', () => [file]);
-  t.mock.method(WorkspaceStore.prototype, 'list', async () => []);
   const originalOpen = fsPromises.open;
   let rewritten = false;
   fsPromises.open = async (...args) => {
@@ -433,7 +415,6 @@ test('a same-size rewrite is caught even when the filesystem reports unchanged t
   fs.writeFileSync(file, version(10));
   t.mock.method(AgentManager.prototype, 'get', () => ({ ...claudeState, cli: 'pi', session: undefined }));
   t.mock.method(AgentManager.prototype, 'eventLogs', () => [file]);
-  t.mock.method(WorkspaceStore.prototype, 'list', async () => []);
   // Windows keeps last-write times coarse; freeze them so only real content evidence can decide.
   const realStat = fs.statSync;
   const mockedStat = t.mock.method(fs, 'statSync', (target, ...rest) => {
@@ -470,7 +451,6 @@ test('a codex report where the split exceeds the input total is unknown, not a c
   fs.writeFileSync(file, [snapshot({ inputTokens: 10, cachedInputTokens: 8, cacheWriteInputTokens: 5, outputTokens: 2 })].map(JSON.stringify).join('\n') + '\n');
   t.mock.method(AgentManager.prototype, 'get', () => ({ ...claudeState, cli: 'codex', session: { cli: 'codex', threadId: 'thread', sessionId: 's', codexHome: '/fixture' } }));
   t.mock.method(AgentManager.prototype, 'eventLogs', () => [file]);
-  t.mock.method(WorkspaceStore.prototype, 'list', async () => []);
   const got = await get(invoke);
   assert.equal(got.usageComplete, false, 'cached + write beyond input is not a native zero');
   assert.equal(Object.hasOwn(got, 'usage'), false);
@@ -489,7 +469,6 @@ test('a rewrite confined to the middle is caught even with identical ends and fr
   fs.writeFileSync(file, old);
   t.mock.method(AgentManager.prototype, 'get', () => ({ ...claudeState, cli: 'pi', session: undefined }));
   t.mock.method(AgentManager.prototype, 'eventLogs', () => [file]);
-  t.mock.method(WorkspaceStore.prototype, 'list', async () => []);
   const realStat = fs.statSync;
   const mockedStat = t.mock.method(fs, 'statSync', (target, ...rest) => {
     const stat = realStat(target, ...rest);
@@ -527,7 +506,6 @@ test('repeated gets follow appended and replaced logs instead of a stale cached 
   let files = [file];
   t.mock.method(AgentManager.prototype, 'get', () => claudeState);
   t.mock.method(AgentManager.prototype, 'eventLogs', () => files);
-  t.mock.method(WorkspaceStore.prototype, 'list', async () => []);
   assert.equal((await get(invoke)).usage.input, 10);
   fs.appendFileSync(file, result(30, 0.03));
   assert.equal((await get(invoke)).usage.input, 30, 'appended records must be read, not served from a stale window');

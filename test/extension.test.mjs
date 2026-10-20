@@ -3,7 +3,6 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { execFileSync } from 'node:child_process';
 import extension, { inheritParentModel } from '../dist/index.js';
 import { waitUntil, processAlive } from '../dist/storage.js';
 import { AgentManager } from '../dist/manager.js';
@@ -11,8 +10,8 @@ import { tempDir } from './helpers/tmp.mjs';
 
 const fixture = fileURLToPath(new URL('./fixtures/pi.mjs', import.meta.url));
 
-// Three two-second report windows plus multiple Git pipelines make 20 seconds
-// too small for this aggregate workflow under parallel Windows load. Transport
+// Three two-second report windows make 20 seconds too small for this aggregate
+// workflow under parallel Windows load. Transport
 // and shutdown deadlines are asserted separately; this is not a per-operation timeout.
 test('extension tools implement → separate review → resume same implementer; report only to original parent', { timeout: 45_000 }, async (t) => {
   const savedArgv = process.argv[1];
@@ -110,35 +109,20 @@ test('extension tools implement → separate review → resume same implementer;
   assert.deepEqual(recovered.history.map((run) => run.status), ['completed', 'completed']);
   assert.equal(recovered.runCount, 2);
 
-  const repo = path.join(cwd, 'repo'); fs.mkdirSync(repo);
-  const git = (...args) => execFileSync('git', ['-C', repo, ...args], { windowsHide: true });
-  git('init', '-q'); git('config', 'user.name', 'Test'); git('config', 'user.email', 'test@example.invalid');
-  git('config', 'core.autocrlf', 'false');
-  fs.writeFileSync(path.join(repo, 'base.txt'), 'base\n'); git('add', '.'); git('commit', '-qm', 'fixture');
-  ctx.cwd = repo;
-  const ws = JSON.parse(await invoke('subagent', { action: 'workspace_create' }));
-  await assert.rejects(invoke('subagent', { action: 'start', role: 'worker', task: 'CWD', workspace: ws.id, cwd: repo }), /workspace.*cwd|cwd.*workspace/);
-  const managed = JSON.parse((await invoke('subagent', { action: 'start', role: 'worker', task: 'CWD', workspace: ws.id })).match(/\{.+\}/)[0]);
-  await complete(managed.id);
-  assert.equal(managed.workspace, ws.id);
-  assert.equal(manager.get(managed.id).text, ws.cwd);
-  const withWorkspaces = JSON.parse(await invoke('subagent_query', { action: 'get', id: managed.id }));
-  assert.equal(withWorkspaces.workspaces.length, 1);
-  assert.equal(withWorkspaces.agents[0].workspace, ws.id);
-  await release(managed.id);
-  fs.writeFileSync(path.join(ws.path, 'added.txt'), 'managed\n');
-  assert.equal(JSON.parse(await invoke('subagent', { action: 'workspace_integrate', workspace: ws.id })).status, 'applied');
-  assert.equal(fs.readFileSync(path.join(repo, 'added.txt'), 'utf8'), 'managed\n');
-  await assert.rejects(invoke('subagent', { action: 'send', id: managed.id, message: 'CWD' }), /integrat/i);
-  const inherited = JSON.parse(await invoke('subagent', { action: 'workspace_create', includeUncommitted: { reason: 'The user approved inheriting added.txt.' } }));
-  assert.equal(inherited.snapshotReason, 'The user approved inheriting added.txt.');
-  assert.equal(fs.readFileSync(path.join(inherited.path, 'added.txt'), 'utf8'), 'managed\n');
-  await invoke('subagent', { action: 'send', id: managed.id, message: 'CWD', baseline: 'sync', includeUncommitted: { reason: 'The user approved the parent changes for sync.' } });
-  const synced = await complete(managed.id);
-  assert.equal(synced.runCount, 2);
-  assert.equal(manager.get(managed.id).sessionId, managed.sessionId);
-  const syncedView = JSON.parse(await invoke('subagent_query', { action: 'get', id: managed.id })).agents[0];
-  assert.equal(syncedView.workspaceBaseline.commit, manager.workspaces.get(ws.id).baseCommit);
+  const directory = path.join(cwd, 'other'); fs.mkdirSync(directory);
+  const relative = JSON.parse((await invoke('subagent', { action: 'start', role: 'worker', task: 'CWD', cwd: 'other' })).match(/\{.+\}/)[0]);
+  assert.equal((await complete(relative.id)).text, directory);
+  await release(relative.id);
+  ctx.cwd = directory;
+  const inherited = JSON.parse((await invoke('subagent', { action: 'start', role: 'worker', task: 'CWD' })).match(/\{.+\}/)[0]);
+  assert.equal((await complete(inherited.id)).cwd, directory);
+  await release(inherited.id);
+  // A retired inventory must not be parsed or trigger Git work during an instance query.
+  const legacy = path.join(manager.root, 'workspaces', '00000000-0000-4000-8000-000000000000');
+  fs.mkdirSync(legacy, { recursive: true }); fs.writeFileSync(path.join(legacy, 'workspace.json'), 'unreadable legacy inventory');
+  const result = JSON.parse(await invoke('subagent_query', { action: 'list' }));
+  assert.equal(Object.hasOwn(result, 'workspaces'), false);
+  assert.equal(result.agents.length, 4);
 });
 
 test('the role editor is registered but stays out of non-TUI modes', async () => {

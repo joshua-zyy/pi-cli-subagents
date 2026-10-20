@@ -8,8 +8,8 @@ Delegate work from a Pi session to persistent Pi, Codex CLI, and Claude Code sub
 
 Each subagent keeps its own native session and its own process lifetime, so the parent can run
 several tasks in parallel, keep working while they run, and continue any of them later without
-restating the context. Questions and results return to the session that started them. Optional
-managed Git worktrees keep parallel edits out of each other's way.
+restating the context. Questions and results return to the session that started them. Run children in the current
+directory or pass an existing `cwd`; directory isolation and Git workflows remain yours.
 
 ## Requirements
 
@@ -66,7 +66,7 @@ four above are replaceable rather than a fixed hierarchy.
 
 | Tool | Use |
 | --- | --- |
-| `subagent` | `start`, `send`, `interrupt`, `stop` and `reclaim` an instance; `workspace_create` and `workspace_integrate` for managed worktrees |
+| `subagent` | `start`, `send`, `interrupt`, `stop` and `reclaim` an instance |
 | `subagent_query` | Read-only `list`, `get`, `result` and `activity` over this session's instances |
 | `subagent_reply` | Answer one pending task question, or review one permission request within the user's authorization |
 
@@ -92,10 +92,9 @@ Pi children can ask the parent a single task question through `subagent_ask_pare
   and the files to inspect instead of suggesting a retry loop.
 - **Answers are not permissions.** A reply supplies task context, or reviews one request. It never
   grants a session-wide or persistent permission.
-- **Worktrees isolate; they are not a sandbox.** `workspace_create` makes a detached worktree from
-  committed HEAD, and `workspace_integrate` applies only the pending changes, refusing conflicts
-  instead of resolving them. Your HEAD, index and branches are left alone, and nothing is committed
-  or pushed.
+- **Choose the working directory.** `start.cwd` accepts an existing directory, including a worktree
+  you manage yourself. The extension does not create, synchronize, merge, lock or remove directories.
+  A different cwd is not a permission sandbox; coordinate anyone sharing its files.
 - **Stopping is not a rollback.** An uncertain outcome is reported as uncertain, and a native session
   is never silently replaced by a new one.
 - **One parent session caps concurrency and runtimes.** Two independent limits apply to a parent
@@ -111,6 +110,19 @@ Pi children can ask the parent a single task question through `subagent_ask_pare
   A new run inside an already-resident child takes a turn slot but no runtime slot, so steering and
   follow-ups on resident children keep working while the resident cap is full, as long as the turn cap
   has room.
+
+## Managed-workspace retirement
+
+`workspace_create`, `workspace_integrate` and the `workspace`, `baseline`, `includeUncommitted`
+inputs have been removed, not aliased. Instance queries no longer return a workspace inventory.
+New instances use `cwd`; there is no worktree-specific skill or automatic Git workflow.
+
+Legacy managed instances retain their history and workspace metadata, but `send` refuses in every
+state rather than silently dropping baseline checks. Current-protocol replies, interruption and
+release remain available; replying can continue an already accepted task. Before explicitly adopting
+an old directory, release its users and inspect retained journals, patches and backups, especially
+uncertain integrations. Nothing is automatically migrated, deleted or applied. Do not start a
+replacement to bypass a refusal. See [the migration contract](https://github.com/joshua-zyy/pi-cli-subagents/blob/main/docs/subagent-tool-contract.md#5-working-directories-and-legacy-managed-records).
 
 ## In the session
 
@@ -152,8 +164,9 @@ Dispatch happens through the parent agent's tools and this panel. There is no `@
 ## Verification status
 
 The local suite passes without calling a model. Real CLI and model acceptance has been recorded for
-eight rounds covering Codex and Claude approvals, task questions, original-session resume, and
-managed-worktree integration; those rounds can be replayed read-only. It has not been run on Linux or
+eight historical rounds covering Codex and Claude approvals, task questions, original-session
+resume, and the now-retired managed-worktree integration; those rounds can be replayed read-only
+but do not validate the replacement cwd-only interface. It has not been run on Linux or
 macOS, on the full interactive TUI, or against the newest CLI versions, which have moved past the
 ones those rounds were recorded on. Read the local pass as a statement about this repository's logic,
 not about your installed CLIs.

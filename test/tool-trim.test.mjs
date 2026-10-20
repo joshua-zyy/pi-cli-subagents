@@ -126,6 +126,10 @@ test('direct manager role validation matches file validation before creating rec
     assert(expected, 'the role file must reject this shape');
     await assert.rejects(manager.spawn('worker', role, cwd, 'DO NOT START'), error => error.message === expected);
   }
+  for (const retired of [undefined, { baseline: 'keep' }]) {
+    await assert.rejects(manager.spawn('worker', defaultRoles.worker, cwd, 'DO NOT START', retired), /workspace.*retired/i);
+    await assert.rejects(manager.send('not-an-instance', 'DO NOT START', 'steer', retired), /workspace.*retired/i);
+  }
   assert.equal(fs.existsSync(manager.root), false);
 });
 

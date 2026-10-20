@@ -7,12 +7,11 @@ import path from 'node:path';
 import { tempDir } from './helpers/tmp.mjs';
 import extension from '../dist/index.js';
 import { AgentManager } from '../dist/manager.js';
-import { WorkspaceDecisionRequired } from '../dist/workspace.js';
 import { waitUntil } from '../dist/storage.js';
 import { AgentsPanel } from '../dist/ui/panel.js';
 
 const theme = {fg:(_,text)=>text, bg:(_,text)=>text, bold:text=>text, getThinkingBorderColor:()=>text=>text};
-function harness(t, beforePhase = 'completed', decision = 'none') {
+function harness(t, beforePhase = 'completed') {
   const root = tempDir('ui-input-receipts'), originalParent = path.join(root,'parent.jsonl');
   let parent = originalParent; fs.writeFileSync(parent,'{}\n');
   const oldHome = process.env.PI_CODING_AGENT_DIR;
@@ -23,17 +22,14 @@ function harness(t, beforePhase = 'completed', decision = 'none') {
   fs.writeFileSync(path.join(instance,'spec.json'),JSON.stringify({id:before.id,parentFile:parent}));
   const failed = {...before, runId:beforePhase === 'running' ? before.runId : randomUUID(), phase:'failed', accepted:beforePhase === 'running', error:'fixture native identity mismatch'};
   const notices = [], messages = [], calls = [], commands = new Map(), events = new Map();
-  const ws = {id:randomUUID(), revision:3};
   const mocks = [
     t.mock.method(AgentManager.prototype, 'list', () => [before]),
     t.mock.method(AgentManager.prototype, 'reports', () => []),
     t.mock.method(AgentManager.prototype, 'get', id => {assert.equal(id,before.id);return before;}),
     t.mock.method(AgentManager.prototype, 'eventLogs', () => []),
     t.mock.method(AgentManager.prototype, 'spawn', () => {throw Error('UI must not create a replacement instance');}),
-    t.mock.method(AgentManager.prototype, 'send', async (id, message, mode, options) => {
-      calls.push({id,message,mode,options});
-      if (decision !== 'none' && calls.length === 1) throw new WorkspaceDecisionRequired('baseline', ws, 'Choose a baseline');
-      if (decision === 'inherit' && calls.length === 2) throw new WorkspaceDecisionRequired('inherit', ws, 'Confirm parent changes', ['file.txt'], 'fixture-tree');
+    t.mock.method(AgentManager.prototype, 'send', async (id, message, mode) => {
+      calls.push({id,message,mode});
       return failed;
     }),
   ];
@@ -44,7 +40,7 @@ function harness(t, beforePhase = 'completed', decision = 'none') {
       if(key==='cli-subagents-agents'&&typeof content==='function')content({terminal:{rows:35,columns:400},requestRender(){}},theme);
     }, setStatus(){ticks++;},
       onTerminalInput(fn){listener=fn;return()=>{listener=undefined;};},
-      editor:async()=> 'FOLLOW_UP', select:async()=> 'sync — update workspace from parent', confirm:async()=>true,
+      editor:async()=> 'FOLLOW_UP', confirm:async()=>true,
       custom(factory){return new Promise(resolve=>{
         const component=factory({terminal:{rows:35,columns:400},requestRender(){}},theme,{ matches: () => false },result=>{
           if(roster===component)roster=undefined;
@@ -350,18 +346,17 @@ function assertFailureEvidence(h, text) {
   assert.equal(human[0].message.details.ids,undefined,'an attempted input is not a completion receipt');
 }
 
-test('roster reports failed input with original evidence after direct or confirmed workspace continuation', async t => {
-  for(const [phase,decision] of [['completed','none'],['running','none'],['completed','baseline'],['completed','inherit']]) {
-    const h = harness(t,phase,decision);
+test('roster reports failed input with original evidence for continuation and busy input', async t => {
+  for(const phase of ['completed','running']) {
+    const h = harness(t,phase);
     try {
       h.open(); h.press('i'); h.press('s');
       await waitUntil('roster receipt',()=>h.messages.length>0,2000);
       const errors = h.notices.filter(notice=>notice.type === 'error');
       assert.equal(errors.length,1,'resolved failed state must be surfaced as a UI error');
       assertFailureEvidence(h,errors[0].message);
-      if (decision !== 'none') assert.match(h.messages[0].message.content,/workspace baseline: sync/,'the failure record retains the chosen baseline');
       assert.ok(!h.notices.some(notice=>/accepted/i.test(notice.message)));
-      assert.equal(h.calls.length,decision === 'inherit' ? 3 : decision === 'baseline' ? 2 : 1,'no automatic retry after failure');
+      assert.equal(h.calls.length,1,'no automatic retry after failure');
     } finally {await h.close();}
   }
 });

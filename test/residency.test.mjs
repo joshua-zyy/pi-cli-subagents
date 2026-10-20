@@ -2,7 +2,6 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { execFileSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import { connect } from 'node:net';
@@ -96,29 +95,19 @@ for (const version of [undefined, 2]) test(`retired worker protocol ${version ??
 });
 
 for (const [phase, accepted] of [['closed', true], ['closed', false], ['running', true]]) {
-  test(`workspace send keeps a validated closing response (${phase}, accepted=${accepted})`, async t => {
+  test(`send keeps a validated closing response (${phase}, accepted=${accepted})`, async t => {
     const h = await peer(t, 3, (res, state) => {
       Object.assign(state, { phase, accepted, runtimeClosed: true, lastStatus: accepted ? 'completed' : 'failed' });
       writeJson(path.join(h.m.root, h.id, 'state.json'), state);
       res.end(JSON.stringify({ ...state, receipt: { operation: 'send', status: accepted ? 'accepted' : 'unconfirmed', runId: state.runId, runtimeId: state.runtimeId } }));
     });
-    const file = path.join(h.m.root, h.id, 'spec.json'), prior = { commit: 'a'.repeat(40), revision: 1 };
-    writeJson(file, { ...readJson(file), workspace: randomUUID(), workspaceBaseline: prior });
-    // Exercise the public send and real HTTP response while the workspace lease is held;
-    // only Git preparation is stubbed. Keep owner.lock to pin the post-reap/pre-unlock window.
-    t.mock.method(h.m.workspaces, 'runAgent', async (_workspace, id, action) => {
-      assert.equal(id, h.id); return action({ baseCommit: 'b'.repeat(40), revision: 2 });
-    });
     if (phase === 'running') {
       await assert.rejects(h.m.send(h.id, 'context'), /Invalid runtime identity/);
-      assert.deepEqual(readJson(file).workspaceBaseline, prior, 'invalid wire state must still be rejected before updating the baseline');
     } else {
       const result = await h.m.send(h.id, 'context');
       assert.equal(result.phase, 'stopping'); assert.equal(result.runtimeClosed, true);
       assert.equal(result.runId, h.state.runId); assert.equal(result.runtimeId, h.state.runtimeId);
       receipt(result, 'send', accepted ? 'accepted' : 'unconfirmed');
-      const baseline = accepted ? { commit: 'b'.repeat(40), revision: 2 } : prior;
-      assert.deepEqual(result.workspaceBaseline, baseline); assert.deepEqual(readJson(file).workspaceBaseline, baseline);
       assert.equal(h.calls.length, 1, 'do not replay input after an already validated response');
     }
   });
@@ -402,33 +391,7 @@ test('resident log references are instance-contained and cannot expose arbitrary
   } finally { if (fs.existsSync(runs)) fs.unlinkSync(runs); fs.renameSync(backup, runs); }
 });
 
-test('idle writers block integration; sync closes the writer before changing its baseline', { timeout: 30000 }, async t => {
-  const { cwd, m } = setup(t); const repo = path.join(cwd, 'repo'); fs.mkdirSync(repo);
-  const git = (...args) => execFileSync('git', ['-C', repo, ...args], { stdio: 'pipe' });
-  git('init', '-q'); git('config', 'user.name', 'fixture'); git('config', 'user.email', 'fixture@example.invalid');
-  fs.writeFileSync(path.join(repo, 'base.txt'), 'base'); git('add', '.'); git('commit', '-qm', 'fixture');
-  const ws = await m.workspaces.create(repo); const child = await m.spawn('worker', role, repo, 'CWD', ws.id); const first = await idle(m, child.id);
-  await assert.rejects(m.workspaces.integrate(ws.id), /occupied/);
-  fs.writeFileSync(path.join(repo, 'parent.txt'), 'next'); git('add', '.'); git('commit', '-qm', 'parent');
-  await assert.rejects(m.send(child.id, 'MUST NOT START', 'steer', { baseline: 'sync', expectedRevision: ws.revision + 1 }), /baseline changed/);
-  assert.equal(m.get(child.id).phase, 'idle', 'invalid confirmation metadata must not close a writer');
-  const endpointFile = path.join(m.root, child.id, 'endpoint.json'), savedEndpoint = readJson(endpointFile);
-  writeJson(endpointFile, { ...savedEndpoint, token: 'invalid-close-proof' });
-  try {
-    await assert.rejects(m.send(child.id, 'MUST NOT START', 'steer', { baseline: 'sync' }), /forbidden/);
-    assert.equal(fs.existsSync(path.join(ws.path, 'parent.txt')), false, 'failed close must not synchronize files');
-    assert.equal(m.get(child.id).runtimeId, first.runtimeId); assert.ok(processAlive(first.cliPid));
-    assert.equal(m.workspaces.get(ws.id).baseCommit, ws.baseCommit);
-  } finally { writeJson(endpointFile, savedEndpoint); }
-  receipt(await m.send(child.id, 'CWD', 'steer', { baseline: 'sync' }), 'send', 'accepted'); const next = await idle(m, child.id);
-  assert.notEqual(next.runtimeId, first.runtimeId); assert.equal(next.sessionId, first.sessionId);
-  assert.equal(fs.readFileSync(path.join(ws.path, 'parent.txt'), 'utf8'), 'next');
-  fs.writeFileSync(path.join(ws.path, 'background.txt'), 'idle is still a writer');
-  await assert.rejects(m.workspaces.integrate(ws.id), /occupied/);
-  assert.equal(fs.existsSync(path.join(repo, 'background.txt')), false);
-  await m.close(child.id); await m.workspaces.integrate(ws.id);
-  assert.equal(fs.readFileSync(path.join(repo, 'background.txt'), 'utf8'), 'idle is still a writer');
-});
+
 
 for (const action of ['interrupt', 'close']) test(`startup ${action} cannot fabricate an ended native turn`, { timeout: 20000 }, async t => {
   const { cwd, home, m } = setup(t, ['--hold-ready']);
@@ -632,7 +595,7 @@ test('confirmed release retires a lost idle input even when no new run became vi
 });
 
 test('a completed HTTP refusal of an idle start returns its turn reservation', async t => {
-  const h = await peer(t, 3, (res, state) => res.writeHead(400).end(JSON.stringify({
+  const h = await peer(t, 3, res => res.writeHead(400).end(JSON.stringify({
     error: 'fixture refused before start',
   })));
   writeJson(path.join(h.m.root, h.id, 'state.json'), { ...h.state, phase: 'idle' });

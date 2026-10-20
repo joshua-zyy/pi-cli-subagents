@@ -44,6 +44,56 @@ function setup(t) {
   return { cwd, m };
 }
 
+test('legacy managed inputs fail before state access, admission or dispatch in every phase', async t => {
+  const { cwd, m } = setup(t);
+  for (const method of ['get', 'admit', 'request', 'start']) t.mock.method(m, method, () => assert.fail(`${method} must not run`));
+  for (const cli of ['pi', 'codex', 'claude']) for (const phase of ['starting', 'running', 'waiting', 'idle', 'closed', 'stopping', 'unreachable']) {
+    const id = randomUUID(), dir = path.join(m.root, id), workspace = randomUUID();
+    writeJson(path.join(dir, 'spec.json'), { version: cli === 'pi' ? 1 : cli === 'codex' ? 2 : 3,
+      ...(cli === 'pi' ? {} : { cli, [`${cli}Home`]: cwd }), id, parentFile: m.parentFile, cwd,
+      workspace, workspaceBaseline: { commit: 'a'.repeat(40), revision: 2 },
+      roleName: 'worker', role: { description: 'test', instructions: 'test' }, launch, createdAt: 1 });
+    writeJson(path.join(dir, 'state.json'), { phase, id });
+    const before = fs.readdirSync(dir).map(file => [file, fs.readFileSync(path.join(dir, file))]);
+    await assert.rejects(m.send(id, 'DO NOT EXECUTE'), /managed workspace.*retired/i);
+    assert.deepEqual(fs.readdirSync(dir), before.map(([file]) => file));
+    for (const [file, bytes] of before) assert.deepEqual(fs.readFileSync(path.join(dir, file)), bytes);
+  }
+  // These fixture records have no runtime to reap; do not call get() in the setup cleanup.
+  t.mock.restoreAll();
+});
+
+test('legacy managed records keep results, pending replies, interruption and release', { timeout: 20000 }, async t => {
+  const { cwd, m } = setup(t), role = { description: 'test', instructions: 'test' };
+  const markLegacy = id => {
+    const file = path.join(m.root, id, 'spec.json');
+    const spec = { ...readJson(file), workspace: randomUUID(), workspaceBaseline: { commit: 'b'.repeat(40), revision: 3 } };
+    writeJson(file, spec); return { file, bytes: fs.readFileSync(file), spec };
+  };
+  const pending = await m.spawn('worker', role, cwd, 'WAIT');
+  await waitUntil('legacy pending request', () => m.get(pending.id).questions.length);
+  const saved = markLegacy(pending.id);
+  const shown = m.get(pending.id);
+  assert.equal(shown.workspace, saved.spec.workspace); assert.deepEqual(shown.workspaceBaseline, saved.spec.workspaceBaseline);
+  await assert.rejects(m.send(pending.id, 'MUST NOT ANSWER'), /managed workspace.*retired/i);
+  await m.reply(pending.id, shown.questions[0].id, { confirmed: true }, { actor: 'parent', reason: 'Authorized fixture reply' });
+  const finished = await released(m, pending.id);
+  assert.equal(m.getResult(pending.id, finished.runId).text, 'ALLOW');
+  assert.deepEqual(fs.readFileSync(saved.file), saved.bytes);
+  await assert.rejects(m.send(pending.id, 'MUST NOT RESUME'), /managed workspace.*retired/i);
+  assert.equal(m.get(pending.id).runCount, 1);
+  assert.equal(m.get(pending.id).phase, 'closed');
+  const busy = await m.spawn('worker', role, cwd, 'HOLD legacy');
+  const busySpec = markLegacy(busy.id);
+  const interrupted = await m.interrupt(busy.id);
+  assert.equal(interrupted.receipt.status, 'settled');
+  const closed = await m.close(busy.id);
+  assert.equal(closed.receipt.status, 'released');
+  assert.equal(closed.sessionId, busy.sessionId);
+  assert.deepEqual(fs.readFileSync(busySpec.file), busySpec.bytes);
+  assert.equal(m.getResult(busy.id, busy.runId).status, 'stopped');
+});
+
 test('current worker refuses retired startup records before ownership or CLI launch', () => {
   const cwd = tempDir('retired-worker-startup'), worker = fileURLToPath(new URL('../dist/worker.js', import.meta.url));
   for (const protocolVersion of [undefined, 2]) {
