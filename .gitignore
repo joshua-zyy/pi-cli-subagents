@@ -3,6 +3,9 @@ dist/
 coverage/
 *.tsbuildinfo
 
+# Development worktrees (git worktree add/move; never committed, never scanned)
+.worktrees/
+
 # Local configuration and generated probe output
 .pi/
 .env
