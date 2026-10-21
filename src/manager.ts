@@ -9,7 +9,7 @@ import { readActivity } from "./activity.js";
 import { codexHome, codexLaunch } from "./codex-launch.js";
 import { claudeLaunch } from "./claude-launch.js";
 import { inspectClaudeSession } from "./claude-adapter.js";
-import { nativeSession } from "./cli-adapter.js";
+import { nativeSession, projectControlCapabilities } from "./cli-adapter.js";
 import { validateRoleFile } from "./roles.js";
 import { directories, jsonFiles, processAbsent, processAlive, readJson, shorten, waitUntil, writeJson, writeJsonExclusive } from "./storage.js";
 import type { AgentSpec, AgentState, AgentView, Control, ControlResult, Delivery, Endpoint, Launch, NativeSession, OperationReceipt, ReclaimRecord, Report, Role, SessionHandle, StartRequest, TaskRun } from "./types.js";
@@ -253,7 +253,7 @@ export class AgentManager {
       };
     });
     const latest = history.at(-1);
-    return { ...state, cli: spec.cli ?? "pi", role: spec.roleName, cwd: spec.cwd, ...(spec.workspace ? { workspace: spec.workspace, workspaceBaseline: spec.workspaceBaseline } : {}), history, runCount: runs.length,
+    return { ...state, capabilities: projectControlCapabilities(state), cli: spec.cli ?? "pi", role: spec.roleName, cwd: spec.cwd, ...(spec.workspace ? { workspace: spec.workspace, workspaceBaseline: spec.workspaceBaseline } : {}), history, runCount: runs.length,
       ...(latest?.runId === current && latest.task ? { task: latest.task } : {}), ...(report ? { text: report.text, truncated: report.truncated } : {}), ...(receipt ? { receipt } : {}) };
   }
   /** Preserves the existing projection: a missing or ownerless record means "no owner" for the phase. */

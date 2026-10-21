@@ -4,7 +4,7 @@
 
 ![pi-cli-subagents](https://raw.githubusercontent.com/joshua-zyy/pi-cli-subagents/main/docs/assets/readme-banner-v3.png)
 
-把任务从 Pi 会话委派给可长期存活的 Pi、Codex CLI 与 Claude Code 子代理。
+为 Pi 补上子代理派发工具：将工作交给保留原生会话的 Pi、Codex CLI 或 Claude Code 子代理，并将结果送回发起它的父会话。
 
 每个子代理保有各自的原生会话与进程生命周期，因此主 agent 可以并行跑多个任务、在它们运行时继续
 工作，并在之后接着同一条对话继续，而不必重述上下文。提问与结果都会回到发起它的那个会话。

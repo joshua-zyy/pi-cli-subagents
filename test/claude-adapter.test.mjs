@@ -34,8 +34,12 @@ const skipped = q => Object.fromEntries(q.fields.map(field => [field.id, []]));
 
 test('Claude stays resident across completed, interrupted and subsequent runs without another init', async t => {
   const { client, requests } = setup(t); const { c, events } = client(undefined,['--init-once','--result-before-receipt']);
+  const unknown = { busySendModes: null, interrupt: null };
+  assert.deepEqual(c.controlCapabilities, unknown);
   await c.ready(); assert.equal(c.resident,true); const pid=c.pid;
+  assert.deepEqual(c.controlCapabilities, unknown, 'ready is not native init');
   await c.start('REMEMBER marker','one'); assert.equal((await terminal(events)).text,'OK');
+  assert.deepEqual(c.controlCapabilities, { busySendModes: ['steer', 'followUp'], interrupt: true });
   await c.start('HOLD','two'); await c.send('MUST_NOT_RUN','followUp'); await c.interrupt();
   const stopped=events.find(e=>e.type==='settled'&&e.runId==='two');assert.equal(stopped.status,'stopped');
   assert.equal(c.child.exitCode,null);assert.equal(c.pid,pid);
@@ -91,6 +95,8 @@ test('Claude rejects missing native receipts before delivery and poisons uncerta
     ['--interrupt-no-terminal','interrupt',/uncertain|timed out/i],
   ]) {
     const {c}=client(undefined,[flag]);await c.ready();await c.start('HOLD');c.timeout=100;
+    assert.deepEqual(c.controlCapabilities, { busySendModes: flag === '--no-lifecycle-cap' ? [] : ['steer', 'followUp'],
+      interrupt: flag !== '--no-cancel-cap' }, 'capabilities must match the observed native init, not the backend name');
     const before=requests().filter(r=>r.type==='user').length;
     await assert.rejects(operation==='send'?c.send('FOLLOW','followUp'):c.interrupt(),error);
     if(flag.startsWith('--no-')&&flag!=='--no-send-ack')assert.equal(requests().filter(r=>r.type==='user').length,before);

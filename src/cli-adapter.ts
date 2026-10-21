@@ -1,5 +1,5 @@
 import type { Exit } from "./pi-process.js";
-import type { AgentSpec, Control, Delivery, NativeSession, Question, SessionHandle } from "./types.js";
+import type { AgentSpec, AgentState, Control, ControlCapabilities, Delivery, NativeSession, Question, SessionHandle } from "./types.js";
 
 export type AdapterEvent =
   /** Native input acknowledgement, not a successful execution outcome. */
@@ -22,6 +22,8 @@ export interface AdapterOptions {
 /** Native protocol details stay here; ownership, audit and reports stay in the worker. */
 export interface CliAdapter {
   readonly resident: boolean;
+  /** The adapter owns native negotiation; callers must not infer support from the CLI name. */
+  readonly controlCapabilities: ControlCapabilities;
   readonly pid: number | undefined;
   readonly closed: Promise<Exit>;
   ready(): Promise<NativeSession>;
@@ -35,6 +37,12 @@ export interface CliAdapter {
   rotateLog(file: string): void;
   end(): Promise<{ exit: Exit; forced: boolean }>;
   stop(): Promise<{ exit: Exit; forced: boolean }>;
+}
+
+/** Never present historical or unavailable runtime evidence as usable control support. */
+export function projectControlCapabilities(state: Pick<AgentState, "protocolVersion" | "runtimeId" | "phase" | "capabilities">): ControlCapabilities {
+  return state.protocolVersion === 3 && state.runtimeId && ["starting", "running", "waiting", "idle"].includes(state.phase) && state.capabilities
+    ? state.capabilities : { busySendModes: null, interrupt: null };
 }
 
 export function nativeSession(session: NativeSession | SessionHandle | undefined): NativeSession | undefined {

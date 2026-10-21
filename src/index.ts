@@ -4,6 +4,7 @@ import path from "node:path";
 import { Key, matchesKey, type Component } from "@earendil-works/pi-tui";
 import { getAgentDir, getMarkdownTheme, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { AgentManager } from "./manager.js";
+import { projectControlCapabilities } from "./cli-adapter.js";
 import { customType as reportType, deliverReports } from "./notifier.js";
 import { humanActionType, createHumanActionBatch, deliverHumanActions, saveHumanAction, saveHumanActionBatch } from "./human-actions.js";
 import { renderReportMessage, renderHumanActionMessage } from "./ui/report.js";
@@ -31,7 +32,7 @@ function visible(state: AgentView, includeText = true) {
   // `task`, `history` and `startedAt` let the parent match an instance to its assignments
   // after its own context is compacted, without reading the child's transcript.
   const { id, cli, role, phase, protocolVersion, runtimeId, lastStatus, receipt, reclaimed, task, history, runCount, runId, sessionId, session, cwd, startedAt, updatedAt, lastActivity, questions, text, truncated, error, logFile } = state;
-  return { id, cli, role, phase, protocolVersion, runtimeId, lastStatus, ...(receipt ? { receipt } : {}), ...(reclaimed ? { reclaimed } : {}), runId, sessionId, ...(session?.cli === "codex" ? { threadId: session.threadId } : {}), cwd, updatedAt, lastActivity, questions, ...(includeText ? { text, truncated } : {}), error, logFile, history, runCount,
+  return { id, cli, role, phase, protocolVersion, runtimeId, capabilities: projectControlCapabilities(state), lastStatus, ...(receipt ? { receipt } : {}), ...(reclaimed ? { reclaimed } : {}), runId, sessionId, ...(session?.cli === "codex" ? { threadId: session.threadId } : {}), cwd, updatedAt, lastActivity, questions, ...(includeText ? { text, truncated } : {}), error, logFile, history, runCount,
     ...(state.workspace ? { workspace: state.workspace, workspaceBaseline: state.workspaceBaseline } : {}), ...(task ? { task } : {}), ...(startedAt ? { startedAt } : {}) };
 }
 
@@ -326,7 +327,7 @@ export default function extension(pi: ExtensionAPI): void {
 
   const registerSubagent = (catalog: string): void => pi.registerTool({
     name: "subagent", label: "CLI subagent",
-    description: `Start or continue a persistent CLI subagent. send keeps the same native session: idle starts a new run; closed resumes the original session. interrupt ends the captured run without releasing its runtime; Claude also cancels that run's queued inputs. stop releases a runtime that has no accepted turn in flight; while a turn is in flight it refuses, because releasing would discard that turn — interrupt it first. reclaim frees the accounting of one unreachable runtime whose recorded worker and CLI are both reliably gone: it confirms no native release, leaves the lock and history untouched, and does not make the instance resumable. Sessions, history and results are retained. Answer pending interactions with subagent_reply.\n\nGive the goal, necessary context, authorized scope and acceptance criteria; a new instance has not seen this conversation. Let the child choose its approach unless required behavior constrains it.\n\nReports return automatically. Do not sleep or poll for completion; continue independent work or end this turn. Receipts do not prove execution or success. Inspect uncertain outcomes before retrying; do not bypass refusals with replacement instances or edited records.\n\n${catalog}`,
+    description: `Start or continue a persistent CLI subagent. send keeps the same native session: idle starts a new run; closed resumes the original session. interrupt ends the captured run without releasing its runtime. stop releases a runtime that has no accepted turn in flight; while a turn is in flight it refuses, because releasing would discard that turn — interrupt it first. reclaim frees the accounting of one unreachable runtime whose recorded worker and CLI are both reliably gone: it confirms no native release, leaves the lock and history untouched, and does not make the instance resumable. Sessions, history and results are retained. Answer pending interactions with subagent_reply. Instances expose cli and capabilities (null means unknown). Before send/interrupt/reply, read delegate-cli-agents for that backend.\n\nGive the goal, necessary context, authorized scope and acceptance criteria; a new instance has not seen this conversation. Let the child choose its approach unless required behavior constrains it.\n\nReports return automatically. Do not sleep or poll for completion; continue independent work or end this turn. Receipts do not prove execution or success. Inspect uncertain outcomes before retrying; do not bypass refusals with replacement instances or edited records.\n\n${catalog}`,
     parameters: Type.Object({
       action: Type.Union([Type.Literal("start"), Type.Literal("send"), Type.Literal("interrupt"), Type.Literal("stop"), Type.Literal("reclaim")], { description: "interrupt requires native captured-turn confirmation; unsupported capabilities reject. send to a stopping instance waits for release before attempting original-session resume; uncertain release rejects. reclaim frees the accounting of one unreachable runtime whose recorded worker and CLI are both reliably gone; it never claims a native release and never makes the instance resumable." }),
       role: Type.Optional(Type.String({ description: "start only, required: configured role name" })),
@@ -335,7 +336,7 @@ export default function extension(pi: ExtensionAPI): void {
       id: Type.Optional(Type.String({ description: "send/interrupt/stop/reclaim only, required: existing instance ID" })),
       runtimeId: Type.Optional(Type.String({ description: "reclaim only, required: the exact runtime ID reported by subagent_query get; a different runtime is refused so a retry cannot silently move to a newer owner" })),
       message: Type.Optional(Type.String({ description: "send only, required: follow-up goal, new context and changed constraints; repeat the full task only when needed" })),
-      mode: Type.Optional(Type.Union([Type.Literal("steer"), Type.Literal("followUp")], { description: "send only, defaults to steer. Running Pi: steer supplies input before a subsequent model request without cancelling the in-flight tool; followUp waits until the current execution has no more tool calls. Running Codex supports steer only. Claude maps steer to non-aborting next input and followUp to later input; native receipt capabilities are required. This selects child input delivery, not parent report delivery." })),
+      mode: Type.Optional(Type.Union([Type.Literal("steer"), Type.Literal("followUp")], { description: "send only, default steer: non-aborting input at the next opportunity; followUp defers until the current turn ends. While running, check capabilities.busySendModes. This selects child input delivery, not parent report delivery." })),
     }, { additionalProperties: false }),
     async execute(_id, args, _signal, _update, ctx) {
       if (args.action === "start") {
@@ -426,13 +427,13 @@ ${view(state, args.action === "interrupt")}`);
   });
   pi.registerTool({
     name: "subagent_reply", label: "Answer child interaction",
-    description: "Answer a child's current task question or review its permission request within the user's authorization. Read the complete request first; parentPolicy defines supported replies, not authorization or one-action effects. Submit exactly one response matching the request. Task answers provide context, not new authorization.\n\nHandle routine authorized decisions yourself. Never grant session-wide or persistent permissions. Escalate unclear context, effects or authorization, explicit user-confirmation requirements, or requests requiring the human UI; explain the decision needed and use /agents (select the child, i details, r reply).",
+    description: "Answer a child's current task question or review its permission request within the user's authorization. Read the complete request first; parentPolicy defines supported replies, not authorization or one-action effects. Submit exactly one response matching the request. Task answers provide context, not new authorization. Use delegate-cli-agents before the first reply to a backend.\n\nHandle routine authorized decisions yourself. Never grant session-wide or persistent permissions. Escalate unclear context, effects or authorization, explicit user-confirmation requirements, or requests requiring the human UI; explain the decision needed and use /agents (select the child, i details, r reply).",
     parameters: Type.Object({
       id: Type.String({ description: "Existing instance ID" }),
       questionId: Type.String({ description: "Exact current interaction ID" }),
       confirmed: Type.Optional(Type.Boolean({ description: "confirm only: native yes/no response; inspect the request to establish its effect before confirming" })),
       value: Type.Optional(Type.String({ description: "task question: an offered label or custom answer text, submitted once; other select: exact offered option; input/editor: response text" })),
-      answers: Type.Optional(Type.Record(Type.String(), Type.Array(Type.String()), { description: "form only: map every field ID to its answer strings; empty arrays skip optional fields; required:true needs one non-blank string. multiSelect:false takes at most one string; true permits choices plus one custom answer. Preserve exact text and respect offered choices/allowOther." })),
+      answers: Type.Optional(Type.Record(Type.String(), Type.Array(Type.String()), { description: "form only: map exact field IDs to answer string arrays. Follow the current request's parentPolicy and fields; see delegate-cli-agents." })),
       cancelled: Type.Optional(Type.Literal(true, { description: "Cancel instead of answering" })),
       reason: Type.String({ minLength: 1, description: "Why the decision is within the user's authorization, or why it is denied/cancelled" }),
     }, { additionalProperties: false }),

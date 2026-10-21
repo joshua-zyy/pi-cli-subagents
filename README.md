@@ -4,7 +4,7 @@
 
 ![pi-cli-subagents](https://raw.githubusercontent.com/joshua-zyy/pi-cli-subagents/main/docs/assets/readme-banner-v3.png)
 
-Delegate work from a Pi session to persistent Pi, Codex CLI, and Claude Code subagents.
+Pi has no subagent tool. This one dispatches work to Pi, Codex CLI or Claude Code subagents that keep their native sessions and return results to the session that started them.
 
 Each subagent keeps its own native session and its own process lifetime, so the parent can run
 several tasks in parallel, keep working while they run, and continue any of them later without

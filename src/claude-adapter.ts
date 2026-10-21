@@ -8,7 +8,7 @@ import { StringDecoder } from "node:string_decoder";
 import type { AdapterEvent, AdapterOptions, CliAdapter, InteractionReply } from "./cli-adapter.js";
 import { childEnvironment, type Exit } from "./pi-process.js";
 import { claudeEnvironment } from "./claude-launch.js";
-import type { AgentSpec, NativeSession, Delivery, QuestionField, RoleToolTrim } from "./types.js";
+import type { AgentSpec, ControlCapabilities, NativeSession, Delivery, QuestionField, RoleToolTrim } from "./types.js";
 import { claudeQuestionAnswers, readClaudeQuestionFields } from "./claude-question.js";
 
 // Legacy RPC envelope; a typed decoder migration is separate from task-question support.
@@ -124,6 +124,11 @@ export function toolDenyArgs(role: { tools?: RoleToolTrim; allowSubagents?: bool
 
 export class ClaudeAdapter implements CliAdapter {
   readonly resident = true;
+  get controlCapabilities(): ControlCapabilities {
+    if (!this.initialized) return { busySendModes: null, interrupt: null };
+    return { busySendModes: this.capabilities.has("msg_lifecycle_v1") ? ["steer", "followUp"] : [],
+      interrupt: this.capabilities.has("interrupt_receipt_v1") && this.capabilities.has("interrupt_cancel_queued_v1") };
+  }
   private runId?: string;
   private emit(event: AdapterEvent): void {
     this.options.onEvent({ ...event, ...(this.runId === undefined ? {} : { runId: this.runId }) });

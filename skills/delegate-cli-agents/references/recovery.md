@@ -34,9 +34,9 @@ empty history, and healthy siblings can keep reporting.
 
 Resuming preserves the native session identity and saved history, not necessarily the old process, background jobs or in-memory state. Stopping does not roll back file edits.
 
-Use `subagent({ action: "interrupt", id })` to end only the captured Pi/Codex/Claude run while retaining its runtime. Claude also cancels that run's queued inputs and requires native receipt/cancellation capabilities. A `not_running` receipt does not cancel a pending initial task; use `stop` when startup must be cancelled or native resources must be released. Unsupported interruption fails explicitly.
+Use `subagent({ action: "interrupt", id })` to end only the captured run while retaining its runtime. Check this runtime's `capabilities.interrupt` and read the matching backend reference before acting; unknown is not support. A `not_running` receipt does not cancel a pending initial task; use `stop` when startup must be cancelled or native resources must be released. Unsupported interruption fails explicitly.
 
-`subagent({ action: "stop", id })` releases active or idle native processes but keeps the session/history; do not stop merely because a task finished. Release an idle runtime when directory handoff or cleanup actually needs it. A completed report alone is not release proof.
+`subagent({ action: "stop", id })` releases native processes but keeps the session/history. It refuses an accepted turn still in flight: interrupt that turn first. Do not stop merely because a task finished. Release an idle runtime when directory handoff or cleanup actually needs it. A completed report alone is not release proof.
 
 Read the operation receipt, not an old `accepted` bit: `accepted` is native acknowledgement, not model consumption; `settled` does not claim that interrupt caused the outcome; only `released` confirms release. On `unconfirmed`, inspect before any retry. A request already resolved or expired cannot be answered again. Human intervention records belong to the original parent session and can be delivered there after it is reopened; they never authorize repeating the child operation.
 

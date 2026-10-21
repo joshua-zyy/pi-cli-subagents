@@ -76,6 +76,20 @@ test('Claude role thinking and mode are passed to the native CLI as --effort and
   assert.equal(launched[launched.indexOf('--model')+1],'opus');assert.equal(launched[launched.indexOf('--effort')+1],'max');
   assert.equal(launched[launched.indexOf('--permission-mode')+1],'plan');
 });
+test('Claude capability evidence is refreshed for a resumed runtime, not copied from the released one', { timeout: 15000 }, async t => {
+  const { m, cwd, done } = setup(t);
+  const first = await m.spawn('claude', role, cwd, 'REMEMBER capability-marker'); await done(first.id);
+  assert.deepEqual(first.capabilities, { busySendModes: ['steer', 'followUp'], interrupt: true });
+  await m.close(first.id);
+  const specFile = path.join(m.root, first.id, 'spec.json'), spec = JSON.parse(fs.readFileSync(specFile, 'utf8'));
+  spec.launch.args.push('--no-lifecycle-cap', '--no-cancel-cap');
+  fs.writeFileSync(specFile, JSON.stringify(spec));
+  const next = await m.send(first.id, 'RECALL'); const result = await done(first.id);
+  assert.notEqual(next.runtimeId, first.runtimeId); assert.equal(next.sessionId, first.sessionId);
+  assert.deepEqual(next.capabilities, { busySendModes: [], interrupt: false });
+  assert.deepEqual(result.capabilities, next.capabilities); assert.equal(result.text, 'capability-marker');
+});
+
 test('Claude manager reopens the same native session and retains prior home/model selection', {timeout:25000}, async t=>{
   const {m,cwd,home,parent,launch,options,done}=setup(t);
   const child=await m.spawn('claude',role,cwd,'REMEMBER alpha');const first=await done(child.id);

@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 import { validateToolArguments } from '@earendil-works/pi-ai';
 import extension from '../dist/index.js';
 import { AgentManager } from '../dist/manager.js';
@@ -135,7 +136,8 @@ test('a release receipt omits the report body while an interrupt keeps it', asyn
     const response = (await invoke('subagent', { action: 'stop', id: 'original' })).content[0].text;
     const shown = parse(response);
     const { text: _text, truncated: _truncated, accepted: _accepted, ...metadata } = outcome;
-    assert.deepEqual(shown, JSON.parse(JSON.stringify(metadata)), 'only report text and its flag are omitted');
+    assert.deepEqual(shown, { ...JSON.parse(JSON.stringify(metadata)), capabilities: { busySendModes: null, interrupt: null } },
+      'report text is omitted and a released or unavailable runtime has unknown control capabilities');
     if (status === 'unconfirmed') assert.match(response, /confirmation is unconfirmed/);
   }
   const interrupted = parse((await invoke('subagent', { action: 'interrupt', id: 'original' })).content[0].text);
@@ -170,4 +172,55 @@ test('query actions are read-only projections and result uses exact run identity
   const page = await json({ action: 'result', id: 'a', runId: 'old', offset: 2, limit: 3 });
   assert.equal(page.text, 'igi'); assert.equal(page.runId, 'old'); assert.equal(page.nextOffset, 5);
   assert.deepEqual(calls, [['a', 'old']]);
+});
+
+test('tool guidance stays backend-neutral and routes control knowledge through one skill', () => {
+  const { tools } = harness();
+  const declarations = JSON.stringify([...tools.values()].map(({ description, parameters }) => ({ description, parameters })));
+  assert.doesNotMatch(declarations, /Codex|Claude|Running Pi/);
+  assert.match(tools.get('subagent').description, /capabilities/);
+  assert.match(tools.get('subagent').description, /delegate-cli-agents/);
+  assert.match(tools.get('subagent_reply').description, /delegate-cli-agents/);
+  assert.deepEqual(Object.keys(tools.get('subagent').parameters.properties), ['action', 'role', 'task', 'cwd', 'id', 'runtimeId', 'message', 'mode']);
+});
+
+test('instance responses carry capabilities without inventing them for old or unavailable runtimes', async t => {
+  const { invoke } = harness(), known = { busySendModes: ['steer'], interrupt: true }, unknown = { busySendModes: null, interrupt: null };
+  let state = { id: 'a', cli: 'codex', role: 'worker', runId: 'run', runtimeId: 'runtime', protocolVersion: 3,
+    phase: 'idle', accepted: false, questions: [], capabilities: known };
+  for (const method of ['spawn', 'send', 'reply', 'interrupt', 'close']) t.mock.method(AgentManager.prototype, method, async () => state);
+  t.mock.method(AgentManager.prototype, 'get', () => state);
+  t.mock.method(AgentManager.prototype, 'list', () => [state]);
+  const calls = [
+    ['subagent', { action: 'start', role: 'worker', task: 'fixture' }],
+    ['subagent', { action: 'send', id: 'a', message: 'fixture' }],
+    ['subagent', { action: 'interrupt', id: 'a' }],
+    ['subagent_reply', { id: 'a', questionId: 'q', value: 'fixture', reason: 'Authorized context' }],
+  ];
+  for (const [name, args] of calls) {
+    const text = (await invoke(name, args)).content[0].text;
+    const shown = JSON.parse(text.slice(text.indexOf('{'), text.lastIndexOf('}') + 1));
+    assert.equal(shown.cli, 'codex'); assert.equal(shown.runtimeId, 'runtime'); assert.deepEqual(shown.capabilities, known);
+  }
+  const list = async () => JSON.parse((await invoke('subagent_query', { action: 'list' })).content[0].text).agents[0];
+  assert.deepEqual((await list()).capabilities, known);
+  for (const change of [{ capabilities: undefined }, { runtimeId: undefined }, { protocolVersion: 2 }, { phase: 'closed' }, { phase: 'unreachable' }]) {
+    const original = state; state = { ...state, ...change };
+    assert.deepEqual((await list()).capabilities, unknown, JSON.stringify(change)); state = original;
+  }
+});
+
+test('one skill routes to a single backend reference before control, without mixed backend manuals', () => {
+  const root = new URL('../skills/delegate-cli-agents/', import.meta.url);
+  const read = file => fs.readFileSync(new URL(file, root), 'utf8');
+  const skill = read('SKILL.md');
+  assert.match(skill, /references\/<cli>\.md/);
+  assert.match(skill, /capabilities/);
+  for (const cli of ['pi', 'codex', 'claude']) {
+    const reference = read(`references/${cli}.md`);
+    assert.ok(reference.length > 100, 'backend instructions must exist, not just a link');
+    for (const other of ['pi', 'codex', 'claude'].filter(name => name !== cli))
+      assert.doesNotMatch(reference, new RegExp(`\\b${other}\\b`, 'i'), `${cli} must not load the ${other} manual`);
+  }
+  assert.doesNotMatch(read('references/approvals.md'), /Codex|Claude|AskUserQuestion|request_user_input/);
 });

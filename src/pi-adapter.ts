@@ -7,7 +7,7 @@ import { PiProcess, type WireRecord, type Exit } from "./pi-process.js";
 import { ASK_PARENT_TOOL, parentQuestionDialog, readParentQuestion, type ParentQuestion } from "./pi-question.js";
 import { subagentsError } from "./roles.js";
 import type { AdapterEvent, AdapterOptions, CliAdapter, InteractionReply } from "./cli-adapter.js";
-import type { Delivery, NativeSession, Question, SessionHandle, RoleToolTrim } from "./types.js";
+import type { ControlCapabilities, Delivery, NativeSession, Question, SessionHandle, RoleToolTrim } from "./types.js";
 
 /** Human wording for the current step; a step label never uses the raw Pi event type. */
 function piActivity(type: string, toolName: unknown): string {
@@ -72,6 +72,10 @@ export function trimArgs(role: { tools?: RoleToolTrim; skills?: boolean | string
 
 export class PiAdapter implements CliAdapter {
   readonly resident = true;
+  private readyConfirmed = false;
+  get controlCapabilities(): ControlCapabilities {
+    return this.readyConfirmed ? { busySendModes: ["steer", "followUp"], interrupt: true } : { busySendModes: null, interrupt: null };
+  }
   private active = false;
   private runId?: string;
   // null = independent session UI; undefined = a legacy run without a supplied runId.
@@ -202,6 +206,7 @@ export class PiAdapter implements CliAdapter {
     const previous = this.options.session;
     if (previous && (previous.cli !== "pi" || initial.sessionId !== previous.sessionId || path.resolve(initial.sessionFile) !== path.resolve(previous.sessionFile)))
       throw new Error("Resume returned a different session; refusing to continue");
+    this.readyConfirmed = true;
     return { cli: "pi", sessionId: initial.sessionId, sessionFile: initial.sessionFile };
   }
   async start(message: string, runId?: string): Promise<void> {

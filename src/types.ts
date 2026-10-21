@@ -1,5 +1,10 @@
 export type Phase = "starting" | "running" | "waiting" | "stopping" | "completed" | "failed" | "stopped" | "idle" | "closed" | "unreachable";
 export type Delivery = "steer" | "followUp";
+/** Observed control support for one runtime, not current readiness or authorization. null = unknown. */
+export interface ControlCapabilities {
+  busySendModes: Delivery[] | null;
+  interrupt: boolean | null;
+}
 export type Thinking = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 
 export type Cli = "pi" | "codex" | "claude";
@@ -126,6 +131,8 @@ export interface AgentState extends Partial<SessionHandle> {
   /** Stored versions remain readable; execution accepts only protocol v3. */
   protocolVersion?: number;
   runtimeId?: string;
+  /** Snapshot from this runtime only; older records have no capability evidence. */
+  capabilities?: ControlCapabilities;
   /** Confirmed native release; phase is closed on disk as well as in queries. */
   runtimeClosed?: boolean;
   lastStatus?: "completed" | "failed" | "stopped";

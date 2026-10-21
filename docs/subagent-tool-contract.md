@@ -56,6 +56,10 @@ Ordinary Pi dialogs can originate during startup or while idle, and their wire f
 
 ### 2.2 Results and errors
 
+实例响应保留 `cli`、`runtimeId`，并提供 `capabilities`：`busySendModes` 是运行中追加输入支持的模式数组，`interrupt` 是独立中断支持。`null` 表示尚无证据；空数组/false 表示明确不支持。它描述当前运行时确认的协议能力，不是当前就绪状态或授权。仅就绪/原生初始化后确认，释放、不可达及旧记录缺字段时返回未知；恢复的新运行时重新确认，不继承旧能力。查询只读磁盘快照，不启动 CLI。
+
+首次 send/interrupt/reply 前按实例 `cli` 查阅随包 `delegate-cli-agents` 的 `references/<cli>.md`，仅加载对应后端，已读且仍适用时复用。技能不预载全体后端手册。答复仍使用当前请求的 `parentPolicy`/`fields`，不创建第二套实例级 reply 形态表。具体后端发送与中断语义见对应参考；空闲 send 是新轮，不受 busySendModes 限制。
+
 Keep existing instance information: `id`, `runId`, `role`, `cli`, `phase`, `cwd`, known native session identity, pending requests, and legacy workspace / workspaceBaseline as read-only historical metadata where present. Include errors and locations as needed, not the entire native configuration or credentials.
 
 Do not introduce an ambiguous `success: true` that collapses all states:

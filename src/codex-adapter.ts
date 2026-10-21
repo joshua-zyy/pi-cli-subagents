@@ -6,7 +6,7 @@ import path from "node:path";
 import type { AdapterEvent, AdapterOptions, CliAdapter, InteractionReply } from "./cli-adapter.js";
 import { childEnvironment, type Exit } from "./pi-process.js";
 import { CODEX_MODE_PRESETS } from "./roles.js";
-import type { CodexMode, NativeSession, Delivery, QuestionField } from "./types.js";
+import type { CodexMode, ControlCapabilities, NativeSession, Delivery, QuestionField } from "./types.js";
 import { readCodexAsyncQuestionFields, readCodexQuestionFields, validateQuestionAnswers } from "./codex-question.js";
 import { readCodexMcpApproval, readCodexMcpElicitation } from "./codex-mcp-approval.js";
 
@@ -43,6 +43,9 @@ export function subagentArgs(role: { allowSubagents?: boolean }): string[] {
 
 export class CodexAdapter implements CliAdapter {
   readonly resident = true;
+  get controlCapabilities(): ControlCapabilities {
+    return this.thread ? { busySendModes: ["steer"], interrupt: true } : { busySendModes: null, interrupt: null };
+  }
   readonly child: ChildProcessWithoutNullStreams;
   readonly closed: Promise<Exit>;
   private pending = new Map<number, { resolve: (value: RecordValue) => void; reject: (error: Error) => void; timer: NodeJS.Timeout }>();

@@ -39,6 +39,10 @@ for (const cli of ['pi', 'codex', 'claude']) {
     fs.writeFileSync(path.join(cwd, 'input.txt'), 'before\n');
     const child = await manager.spawn('worker', role(cli), cwd, 'REMEMBER original-token');
     const first = await done(child.id);
+    const capabilities = { busySendModes: cli === 'codex' ? ['steer'] : ['steer', 'followUp'], interrupt: true };
+    assert.deepEqual(child.capabilities, capabilities, 'start must publish capabilities before returning acceptance');
+    assert.deepEqual(first.capabilities, capabilities);
+    assert.deepEqual(readJson(path.join(manager.root, child.id, 'state.json')).capabilities, capabilities);
     assert.equal(first.cwd, cwd); assert.equal(first.text, 'OK');
     assert.equal(Object.hasOwn(readJson(path.join(manager.root, child.id, 'spec.json')), 'workspace'), false);
     fs.writeFileSync(path.join(cwd, 'input.txt'), 'changed between turns\n');
@@ -46,13 +50,16 @@ for (const cli of ['pi', 'codex', 'claude']) {
     const second = await done(child.id);
     assert.equal(second.text, 'changed between turns\n'); assert.deepEqual(second.session, first.session);
     assert.equal(second.runtimeId, first.runtimeId); assert.notEqual(second.runId, first.runId);
-    await release(child.id);
+    assert.deepEqual(second.capabilities, capabilities);
+    const closed = await release(child.id);
+    assert.deepEqual(closed.capabilities, { busySendModes: null, interrupt: null }, 'released capabilities are not live controls');
     const otherHome = { ...native, home: path.join(root, 'not-the-original-home') };
     const reopened = new AgentManager(parent, launch('pi'), cli === 'codex' ? otherHome : undefined, cli === 'claude' ? otherHome : undefined);
     await reopened.send(child.id, 'RECALL');
     const third = await done(child.id);
     assert.equal(third.text, 'original-token'); assert.deepEqual(third.session, first.session);
     assert.notEqual(third.runtimeId, first.runtimeId); assert.equal(third.runCount, 3); assert.equal(third.cwd, cwd);
+    assert.deepEqual(third.capabilities, capabilities, 'a new runtime confirms its own capabilities');
     assert.deepEqual(third.history.map(run => run.status), ['completed', 'completed', 'completed']);
     assert.equal(manager.getResult(child.id, first.runId).text, 'OK');
     assert.equal(fs.existsSync(path.join(manager.root, 'workspaces')), false);

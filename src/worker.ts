@@ -37,7 +37,10 @@ async function run(dir: string, runId: string): Promise<void> {
     ...(start.session ? { session: start.session, sessionId: start.session.sessionId,
       ...("sessionFile" in start.session ? { sessionFile: start.session.sessionFile } : {}) } : {}),
   };
-  const save = () => { state.updatedAt = Date.now(); writeJson(path.join(dir, "state.json"), state); };
+  const save = () => {
+    if (rpc) state.capabilities = rpc.controlCapabilities;
+    state.updatedAt = Date.now(); writeJson(path.join(dir, "state.json"), state);
+  };
   // This runtime writes its stderr to the launch run's file for its whole life.
   const launchRunId = runId;
   // A resident runtime writes every run into its own stream; drop the oldest runs' streams first.
