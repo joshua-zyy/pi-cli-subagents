@@ -116,6 +116,33 @@ Codex/Claude 真实模型、释放后恢复、审批、人工 TUI 或其它操�
 
 本轮是业务分析问答，不是 Codex 代码实现验收；它不覆盖 Claude、运行中发送/中断时序、释放后恢复、权限审批、原生孙代理工具清单、人工 TUI 或其他操作系统，也不推导模型普遍遵从或 token/订阅费用改善。此前完整四层本地门禁仍是独立证据，不以本轮替代。
 
+### 英文技能与 Claude Code 问答／续聊见证（2026-10-21）
+
+基线 `c239c73`，Windows / Pi 1.3.0，父 `agentrouter2/deepseek-v4-flash`（medium），
+子 Claude Code 2.1.296 / `sonnet`（high、manual），原生实际模型 `deepseek-v4-flash[1M]`。
+这是 Claude Code 通道验收，不是 Anthropic 模型验收。
+
+第六轮冻结审计 PASS（effects 3、unavailable 0），自然完成约45秒。父在第7行读完整英文 SKILL、
+第12行读 claude.md、第20行首答复；未读未使用的后端说明。完整草案交接后，一次真实题卡包含
+单选与多选，公开 answers 用完整 question 文本作键，并真正选择 Summary 与 Risks 两个现成项；
+原生请求、control_response、成功 tool_result 与一次审计证明回写，不凭 attempted 收据推断成功。
+两个 run 共用 native session/runtime/worker/CLI，两份完成报告自动送达，父自行 stop/released 并
+写出最终文件，无监督器补救。两个逐轮 system/init 通知不表示进程重建；startup initialize 只有一次。
+
+**语义限制**：子把拒绝记录不产出报告解释为 `sections: []`；父最终文件按验收要求存配置段
+`["Summary","Risks"]`，并在回复中披露差异。冻结 gate 检查最终文件而非原报告的段落语义，
+因此 PASS 只认证问答、记忆继承、报告与生命周期，不认证所有业务结论或父语义转换正确。
+
+相关本地 fast44/domain27/local10 共81项及 check/build 通过。15个冻结输入、114个 dist 文件未变；
+9个保护配置哈希一致，原角色字节恢复，临时凭据副本删除、实际秘密字节扫描0残留。
+显式 session_start 诊断在实际 bundle 路径捕获14个父请求，全部 HTTP200，无 fetch/body 错误。
+之前的路由、额度、连接、控制器失败均保留原始结论，本轮通过不倒推旧错误已修复。
+
+原始证据只在本地忽略目录 `.test-output/backend-guidance/real-claude-06/`，不随包发布。
+复核：`node test/acceptance/audit.mjs .test-output/backend-guidance/real-claude-06/case.mjs`；
+另有同目录 closeout、diagnostic-check 和 monitor 的只读核查。未覆盖运行中发送/中断、
+释放后恢复、权限审批、扩展 text/number 题卡、人工 TUI 或 Linux/macOS，也不证明可靠性/成本收益。
+
 ## 转录读取兼容性变更
 
 已删除 `TranscriptReader.readRecent()` 及其尾部预览、后台全量重放和交接状态。直接深度导入 `dist/transcript.js` 调用该方法的外部代码需要迁移；不保留兼容代理。顺序解析继续使用 `TranscriptReader.read()`，交互式历史查看继续使用现有 `TranscriptWindow` 的有界按需分页。相关旧 API 测试随行为退休；独立的 UI 暂停定位、合并绘制与通知保留测试迁入 `conversation.test.mjs`，分页、原生身份过滤及字节边界仍由现有 window/seek 测试覆盖。
@@ -149,9 +176,9 @@ Pi 的 `handled` 失败释放说明只指初始输入，以及 idle/原会话恢
 
 恢复保留原 native home、sessionId 和唯一转录文件，不自动新建替代会话。只读预检以 65,536 字节分块读取文件头，直到首条主线身份记录完整可读，总量最多 4 MiB；另检查末尾最多 65,536 字节。文件头首条非 sidechain 的 user/assistant 记录必须含原 sessionId 和与 spec.cwd 一致的启动目录；后续工具执行可改变 cwd，不再将动态目录当作启动身份。采样中的外国 sessionId、非法 cwd 类型、错误启动目录仍拒绝。文件头缺少可验证起点时 fail-closed，不用后续匹配行或文件尾代替原始身份，也不改写原转录。Claude 的初始任务和忙碌输入在发送前限制为最多 1 MiB 的 JSON 编码字符串，为身份记录元数据保留预算；超限明确拒绝，不发送输入。本地夹具覆盖中文与 emoji 的长首条任务释放后原身份恢复，以及超限输入不污染健康轮次。
 
-依据 [官方会话恢复文档](https://platform.claude.com/docs/en/agent-sdk/sessions) 和 [官方 SDK 的文件头 cwd 提取](https://github.com/anthropics/claude-agent-sdk-python/blob/main/src/claude_agent_sdk/_internal/sessions.py)，沿用现有 native-resume 接线，不引入 SDK 依赖。既有 adapter 域测试覆盖动态目录和拒绝边界；manager 本地替身覆盖自然完成及 stop 后同身份恢复、历史记忆和固定启动目录。真实 Claude 续聊仍须单独授权；cwd 预检与驻留生命周期分别验收，前者通过不代表真实驻留能力通过。
+依据 [官方会话恢复文档](https://platform.claude.com/docs/en/agent-sdk/sessions) 和 [官方 SDK 的文件头 cwd 提取](https://github.com/anthropics/claude-agent-sdk-python/blob/main/src/claude_agent_sdk/_internal/sessions.py)，沿用现有 native-resume 接线，不引入 SDK 依赖。既有 adapter 域测试覆盖动态目录和拒绝边界；manager 本地替身覆盖自然完成及 stop 后同身份恢复、历史记忆和固定启动目录。释放后恢复未在上述真实问答轮次覆盖，仍须单独授权；cwd 预检与驻留生命周期分别验收，前者通过不代表后者通过。
 
-Claude 驻留验收复用原 adapter/manager 与 cwd 替身：同 worker/CLI 多轮、初始化只出现一次、队列多结果合成一轮结果、后台屏障、旧 UUID/旧问题隔离、显式中断与自然完成竞态、取消排队输入、回执缺失及超时后的新工作拒绝。运行中 steer/followUp 对应原生 priority next/later，不发送隐式 interrupt；忙碌消息要求 msg_lifecycle_v1，独立中断要求 interrupt_receipt_v1 和 interrupt_cancel_queued_v1。中断回执和原生终态都确认后才返回 settled；背景工作仍未收口时不能假装 idle。idle 仍拥有运行时，目录交接/清理前须确认释放；stop 释放资源而不删历史。真实 Claude 驻留、多轮消息和中断、人工 TUI 均未运行。
+Claude 驻留验收复用原 adapter/manager 与 cwd 替身：同 worker/CLI 多轮、启动 initialize 握手只发生一次（逐轮 system/init 通知可重复）、队列多结果合成一轮结果、后台屏障、旧 UUID/旧问题隔离、显式中断与自然完成竞态、取消排队输入、回执缺失及超时后的新工作拒绝。运行中 steer/followUp 对应原生 priority next/later，不发送隐式 interrupt；忙碌消息要求 msg_lifecycle_v1，独立中断要求 interrupt_receipt_v1 和 interrupt_cancel_queued_v1。中断回执和原生终态都确认后才返回 settled；背景工作仍未收口时不能假装 idle。idle 仍拥有运行时，目录交接/清理前须确认释放；stop 释放资源而不删历史。真实 Claude Code 两轮 idle 续聊已由上述问答见证覆盖；运行中多轮消息和中断、人工 TUI 仍未运行。
 
 ## 角色默认值回显
 
