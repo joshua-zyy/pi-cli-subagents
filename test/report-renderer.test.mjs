@@ -223,11 +223,12 @@ test('expand hints use the active keybinding and explicitly identify an unbound 
     const c = card(publish().message);
     assert.match(text(c), /ctrl\+o to expand/);
     bindings.setUserBindings({ 'app.tools.expand': 'alt+e' });
-    c.invalidate(); assert.match(text(c), /alt\+e to expand/);
-    c.setExpanded(true); assert.match(text(c), /alt\+e to collapse/);
+    const modifier = process.platform === 'darwin' ? 'option' : 'alt';
+    c.invalidate(); assert.ok(text(c).includes(`${modifier}+e to expand`));
+    c.setExpanded(true); assert.ok(text(c).includes(`${modifier}+e to collapse`));
     bindings.setUserBindings({ 'app.tools.expand': [] });
     c.setExpanded(false); assert.match(text(c), /expand key unbound/);
-    assert.doesNotMatch(text(c), /ctrl\+o|alt\+e|to expand/);
+    assert.doesNotMatch(text(c), /ctrl\+o|alt\+e|option\+e|to expand/);
   } finally {
     setKeybindings(previous);
   }

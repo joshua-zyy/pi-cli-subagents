@@ -15,6 +15,7 @@ const escape = '\x1b';
 function harness(t, piModels = 'provider  model\nfixture  test-model\n') {
   const dir = tempDir('settings-lifecycle'), home = path.join(dir,'home'), cwd = path.join(dir,'project');
   fs.mkdirSync(home); fs.mkdirSync(path.join(cwd,'.pi'),{recursive:true});
+  fs.mkdirSync(path.join(cwd,'.git')); // POSIX native-default reads require a known Git-root cwd.
   const files = [path.join(home,'cli-subagents.roles.json'),path.join(cwd,'.pi','cli-subagents.roles.json')];
   for (const file of files) fs.writeFileSync(file,'{}\n');
   const savedEnv = Object.fromEntries(['PI_CODING_AGENT_DIR','CLAUDE_CONFIG_DIR','CODEX_HOME','ProgramFiles','PATH'].map(key=>[key,process.env[key]]));

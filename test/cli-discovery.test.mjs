@@ -72,14 +72,25 @@ test('Codex defaults keep both approval/sandbox axes, false gates and unspecifie
   assert.deepEqual(codexDefaultValues({}),{model:'default',effort:'default',mode:'default',defaultModeQuestions:'default'});
 });
 
+function codexProbePath(t) {
+  const original = process.env.PATH, bin = tempDir('codex-defaults-path');
+  const entry = path.join(bin, 'node_modules', '@openai', 'codex', 'bin', 'codex.js');
+  fs.mkdirSync(path.dirname(entry), { recursive: true });
+  fs.writeFileSync(entry, 'throw new Error("fixture launcher must never execute");');
+  process.env.PATH = bin;
+  t.after(() => { if (original === undefined) delete process.env.PATH; else process.env.PATH = original; });
+  return entry;
+}
+
 test('the Codex defaults probe reads only config after initialize and closes without starting a thread', async t => {
+  const entry = codexProbePath(t);
   const messages=[], child=new EventEmitter(); child.stdout=new PassThrough(); child.stdin=new EventEmitter();
   child.stdin.write=s=>{const m=JSON.parse(s);messages.push(m);setImmediate(()=>{
     if(m.id===1)child.stdout.write('{"id":1,"result":{}}\n');
     if(m.id===2){child.stdout.write('{"id":2,"result":{"config":{"model":"fixture-model",');child.stdout.write('"model_reasoning_effort":"high"}}}\n');}
   });};
   child.stdin.end=()=>setImmediate(()=>child.emit('close',0));
-  const spawn=t.mock.method(childProcess,'spawn',(_command,args,options)=>{assert.equal(args.at(-1),'app-server');assert.equal(options.shell,false);return child;});
+  const spawn=t.mock.method(childProcess,'spawn',(command,args,options)=>{assert.equal(command,process.platform === 'win32' ? process.execPath : 'codex');assert.deepEqual(args,process.platform === 'win32' ? [entry,'app-server'] : ['app-server']);assert.equal(options.shell,false);return child;});
   syncBuiltinESMExports();
   try {
     const result=await readCodexDefaults(process.cwd(),1000);
@@ -90,13 +101,14 @@ test('the Codex defaults probe reads only config after initialize and closes wit
 });
 
 test('default probe launcher failure, malformed responses and deadlines remain unconfirmed, never guessed', async t => {
+  codexProbePath(t);
   const bad=t.mock.method(childProcess,'spawn',()=>{throw new Error('launcher failed');});syncBuiltinESMExports();
-  assert.equal(await readCodexDefaults(process.cwd(),20),undefined); bad.mock.restore();syncBuiltinESMExports();
+  assert.equal(await readCodexDefaults(process.cwd(),20),undefined); assert.equal(bad.mock.callCount(),1); bad.mock.restore();syncBuiltinESMExports();
   for(const malformed of [true,false]) {
     const child=new EventEmitter();child.stdout=new PassThrough();child.stdin=new EventEmitter();child.stdin.write=()=>{if(malformed)setImmediate(()=>child.stdout.write('not json\n'));};
     // No OS pid: the tree cleanup helper must not target any real process.
     const spawn=t.mock.method(childProcess,'spawn',()=>child);syncBuiltinESMExports();
-    try {assert.equal(await readCodexDefaults(process.cwd(),20),undefined);}
+    try {assert.equal(await readCodexDefaults(process.cwd(),20),undefined);assert.equal(spawn.mock.callCount(),1);}
     finally {spawn.mock.restore();syncBuiltinESMExports();}
   }
 });
