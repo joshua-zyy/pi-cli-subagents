@@ -61,6 +61,14 @@ node test/acceptance/audit.mjs .test-output/manual-acceptance/<case>/case.mjs
 
 `scripts/known-flakes.json` 标注已调查的偶发失败：`shutdown` 的 I-007 和 `residency` 的 I-015。运行前后都会输出标注，但命中仍算失败，退出码仍非零；标注只提供诊断线索。
 
+## 跨平台 CI
+
+[`.github/workflows/ci.yml`](../.github/workflows/ci.yml) 配置 Windows、Ubuntu、macOS 三个平台，在 push、pull request 或手动触发时使用项目最低 Node.js 版本 `22.19.0`。通过 `npm ci --ignore-scripts --no-audit --no-fund` 安装锁定的开发依赖，然后执行 `node scripts/gates.mjs --slow`：类型检查、一次构建和现有四层本地测试。无需模型凭据，不安装或登录真实 Codex／Claude CLI。
+
+每个平台独立报告失败；一个平台失败不取消另外两个，不自动重试，也不以 `continue-on-error` 忽略失败。工作流仅授予 `contents: read`，checkout 不保留 Git 凭据；不缓存依赖。30 分钟是整个 CI job 的截止时间，不修改用例或产品的超时。
+
+配置文件存在不代表三平台已经通过。运行结果以对应提交的 GitHub Actions 记录为准；通过后证明的是该 runner／Node 组合下的本地逻辑和真实 OS 子进程夹具，包括已有父退出、重连和释放路径，不替代真实原生 CLI／模型、人工 TUI 或所有 CPU／文件系统的验收。Windows 专用用例在其他平台的显式 skip 仍需如实报告；未运行的平台仍为未验证。
+
 ## 环境隔离
 
 每次执行都会创建临时 `PI_CODING_AGENT_DIR`，在导入子进程模块前应用，避免用户的 worker 角色配置把 Pi 夹具重定向到真实 Codex/Claude。入口还会清除继承的 `PI_CLI_SUBAGENT`，避免测试宿主的扩展注册提前返回；真实子代理的递归保护仍保留，测试不关闭该保护。
