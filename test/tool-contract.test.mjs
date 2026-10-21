@@ -214,6 +214,8 @@ test('one skill routes to a single backend reference before control, without mix
   const root = new URL('../skills/delegate-cli-agents/', import.meta.url);
   const read = file => fs.readFileSync(new URL(file, root), 'utf8');
   const skill = read('SKILL.md');
+  for (const file of ['SKILL.md', 'references/approvals.md', 'references/recovery.md', 'references/pi.md', 'references/codex.md', 'references/claude.md'])
+    assert.doesNotMatch(read(file), /\p{Script=Han}/u, `${file} must stay in English`);
   assert.match(skill, /references\/<cli>\.md/);
   assert.match(skill, /capabilities/);
   for (const cli of ['pi', 'codex', 'claude']) {

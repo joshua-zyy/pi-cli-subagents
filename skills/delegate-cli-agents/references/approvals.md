@@ -1,31 +1,31 @@
-# 审批与答复
+# Approvals and replies
 
-有待处理请求时读取本页，包括运行中的非阻塞问题。用 `subagent_query get` 读取完整当前请求，并按实例 `cli` 读取对应后端说明；用 `subagent_reply` 回答，不把答案发成新的任务消息。
+Read this for pending requests, including non-blocking questions while running. Use `subagent_query get` to read the complete current request and load the reference matching the instance's `cli`. Answer with `subagent_reply`, not a new task message.
 
-## 决策与授权
+## Decide within authorization
 
-对照用户原始授权判断完整请求的效果。常规且已授权的单次动作由父代理处理，不因出现权限提示就再次请示用户。上下文、效果或授权不清，或用户要求亲自确认时，明确提出需要决定什么，并指向 `/agents` 中该实例的 `i` 详情、`r` 答复。无法确认则拒绝或取消，不能猜默认选项。
+Compare the complete request's effects with the user's original authorization. Handle routine authorized single-action decisions yourself; a permission prompt alone is not a reason to ask the user again. Escalate unclear context, effects or authorization, or an explicit user-confirmation requirement. State the decision needed and direct the human to the instance in `/agents`, `i` details, `r` reply. Otherwise deny or cancel rather than guessing a default.
 
-`parentPolicy` 仅声明可提交的答复，不是授权结论，也不证明按钮只影响一次操作。不得授予会话级或永久权限、关闭安全机制；任务答案只补充已授权的上下文，不增加授权。无提示不等于已获审阅或批准：角色可能已选择无需提示的权限模式。
+`parentPolicy` states supported responses, not authorization or proof of a one-action effect. Never grant session-wide or permanent permissions or disable safeguards. Task answers supply already-authorized context, not new authority. Silence is not consent: the role may already use a permission mode that removes prompts, without anything having been reviewed or approved.
 
-## 提交形态
+## Submit one response
 
-每次只提交一种答复，并附具体 `reason`。使用精确的当前 `questionId`；已解决、失效或投递不确定的答案不再次提交。
+Submit exactly one response shape with a concrete `reason`. Use the exact current `questionId`; do not resubmit an answer that resolved, expired or has uncertain delivery.
 
-| 当前请求 | 答复 |
+| Current request | Response |
 | --- | --- |
-| 任务问题且允许文本 | `value` 为提供的标签或实际自定义答案，一次提交 |
-| 普通选项 | `value` 为当前原文选项 |
-| 确认 | `confirmed`，先从正文判断其效果 |
-| 输入/编辑 | `value` 为回复文本 |
-| 允许父代理回答的表单 | `answers`：每个精确字段 ID 对应字符串数组 |
+| Task question allowing text | Submit an offered label or the actual custom answer once in `value` |
+| Ordinary selection | Exact current option text in `value` |
+| Confirmation | `confirmed`, after establishing its effect from the request |
+| Input/editor | Response text in `value` |
+| Form answerable by the parent | `answers`: exact field IDs mapped to string arrays |
 
-表单遵守 `required`、`multiSelect`、`options` 与 `allowOther`。空数组只跳过可选字段；必填字段需要非空白答案；单选最多一项，多选只在明确允许时添加自定义答案。不能把显示标题当字段 ID，不拼接或重写选项。
+Respect `required`, `multiSelect`, `options` and `allowOther`. Empty arrays skip only optional fields; required fields need a non-blank answer. Single-select permits at most one answer; custom answers in multi-select require explicit support. Do not substitute display headers for field IDs, concatenate options or rewrite them.
 
-`cancelled: true` 取消整个请求，不与其他答复字段混用。取消或 `confirmed: false` 的原生效果以完整请求及后端说明为准，不假设一定是“拒绝但继续”。
+`cancelled: true` cancels the whole request and must not be mixed with other response fields. Interpret cancellation and `confirmed: false` from the complete request and backend reference; neither necessarily means decline-and-continue.
 
-## 不可越过的范围
+## Boundaries
 
-明确的 `humanOnly` 始终有效；没有 `parentPolicy` 的旧/未知请求对父代理保持仅拒绝，人工可通过 `/agents` 回答。可见的敏感标记不保证原生日志已经脱敏，不编造或转发秘密。
+An explicit `humanOnly` remains binding. Legacy or unknown requests without `parentPolicy` are refusal-only for the parent; the human can answer through `/agents`. Sensitive-field markers do not guarantee native logs are redacted. Do not invent or forward secrets.
 
-后端拒绝未知专用对话框、未关联权限或不受支持的输入时，不绕过拒绝，不修改全局配置、权限模式、记录或原生权限更新。普通消息不是审批，收到报告也不证明动作完成。非阻塞问题仍绑定原请求/轮次，继续工作不延长答案有效期。
+Do not bypass refusals for unknown dedicated dialogs, uncorrelated permissions or unsupported input by changing global configuration, permission modes, records or native permission updates. Ordinary messages are not approvals, and a report does not prove the action completed. Non-blocking questions remain scoped to their original request/turn; continued work does not extend answer validity.

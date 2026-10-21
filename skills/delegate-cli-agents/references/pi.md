@@ -1,17 +1,17 @@
-# pi 后端
+# Pi backend
 
-先读实例当前 `capabilities`，不能把后端名称当作就绪或授权证明。
+Read the instance's current `capabilities`; the backend name proves neither readiness nor authorization.
 
-## 追加输入与中断
+## Input and interruption
 
-运行中的 `steer` 在后续模型请求前提供输入，不取消正在执行的工具；`followUp` 等当前执行不再有工具调用后处理。空闲时 `send` 开始同一原生会话的新轮，释放后恢复原会话，不重放旧任务。
+While running, `steer` supplies input before a subsequent model request without cancelling an in-flight tool; `followUp` waits until the current execution has no more tool calls. Sending to an idle instance starts a new run in the same native session; after release it resumes the original session without replaying the old assignment.
 
-独立 `interrupt` 清理排队输入并结束捕获的当前轮，保留运行时与会话；不是释放资源。回执 `settled` 不证明一定由中断导致结束，可能与自然完成竞态。
+Independent `interrupt` clears queued input and ends the captured current turn, retaining the runtime and session rather than releasing resources. A `settled` receipt does not prove interruption caused the outcome: natural completion may race it.
 
-## 任务问题与普通对话框
+## Task questions and ordinary dialogs
 
-子代理的 `subagent_ask_parent` 每次提出一个任务上下文问题。识别为 `kind: "question"` 且 `parentPolicy.text: true` 时，将提供的标签或实际自定义答案一次提交到 `value`。适配器负责原生选项/输入两步流程；不要选“自定义输入”菜单项、等待第二个问题，或复用缓存答案处理普通对话框。
+The child's `subagent_ask_parent` asks one task-context question at a time. For recognized `kind: "question"` with `parentPolicy.text: true`, submit an offered label or the actual custom answer once in `value`. The adapter handles the native selection/input sequence; do not select a custom-entry menu item, wait for a second question or reuse cached task answers for ordinary dialogs.
 
-普通 `select`、`confirm`、`input`、`editor` 按完整请求和 `parentPolicy` 回答：精确选项、布尔确认或文本。对话框形状不提供权限来源证明，按钮名称也不证明单次效果，须对照用户授权判断。启动或空闲时也可能出现运行时级请求，不能把它当作新任务已受理。
+Answer ordinary `select`, `confirm`, `input` and `editor` requests from the complete request and `parentPolicy`: exact option text, a boolean confirmation or response text. Dialog shape does not prove permission provenance, nor does a button label prove a single-action effect. Judge against user authorization. Runtime-scoped requests can also occur during startup or while idle; they do not prove a new task was accepted.
 
-回答不扩大任务授权，不授予会话级或永久权限；已失效或结果不确定时先核对，不重复提交。
+Answers do not expand task authorization or grant session-wide or permanent permissions. Inspect expired or uncertain outcomes instead of submitting again.

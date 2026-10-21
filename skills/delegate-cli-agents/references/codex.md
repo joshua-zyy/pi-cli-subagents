@@ -1,25 +1,25 @@
-# codex 后端
+# Codex backend
 
-## 追加输入与中断
+## Input and interruption
 
-运行中仅支持 `steer`，不支持 `followUp`；确需后续任务时等待自动完成报告，再向空闲实例 `send`。不要靠失败调用探测限制。空闲续轮及释放后恢复仍保留原生会话。
+While running, only `steer` is supported, not `followUp`. If a later task is needed, wait for the automatic completion report, then send to the idle instance. Do not discover restrictions through failed calls. Idle continuation and resume after release retain the original native session.
 
-独立中断捕获的当前轮并等待原生结束，保留运行时；不是停止进程。以实例能力和回执为准，不把受理当成任务成功。
+Independent interruption captures the current turn and waits for its native terminal result while retaining the runtime; it does not close the process. Follow instance capabilities and receipts, and never treat acceptance as task success.
 
-## 任务问题
+## Task questions
 
-若原生 `request_user_input` 在 Default 模式不可用，核对角色与实际版本/配置。角色字段 `defaultModeQuestions: true` 显式开启经 0.159.2 核对的实验特性，`false` 关闭，省略/UI inherit 沿用原生配置；它不切换 Plan、不授权，也不覆盖禁用的 `tools.experimental_request_user_input.enabled`。
+If native `request_user_input` is unavailable in Default mode, check the role and actual CLI version/configuration. The role field `defaultModeQuestions: true` opts into the experimental feature checked against 0.159.2; `false` disables it, and omission/UI inherit leaves native configuration in charge. It does not switch to Plan, grant permissions or override a disabled `tools.experimental_request_user_input.enabled`.
 
-配置新实例须在用户授权内；修改角色不改变已有实例保存的设置。不能通过扩大权限、改全局配置或静默创建替代实例绕过限制。
+Configure new instances only within user authorization; role edits do not change an existing instance's saved settings. Do not widen permissions, edit global configuration or silently launch a replacement to bypass a restriction.
 
-`form` 且 `parentPolicy.answers: true` 时，读取完整 `fields`，将精确字段 ID 映射到答案数组，遵守必填与选项约束；不以显示标题替代 ID，不与 `value`/`confirmed` 混用。
+For a `form` with `parentPolicy.answers: true`, read the complete `fields` and map exact field IDs to answer arrays, respecting required fields and choices. Do not replace IDs with display headers or mix `answers` with `value`/`confirmed`.
 
-异步 `agentMessage` 也可能产生非阻塞问题，字段 ID 为索引且必填。仍通过 `subagent_reply` 回答：适配器仅向捕获的活动轮发送关联答案，不开启空闲 follow-up。取消只是本地撤销该问题；轮次结束则请求失效。它不是 RPC 审批。答案被视为可信用户输入，只提供已授权上下文。
+An asynchronous `agentMessage` may also produce a non-blocking question with indexed, required field IDs. Still answer through `subagent_reply`: the adapter sends correlated answers only to the captured active turn, never an idle follow-up. Cancellation dismisses the question locally; turn end invalidates it. This is not an RPC approval. Answers are treated as trusted user input, so provide only already-authorized context.
 
-## 原生权限与 MCP 请求
+## Native permissions and MCP requests
 
-关联到活动 MCP 调用的 `mcp_tool_call_approval_<callId>` 是权限请求，不是任务表单。核对 server/tool/arguments，按提供的 `value` 原文 Allow/Cancel 或取消，并写理由；不提交 `answers` 或永久授权。
+A `mcp_tool_call_approval_<callId>` tied to a live MCP action is a permission request, not a task form. Inspect server/tool/arguments, then submit the exact offered `value` Allow/Cancel or cancellation with a reason. Do not submit `answers` or a persistent grant.
 
-独立 MCP elicitation 仅在明确审批元数据、仅消息表单与同 server 的活动调用唯一关联时使用确认：`confirmed: true` 接受、false 拒绝、`cancelled: true` 取消。不提交表单数据或持久化元数据。未关联/歧义请求、数据或 URL 表单及未知权限保持拒绝，保留 ID 属于宿主，不尝试绕过。
+Separate MCP elicitation uses confirmation only when explicit approval metadata, a message-only form and one live same-server call are unambiguously bound. Use `confirmed: true` to accept, false to decline, or `cancelled: true` to cancel. Do not submit form content or persistence metadata. Uncorrelated or ambiguous requests, data/URL forms and unknown permission kinds remain refused. Reserved IDs belong to the host; do not work around refusals.
 
-其他权限请求使用当前 `parentPolicy` 的精确答复，不从旧请求猜形态。敏感字段可能仍在原生日志中，不编造或暴露秘密；投递不确定时不要重复或改发普通消息。
+For other permissions, use the current `parentPolicy` response shape, not a previous request's shape. Sensitive fields may remain in native logs; do not invent or expose secrets. Never retry uncertain delivery or resend the answer as an ordinary message.

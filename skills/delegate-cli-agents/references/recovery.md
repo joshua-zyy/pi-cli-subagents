@@ -40,9 +40,9 @@ Use `subagent({ action: "interrupt", id })` to end only the captured run while r
 
 Read the operation receipt, not an old `accepted` bit: `accepted` is native acknowledgement, not model consumption; `settled` does not claim that interrupt caused the outcome; only `released` confirms release. On `unconfirmed`, inspect before any retry. A request already resolved or expired cannot be answered again. Human intervention records belong to the original parent session and can be delivered there after it is reopened; they never authorize repeating the child operation.
 
-## 旧委派许可记录
+## Legacy delegation opt-ins
 
-保存了 `allowSubagents: true` 的旧实例不能继续 send 或通过公开 reply 回答/取消问题，因为答复可能让旧任务继续。保留查询、当前协议的 interrupt 与 stop；先中断、释放，检查历史与已有副作用。不要修改 spec 为 false、另起实例或改权限来绕过拒绝。升级不能追溯撤销旧进程的能力，升级前须用旧扩展释放它们。
+An old instance with saved `allowSubagents: true` cannot receive `send` or any public `reply`, including cancellation: a reply may unblock the old task. Queries, current-protocol `interrupt` and `stop` remain available. Interrupt and release it, and inspect retained history and existing effects. Do not change the spec to false, start a replacement or widen permissions to bypass the refusal. An upgrade cannot revoke capabilities already held by an old process; release old runtimes with the previous extension before upgrading.
 
 ## Human controls
 

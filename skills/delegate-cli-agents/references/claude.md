@@ -1,25 +1,25 @@
-# claude 后端
+# Claude backend
 
-## 运行时能力
+## Runtime capabilities
 
-版本通过启动预检不等于所有控制能力可用。原生 `system/init` 才提供本运行时的实际能力；初始化前未知。
+Passing binary-version preflight does not prove every control is supported. Native `system/init` supplies this runtime's actual capabilities; before initialization they are unknown.
 
-运行中追加输入需要 `msg_lifecycle_v1`，`steer` 映射非抢占的 next，`followUp` 映射 later，不隐式中断。输入需要关联的原生收据，旧的受理状态不能证明新消息已收到。
+Busy input requires `msg_lifecycle_v1`: `steer` maps to non-preempting next input and `followUp` to later input, without implicit interruption. Require a correlated native receipt; an old accepted bit cannot acknowledge a new message.
 
-独立 `interrupt` 需要 `interrupt_receipt_v1` 和 `interrupt_cancel_queued_v1`：取消捕获轮的排队输入，并等待该轮原生终态。缺能力时不试探；中断不是释放，也不证明已回滚。自然结果、排队输入和后台工作均收口后才算空闲，不能看到第一个 result 就另开任务。
+Independent `interrupt` requires `interrupt_receipt_v1` and `interrupt_cancel_queued_v1`: it cancels queued input for the captured turn and waits for that turn's native terminal result. Do not probe when capabilities are missing. Interruption is neither release nor rollback. The foreground result, queued input and background work must all settle before idle; do not start another task after just the first result.
 
-## 任务表单
+## Task forms
 
-`AskUserQuestion` 的字段 ID 是完整问题文本，不是短标题。通过 `answers` 提交数组；单项答案的原生字符串映射和多选编码由适配器处理。
+`AskUserQuestion` field IDs are the full question text, not short headers. Submit arrays through `answers`; the adapter handles native single-answer string mapping and multi-select encoding.
 
-尊重显式 `multiSelect`：false 最多一个字符串，true 允许选项及一个自定义答案。空数组跳过可选字段；必填字段不能跳过，范围、默认值、预览或提示都不是自动答案。
+Respect explicit `multiSelect`: false permits at most one string; true permits selections plus one custom answer. Empty arrays skip optional fields only; required fields cannot be skipped. Ranges, defaults, previews and hints are not automatic answers.
 
-文本/数字卡片需要原生扩展问题特性，本插件不自行开启。当前审计限额为每项 8192 个 UTF-16 单元、编码答案总计 32768 字符。取消仅拒绝该问题，不显式中断整轮。
+Text/number cards require the native extended-question feature; the extension does not enable it. Audited limits are 8192 UTF-16 code units per string and 32768 encoded answer characters total. Cancellation denies only the question without explicitly interrupting the turn.
 
-保留请求展示的输入，不提供宿主 annotations/timeout 等字段，也不写原生权限更新。已识别任务卡是专用对话框拒绝策略的受支持例外，未知表单仍拒绝。
+Preserve the input shown in the request. Do not supply host annotations/timeout fields or native permission updates. Recognized task cards are the supported exception to dedicated-dialog refusal; unknown forms remain refused.
 
-## 权限决策
+## Permission decisions
 
-分类器不可批准、规则强制询问、匹配 ask 规则等原生策略信号是待判断的上下文，不自动要求人工介入，也不自动授予权限。仍按用户授权和当前 `parentPolicy` 作单次决策。
+Native signals such as a classifier marking an action non-approvable, rule-forced asks or matched ask rules are context to judge, not automatic human-intervention requirements or authorization. Decide one action within user authorization and the current `parentPolicy`.
 
-普通权限严格使用当前原文选项：Approve once、Deny once、Cancel turn 或取消。不把任务答案替换成 Approve once，不授予永久或会话权限。成功写回原生 stdio 没有独立审批回执，不能宣称工具已经执行。
+For ordinary permissions, use the exact offered choices: Approve once, Deny once, Cancel turn, or cancellation. Never replace a task answer with Approve once or grant permanent/session permissions. A successful native stdio write has no independent approval receipt and does not prove tool execution.
