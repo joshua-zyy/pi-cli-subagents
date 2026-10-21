@@ -181,9 +181,15 @@ but do not validate the replacement cwd-only interface.
 A separate real task on Windows with Pi 1.3.0 verified a Pi parent and Pi child using the cwd-only
 interface: two resident turns in one native session, parent-managed Git isolation, release before
 integration, post-merge tests and cleanup. No worktree-specific skill was loaded. This is one behavior
-witness, not a reliability or cost benchmark. Codex/Claude are covered by local fixtures for the new
-interface, not a fresh real-model run. Released-session resume, approvals, the full interactive TUI,
-Linux/macOS and newer backend versions were not revalidated by this task.
+witness, not a reliability or cost benchmark.
+
+A later Windows interaction witness used Pi 1.3.0 with Pi and Codex CLI 0.162.1 children, each for two
+resident turns. The parent read the matching backend reference before its first control operation,
+answered real task questions through the respective reply shapes, and did not read the unused Claude
+reference. Both runtimes were released; temporary test configuration was restored. This validates one
+question/continuation path, not general model compliance or token savings. Claude, running-input and
+interrupt timing, released-session resume, permission approvals, interactive TUI and Linux/macOS were
+not revalidated by this interaction witness.
 
 ## Credits
 

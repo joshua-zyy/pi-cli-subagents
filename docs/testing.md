@@ -104,6 +104,18 @@ Node 测试运行器使用 `--test-concurrency=1`，不修改父进程环境或�
 本次仅证明一条真实 Git/cwd 协作路径可完成，不推导节省 token/费用、普遍发现率或目录并发安全；不构成
 Codex/Claude 真实模型、释放后恢复、审批、人工 TUI 或其它操作系统的重新验收。
 
+### 按后端加载与双 CLI 问答真实见证（2026-10-21）
+
+实现 `c3c01a7` 在 Windows / Pi 1.3.0 测试宿主完成一次真实父任务：Pi 与 Codex CLI 0.162.1 各一个实例、各两轮，模型为 gpt-6.1-sol、medium。临时角色目录只涉及这两个后端；父任务不包含技能文件路径或协议答案，不由监督器追加补读提示。
+
+原始父会话显示：主 SKILL 在第9行读取，pi.md 在第13行、codex.md 在第28行读取，均早于对应首次控制；未读取 claude.md。真实任务问题分别通过 value 和 answers 回写，四个完成结果送达原父会话，续轮保持各自 native session/runtime。原生 Codex turn_context 也记录了同一模型、medium 和只读模式。两实例均由父代理取得 released 回执，记录中的 worker/CLI 已退出，owner.lock 缺失，无监督器补救。
+
+只读审计器 PASS，3项可变效果全部可核查、0项不可用；五个业务边界样例正确。运行约119秒，只是本轮耗时，不作为性能或费用基准。角色文件恢复原始字节，6个受保护配置哈希一致，隔离凭据副本已删除，114个 dist 文件及预注册输入未改变。
+
+原始 session/events/native、预注册、只读 case 和恢复证明保存在本地忽略目录 `.test-output/backend-guidance/real-01/`，不随包发布。复核：`node test/acceptance/audit.mjs .test-output/backend-guidance/real-01/case.mjs`；不启动模型或执行原任务。另有只读 postcheck 复用现有 evidence 读取器，复核实际工具声明及原生模型上下文。
+
+本轮是业务分析问答，不是 Codex 代码实现验收；它不覆盖 Claude、运行中发送/中断时序、释放后恢复、权限审批、原生孙代理工具清单、人工 TUI 或其他操作系统，也不推导模型普遍遵从或 token/订阅费用改善。此前完整四层本地门禁仍是独立证据，不以本轮替代。
+
 ## 转录读取兼容性变更
 
 已删除 `TranscriptReader.readRecent()` 及其尾部预览、后台全量重放和交接状态。直接深度导入 `dist/transcript.js` 调用该方法的外部代码需要迁移；不保留兼容代理。顺序解析继续使用 `TranscriptReader.read()`，交互式历史查看继续使用现有 `TranscriptWindow` 的有界按需分页。相关旧 API 测试随行为退休；独立的 UI 暂停定位、合并绘制与通知保留测试迁入 `conversation.test.mjs`，分页、原生身份过滤及字节边界仍由现有 window/seek 测试覆盖。
