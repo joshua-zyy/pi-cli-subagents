@@ -10,7 +10,7 @@ import { codexHome, codexLaunch } from "./codex-launch.js";
 import { claudeLaunch } from "./claude-launch.js";
 import { inspectClaudeSession } from "./claude-adapter.js";
 import { nativeSession, projectControlCapabilities } from "./cli-adapter.js";
-import { validateRoleFile } from "./roles.js";
+import { subagentsError, validateRoleFile } from "./roles.js";
 import { directories, jsonFiles, processAbsent, processAlive, readJson, shorten, waitUntil, writeJson, writeJsonExclusive } from "./storage.js";
 import type { AgentSpec, AgentState, AgentView, Control, ControlResult, Delivery, Endpoint, Launch, NativeSession, OperationReceipt, ReclaimRecord, Report, Role, SessionHandle, StartRequest, TaskRun } from "./types.js";
 
@@ -536,6 +536,8 @@ export class AgentManager {
     if (arguments.length > 3) throw new Error("Managed workspace options are retired; send accepts only id, message and mode.");
     if (!message.trim()) throw new Error("Message must not be empty");
     const spec = this.spec(id);
+    const invalid = subagentsError(spec.cli, spec.role.allowSubagents, spec.role.tools);
+    if (invalid) throw new Error(invalid);
     if (spec.workspace !== undefined) throw new Error(`Managed workspaces are retired; cannot send to legacy instance ${id} (workspace ${spec.workspace}). History remains readable. Only protocol v3 instances retain reply, interrupt and stop; older protocols remain read-only and require verified manual process cleanup. Release its runtime and inspect the retained workspace records before explicitly adopting its directory; do not start a replacement to bypass this refusal.`);
     try {
       let state = this.get(id);
@@ -628,6 +630,8 @@ export class AgentManager {
   }
 
   async reply(id: string, questionId: string, answer: Pick<Extract<Control, { type: "reply" }>, "value" | "answers" | "confirmed" | "cancelled">, decision: { actor: "human" | "parent"; reason?: string } = { actor: "human" }): Promise<AgentView> {
+    const spec = this.spec(id), invalid = subagentsError(spec.cli, spec.role.allowSubagents, spec.role.tools);
+    if (invalid) throw new Error(invalid);
     return this.view(id, await this.request(id, { type: "reply", id: questionId, ...answer, ...decision }));
   }
 

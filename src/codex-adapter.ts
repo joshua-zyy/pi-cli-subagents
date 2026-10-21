@@ -5,7 +5,7 @@ import { randomUUID } from "node:crypto";
 import path from "node:path";
 import type { AdapterEvent, AdapterOptions, CliAdapter, InteractionReply } from "./cli-adapter.js";
 import { childEnvironment, type Exit } from "./pi-process.js";
-import { CODEX_MODE_PRESETS } from "./roles.js";
+import { CODEX_MODE_PRESETS, subagentsError } from "./roles.js";
 import type { CodexMode, ControlCapabilities, NativeSession, Delivery, QuestionField } from "./types.js";
 import { readCodexAsyncQuestionFields, readCodexQuestionFields, validateQuestionAnswers } from "./codex-question.js";
 import { readCodexMcpApproval, readCodexMcpElicitation } from "./codex-mcp-approval.js";
@@ -36,9 +36,11 @@ type Approval = { id: string; rpcId?: string | number; threadId: string; turnId:
   mcp?: { questionId?: string; item: RecordValue }; resolved?: () => void; rejected?: (error: Error) => void };
 
 /** One worker owns one app-server process and one thread at a time. */
-/** Delegation must not amplify itself: codex keeps its whole collaboration family only when asked. */
+/** Delegated instances never expose native collaboration tools, including on resume. */
 export function subagentArgs(role: { allowSubagents?: boolean }): string[] {
-  return role.allowSubagents === true ? [] : ["-c", "agents.enabled=false"];
+  const invalid = subagentsError("codex", role.allowSubagents);
+  if (invalid) throw new Error(invalid);
+  return ["-c", "agents.enabled=false"];
 }
 
 export class CodexAdapter implements CliAdapter {

@@ -63,6 +63,63 @@ test('legacy managed inputs fail before state access, admission or dispatch in e
   t.mock.restoreAll();
 });
 
+test('saved delegation opt-ins refuse send and every public reply before state access or side effects', async t => {
+  const cwd = tempDir('nested-legacy'), m = new AgentManager(path.join(cwd, 'parent.jsonl'), launch);
+  for (const method of ['get', 'admit', 'request', 'start']) t.mock.method(m, method, () => assert.fail(`${method} must not run`));
+  for (const cli of ['pi', 'codex', 'claude']) for (const phase of ['starting', 'running', 'waiting', 'idle', 'closed', 'stopping', 'unreachable']) {
+    const id = randomUUID(), dir = path.join(m.root, id);
+    writeJson(path.join(dir, 'spec.json'), { version: cli === 'pi' ? 1 : cli === 'codex' ? 2 : 3,
+      ...(cli === 'pi' ? {} : { cli, [`${cli}Home`]: cwd }), id, parentFile: m.parentFile, cwd,
+      roleName: 'worker', role: { cli, description: 'test', instructions: 'test', allowSubagents: true }, launch, createdAt: 1 });
+    writeJson(path.join(dir, 'state.json'), { phase, id });
+    const before = fs.readdirSync(dir).map(file => [file, fs.readFileSync(path.join(dir, file))]);
+    for (const mode of ['steer', 'followUp']) await assert.rejects(m.send(id, 'MUST NOT EXECUTE', mode), /nested delegation is disabled/i);
+    for (const actor of ['human', 'parent']) for (const answer of [{ confirmed: true }, { confirmed: false }, { cancelled: true }, { value: 'Deny once' }, { answers: {} }])
+      await assert.rejects(m.reply(id, 'request', answer, { actor, reason: 'fixture' }), /nested delegation is disabled/i);
+    assert.deepEqual(fs.readdirSync(dir), before.map(([file]) => file));
+    for (const [file, bytes] of before) assert.deepEqual(fs.readFileSync(path.join(dir, file)), bytes);
+  }
+});
+
+test('saved delegation opt-ins retain query, interrupt and release on all backends without rewriting history', { timeout: 30000 }, async t => {
+  for (const cli of ['pi', 'codex', 'claude']) {
+    const cwd = tempDir(`nested-release-${cli}`), home = path.join(cwd, 'home'); fs.mkdirSync(home);
+    fs.writeFileSync(path.join(home, 'fixture-home'), '');
+    const native = { launch: { command: process.execPath, args: [fileURLToPath(new URL(`./fixtures/${cli}.mjs`, import.meta.url))] }, home };
+    const m = new AgentManager(path.join(cwd, 'parent.jsonl'), launch, cli === 'codex' ? native : undefined, cli === 'claude' ? native : undefined);
+    t.after(async () => { for (const state of m.list()) if (fs.existsSync(path.join(m.root, state.id, 'owner.lock'))) await m.close(state.id); });
+    const child = await m.spawn('worker', { cli, description: 'fixture', instructions: 'fixture' }, cwd, cli === 'pi' ? 'WAIT' : 'APPROVAL');
+    await waitUntil('pending fixture interaction', () => m.get(child.id).questions.length, 5000);
+    const specFile = path.join(m.root, child.id, 'spec.json'), spec = readJson(specFile);
+    spec.role.allowSubagents = true; writeJson(specFile, spec); const retained = fs.readFileSync(specFile);
+    const observed = m.get(child.id); assert.equal(m.list()[0].id, child.id); assert.equal(observed.questions.length, 1);
+    await assert.rejects(m.send(child.id, 'MUST NOT RESUME'), /nested delegation is disabled/i);
+    await assert.rejects(m.reply(child.id, observed.questions[0].id, { cancelled: true }, { actor: 'parent', reason: 'fixture' }), /nested delegation is disabled/i);
+    assert.equal(fs.existsSync(path.join(m.root, child.id, 'runs', child.runId, 'permissions.jsonl')), false);
+    assert.equal((await m.interrupt(child.id)).receipt.status, 'settled');
+    assert.equal((await m.close(child.id)).receipt.status, 'released');
+    assert.equal(m.get(child.id).sessionId, child.sessionId); assert.equal(m.get(child.id).runCount, 1);
+    assert.equal(m.getResult(child.id, child.runId).status, 'stopped');
+    assert.deepEqual(fs.readFileSync(specFile), retained);
+    await assert.rejects(m.send(child.id, 'MUST NOT RESTORE'), /nested delegation is disabled/i);
+  }
+});
+
+test('current workers refuse saved delegation opt-ins before ownership or native launch', () => {
+  const cwd = tempDir('nested-worker-startup'), worker = fileURLToPath(new URL('../dist/worker.js', import.meta.url));
+  for (const cli of ['pi', 'codex', 'claude']) {
+    const id = randomUUID(), runId = randomUUID(), dir = path.join(cwd, id);
+    writeJson(path.join(dir, 'spec.json'), { version: cli === 'pi' ? 1 : cli === 'codex' ? 2 : 3,
+      ...(cli === 'pi' ? {} : { cli, [`${cli}Home`]: cwd }), id, parentFile: path.join(cwd, 'parent.jsonl'), cwd,
+      roleName: 'worker', role: { cli, description: 'test', instructions: 'test', allowSubagents: true },
+      launch: { command: path.join(cwd, 'must-not-launch'), args: [] }, createdAt: 1 });
+    writeJson(path.join(dir, 'runs', runId, 'request.json'), { protocolVersion: 3, runId, message: 'MUST NOT START' });
+    assert.throws(() => execFileSync(process.execPath, [worker, dir, runId], { windowsHide: true, stdio: 'pipe', timeout: 15000 }), error => error.status === 1);
+    assert.match(readJson(path.join(dir, 'runs', runId, 'error.json')).error, /nested delegation is disabled/i);
+    for (const file of ['owner.lock', 'state.json', 'endpoint.json', 'sessions']) assert.equal(fs.existsSync(path.join(dir, file)), false, file);
+  }
+});
+
 test('legacy managed records keep results, pending replies, interruption and release', { timeout: 20000 }, async t => {
   const { cwd, m } = setup(t), role = { description: 'test', instructions: 'test' };
   const markLegacy = id => {

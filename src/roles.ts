@@ -54,8 +54,9 @@ const claudeLevels = new Set<Thinking>(CLAUDE_THINKING_LEVELS);
 
 export function subagentsError(cli: Cli | undefined, allowSubagents: unknown, tools?: RoleToolTrim): string | undefined {
   if (allowSubagents !== undefined && typeof allowSubagents !== "boolean") return "allowSubagents must be a boolean";
-  if ((cli ?? "pi") === "pi" && (allowSubagents === true || tools?.allow?.includes("subagent")))
-    return "Pi nested delegation is unsupported: the child recursion guard disables this plugin's delegation tools; remove allowSubagents: true and subagent from tools.allow";
+  if (allowSubagents === true) return "Nested delegation is disabled for all backends; remove allowSubagents: true. Existing enabled instances may only be queried, interrupted or released.";
+  if ((cli ?? "pi") === "pi" && tools?.allow?.includes("subagent"))
+    return "Nested delegation is disabled; remove subagent from tools.allow";
   return undefined;
 }
 
@@ -166,7 +167,7 @@ export function validateRoleFile(value: unknown, source: string): Record<string,
       ...(role.tools !== undefined ? { tools: role.tools as RoleToolTrim } : {}),
       ...(role.skills !== undefined ? { skills: role.skills as boolean | string[] } : {}),
       ...(role.mcp !== undefined ? { mcp: role.mcp as boolean } : {}),
-      ...(role.allowSubagents !== undefined ? { allowSubagents: role.allowSubagents as boolean } : {}),
+      ...(role.allowSubagents !== undefined ? { allowSubagents: role.allowSubagents as false } : {}),
     };
   }
   return roles;

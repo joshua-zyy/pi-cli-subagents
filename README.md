@@ -62,6 +62,16 @@ template: CLI, model, provider, thinking level, effort, permission mode, and ins
 override roles with `/cli-agents-setting`. Tools and UI never depend on a built-in role name, so the
 four above are replaceable rather than a fixed hierarchy.
 
+## Delegation depth
+
+Subagents cannot delegate again through the managed/native delegation tools. There is no opt-out:
+`allowSubagents: true` is rejected; an old `false` is accepted for compatibility. This is not an OS
+sandbox and does not prevent arbitrary programs launched through an unrestricted shell.
+
+Before upgrading, interrupt and release old runtimes and remove any `true` role settings. Saved
+instances with that setting remain queryable and releasable, but cannot receive `send` or any public
+`reply` (even cancellation may unblock the old task). Their records are not silently rewritten.
+
 ## Tools
 
 | Tool | Use |

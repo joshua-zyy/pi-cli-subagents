@@ -308,24 +308,16 @@ Next step: reload the extension to inspect the tools and role catalog; real coll
 - **真机验收**（2026-10-17，本机 pi 1.3.0 + 一个自建 stdio MCP 服务器作探针）：不带 `--no-mcp` 时该服务器**被启动**（探针写下了启动记录）；带 `--no-mcp` 时**未启动**；再加 `--no-tools` 亦未启动。结论限定为"服务器未连接"，**未**验证 MCP 工具在工具列表中的可见性。
 - 生效范围同前：写入 `spec.json`，随该实例每次启动/恢复生效；改角色只影响新实例。
 
-### 2.8 默认禁止再派（`allowSubagents`）
+### 2.8 禁止再派（`allowSubagents` 仅兼容旧 false）
 
-**默认行为**：子代理**不能再派子代理**。Codex 与 Claude 角色可显式写 `allowSubagents: true`；Pi 暂不支持本插件的多级委派，配置 true 或在 tools.allow 中列入 subagent 会在创建实例前明确拒绝。
+**所有后端只允许一层委派，不提供开启孙代理的选项。** `allowSubagents: true` 明确拒绝；省略或旧配置的 `false` 均保持禁止，非布尔仍报类型错误。Pi 的 tools.allow 也不能放开 subagent，子身份标记与注册保护不能移除。
 
-```jsonc
-{ "cli": "codex", "allowSubagents": true }
-```
-
-- 省略或 `false` = 禁止；Codex/Claude 的 `true` = 允许。非布尔 → 显式报错。
-- Pi 的子身份标记同时控制问答工具注入和委派工具注册，不能通过删除标记来放开递归。旧实例不热更新；以下规则适用于新建实例。
-
-| 后端 | 下发 | 证据 |
+| 后端 | 每次原生启动/恢复的限制 | 证据范围 |
 | --- | --- | --- |
-| pi | 保留子身份注册保护与 `--exclude-tools subagent`；显式放开配置被拒绝 | 本地配置与注册契约测试 |
-| codex | `-c agents.enabled=false` | 真机工具清单对比：六个 `collaboration.*` 工具全部消失（**主要依据**）；同 prompt 下模型自报也从 `SPAWN-AVAILABLE` 转为 `SPAWN-UNAVAILABLE`（**仅作旁证**，自报不作为独立证据） |
-| claude | `--disallowedTools Agent` | 真机：`Agent` 工具从清单消失（prompt 必须走 stdin，否则会被当成工具名） |
+| pi | 子身份注册保护与 `--exclude-tools subagent` | 本地配置、注册及 worker 夹具 |
+| codex | `-c agents.enabled=false` | 历史真机工具清单对比移除 collaboration 工具；本次只验证本地夹具及 argv，不冒称新一轮真机验收 |
+| claude | `--disallowedTools Agent`，与角色 deny 合成单一参数且不重复 | 历史真机清单移除 Agent；本次只验证本地夹具及 argv |
 
-- Pi 的 `tools.deny` 已有 `subagent` 时不重复追加；不存在 tools.allow 放开的例外。
-- **为什么默认禁止**：父会话的容量上限（§2.3）只管本扩展创建的 runtime，孙代理不经过它；允许再派等于给出一条绕过容量边界的放大路径。
-- 生效范围同前：写入 `spec.json`，随实例每次启动/恢复生效；改角色只影响新实例。
-- **未覆盖**：本字段只约束"该子代理能不能再派"，不约束"孙代理的数量"（若显式允许，放大仍可能发生）。
+父会话上限只管理本插件创建的 runtime；孙代理不经过该准入与生命周期管理，因此不开放原生再派。此限制是插件和后端原生委派入口的约束，**不是操作系统沙箱**；保留任意 shell/外部工具权限时，不承诺能阻止所有自行启动程序的方式。
+
+**升级边界**：先用旧扩展中断并释放旧运行时，再升级并移除角色配置里的 true。已有 true spec 不热更新、不改写、不转成 false；新版本拒绝其 send（含空闲续轮、释放后恢复）及所有公开 reply，连取消也可能解阻塞并继续旧任务，不能用于绕过。查询、历史、当前协议的中断和释放仍保留，释放内部的原生取消仅用于资源收口。新 worker 对保存的 true spec 在取得锁、写 state 或启动 CLI 前拒绝。新父端代码不能追溯撤销已经运行的旧 CLI 所获权限，不自动接管或停止它。

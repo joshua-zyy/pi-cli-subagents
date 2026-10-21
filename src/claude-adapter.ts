@@ -8,6 +8,7 @@ import { StringDecoder } from "node:string_decoder";
 import type { AdapterEvent, AdapterOptions, CliAdapter, InteractionReply } from "./cli-adapter.js";
 import { childEnvironment, type Exit } from "./pi-process.js";
 import { claudeEnvironment } from "./claude-launch.js";
+import { subagentsError } from "./roles.js";
 import type { AgentSpec, ControlCapabilities, NativeSession, Delivery, QuestionField, RoleToolTrim } from "./types.js";
 import { claudeQuestionAnswers, readClaudeQuestionFields } from "./claude-question.js";
 
@@ -113,13 +114,15 @@ type Approval = { id: string; requestId: string; toolId: string; input: Json; me
 /** Native stream-json stays inside this adapter; the worker retains ownership and audit. */
 /**
  * Tool denial for a Claude role, in one flag: --disallowedTools takes a list, and a second flag could
- * swallow whatever follows it. The no-respawn default joins the role's own deny list here, so neither
+ * swallow whatever follows it. The mandatory delegation denial joins the role's own deny list, so neither
  * can replace the other.
  */
 export function toolDenyArgs(role: { tools?: RoleToolTrim; allowSubagents?: boolean }): string[] {
+  const invalid = subagentsError("claude", role.allowSubagents);
+  if (invalid) throw new Error(invalid);
   const deny = [...(role.tools?.deny ?? [])];
-  if (role.allowSubagents !== true && !deny.includes("Agent")) deny.push("Agent");
-  return deny.length ? ["--disallowedTools", deny.join(",")] : [];
+  if (!deny.includes("Agent")) deny.push("Agent");
+  return ["--disallowedTools", deny.join(",")];
 }
 
 export class ClaudeAdapter implements CliAdapter {

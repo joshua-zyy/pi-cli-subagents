@@ -43,8 +43,8 @@ export interface Role {
   skills?: boolean | string[];
   /** false disables MCP for this Pi role; other backends have no switch and reject it. */
   mcp?: boolean;
-  /** Omitted or false disables delegation; true is supported only by Codex and Claude. */
-  allowSubagents?: boolean;
+  /** Legacy false is accepted; delegation cannot be enabled on any backend. */
+  allowSubagents?: false;
 }
 
 // An argv launch, not a shell command. Injectable for protocol tests.

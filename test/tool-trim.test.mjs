@@ -10,7 +10,7 @@ import { toolDenyArgs as claudeToolDenyArgs } from '../dist/claude-adapter.js';
 import { tempDir } from './helpers/tmp.mjs';
 
 const launch = { command: process.execPath, args: [] };
-// A child may not spawn grandchildren unless the role says so: every default argv carries this denial.
+// Every native launch denies grandchildren; a role cannot opt out.
 const noSubagent = ['--exclude-tools', 'subagent'];
 
 test('trim flags follow the role and keep the no-respawn default', () => {
@@ -23,19 +23,21 @@ test('trim flags follow the role and keep the no-respawn default', () => {
 
 test('Pi refuses unsupported nested delegation instead of silently accepting an ineffective switch', () => {
   for (const settings of [{ allowSubagents: true }, { tools: { allow: ['read', 'subagent'] } }]) {
-    assert.throws(() => trimArgs(settings), /Pi nested delegation is unsupported/);
-    assert.throws(() => validateRoleFile({ worker: { description: 'd', instructions: 'i', ...settings } }, 'probe'), /Pi nested delegation is unsupported/);
+    assert.throws(() => trimArgs(settings), /nested delegation is (disabled|unsupported)/i);
+    assert.throws(() => validateRoleFile({ worker: { description: 'd', instructions: 'i', ...settings } }, 'probe'), /nested delegation is (disabled|unsupported)/i);
   }
   assert.deepEqual(trimArgs({ tools: { deny: ['subagent'] } }), ['--exclude-tools', 'subagent'],
     'an explicit denial is not duplicated');
   assert.deepEqual(trimArgs({ allowSubagents: false }), noSubagent, 'false means the same as omitted');
 });
 
-test('codex and claude deny their own spawn tool by default', () => {
-  assert.deepEqual(codexSubagentArgs({}), ['-c', 'agents.enabled=false']);
-  assert.deepEqual(codexSubagentArgs({ allowSubagents: true }), []);
-  assert.deepEqual(claudeToolDenyArgs({}), ['--disallowedTools', 'Agent']);
-  assert.deepEqual(claudeToolDenyArgs({ allowSubagents: true }), []);
+test('codex and claude always deny native delegation and refuse an opt-out', () => {
+  for (const settings of [{}, { allowSubagents: false }]) {
+    assert.deepEqual(codexSubagentArgs(settings), ['-c', 'agents.enabled=false']);
+    assert.deepEqual(claudeToolDenyArgs(settings), ['--disallowedTools', 'Agent']);
+  }
+  for (const flags of [codexSubagentArgs, claudeToolDenyArgs])
+    assert.throws(() => flags({ allowSubagents: true }), /nested delegation is disabled/i);
 });
 
 test('tool trimming is Pi-only and its shape is checked', () => {
@@ -52,7 +54,7 @@ test('tool trimming is Pi-only and its shape is checked', () => {
   assert.match(toolTrimError('pi', { allow: ['read'], extra: 1 }), /unknown fields: extra/);
 });
 
-test('the role file loader keeps tools and skills and mcp and the respawn switch', () => {
+test('the role file loader preserves false for compatibility but refuses delegation for every CLI', () => {
   const roles = validateRoleFile({ worker: { description: 'd', instructions: 'i', tools: { allow: ['read'] }, skills: ['/s'], mcp: false, allowSubagents: false } }, 'probe');
   assert.deepEqual(roles.worker.tools, { allow: ['read'] });
   assert.deepEqual(roles.worker.skills, ['/s']);
@@ -62,8 +64,11 @@ test('the role file loader keeps tools and skills and mcp and the respawn switch
   assert.throws(() => validateRoleFile({ worker: { description: 'd', instructions: 'i', skills: [] } }, 'probe'), /non-empty array of skill paths/);
   assert.throws(() => validateRoleFile({ worker: { description: 'd', instructions: 'i', mcp: 'off' } }, 'probe'), /must be true or false/);
   assert.throws(() => validateRoleFile({ worker: { description: 'd', instructions: 'i', allowSubagents: 'yes' } }, 'probe'), /allowSubagents must be a boolean/);
-  assert.equal(validateRoleFile({ worker: { description: 'd', instructions: 'i', allowSubagents: true, cli: 'codex' } }, 'probe').worker.allowSubagents, true,
-    'Codex can express explicit delegation');
+  for (const cli of ['pi', 'codex', 'claude']) {
+    assert.throws(() => validateRoleFile({ worker: { description: 'd', instructions: 'i', allowSubagents: true, cli } }, 'probe'),
+      /nested delegation is disabled/i);
+    assert.equal(validateRoleFile({ worker: { description: 'd', instructions: 'i', allowSubagents: false, cli } }, 'probe').worker.allowSubagents, false);
+  }
 });
 
 test('a false skills flag disables discovery and composes with the rest', () => {
@@ -113,7 +118,8 @@ test('spawning a non-Pi role with a Pi-only field refuses before creating anythi
     /mcp requires a Pi role/);
   await assert.rejects(manager.spawn('worker', { ...defaultRoles.worker, allowSubagents: 'yes' }, cwd, 'DO NOT START'),
     /allowSubagents must be a boolean/, 'spawn validates the shape too, not just the role loader');
-  await assert.rejects(manager.spawn('worker', { ...defaultRoles.worker, allowSubagents: true }, cwd, 'DO NOT START'), /Pi nested delegation is unsupported/);
+  for (const cli of ['pi', 'codex', 'claude'])
+    await assert.rejects(manager.spawn('worker', { ...defaultRoles.worker, cli, allowSubagents: true }, cwd, 'DO NOT START'), /nested delegation is disabled/i);
   assert.equal(fs.existsSync(manager.root), false, 'a refused role must not create even the instance root');
 });
 
@@ -137,8 +143,8 @@ test('claude denial merges the role list with the no-respawn default', () => {
   assert.deepEqual(claudeToolDenyArgs({ tools: { deny: ['Bash'] } }), ['--disallowedTools', 'Bash,Agent'],
     'one flag carries both, because a second --disallowedTools could swallow what follows');
   assert.deepEqual(claudeToolDenyArgs({ tools: { deny: ['Agent'] } }), ['--disallowedTools', 'Agent'], 'no duplicate');
-  assert.deepEqual(claudeToolDenyArgs({ tools: { deny: ['Bash'] }, allowSubagents: true }), ['--disallowedTools', 'Bash'],
-    'allowing subagents drops only the default Agent denial, not the role list');
+  assert.throws(() => claudeToolDenyArgs({ tools: { deny: ['Bash'] }, allowSubagents: true }), /nested delegation is disabled/i,
+    'the role deny list cannot restore an opt-out');
 });
 
 test('a claude role may deny tools but not claim an exclusive allow list', () => {

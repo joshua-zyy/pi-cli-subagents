@@ -3,6 +3,7 @@ import { openSync, closeSync, unlinkSync, writeFileSync, appendFileSync } from "
 import { randomBytes, randomUUID } from "node:crypto";
 import path from "node:path";
 import { PiAdapter } from "./pi-adapter.js";
+import { subagentsError } from "./roles.js";
 import { CodexAdapter } from "./codex-adapter.js";
 import { validateQuestionAnswers } from "./codex-question.js";
 import { ClaudeAdapter, ClaudeCapabilityError } from "./claude-adapter.js";
@@ -28,6 +29,8 @@ async function run(dir: string, runId: string): Promise<void> {
   const start = readJson<StartRequest>(path.join(runDir, "request.json"))!;
   if (start?.protocolVersion !== 3) throw new Error("Unsupported worker startup protocol; only v3 is supported. No CLI was launched.");
   if (!spec || ![1, 2, 3].includes(spec.version) || (spec.version === 1 && spec.cli !== undefined && spec.cli !== "pi") || (spec.version === 2 && (spec.cli !== "codex" || !spec.codexHome)) || (spec.version === 3 && (spec.cli !== "claude" || !spec.claudeHome)) || start?.runId !== runId) throw new Error("Invalid startup record");
+  const invalid = subagentsError(spec.cli, spec.role.allowSubagents, spec.role.tools);
+  if (invalid) throw new Error(invalid);
   const lockFile = path.join(dir, "owner.lock");
   const lock = openSync(lockFile, "wx", 0o600);
   writeFileSync(lock, JSON.stringify({ pid: process.pid, runId, runtimeId }));
