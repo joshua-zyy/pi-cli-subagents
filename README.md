@@ -17,14 +17,8 @@ directory or pass an existing `cwd`; directory isolation and Git workflows remai
 - Node.js 22.19.0 or newer
 - For Codex or Claude Code subagents, the matching CLI installed and logged in; Pi subagents need
   nothing extra
-
-Claude Code currently requires `2.1.x` with patch number `283` or higher, plus runtime protocol
-capability checks. Later minor or major versions require revalidation before support is enabled.
-
-Worker upgrades are a strict boundary: this version only controls and resumes protocol v3 workers.
-Release existing subagents with the previous extension before upgrading, then reload the parent
-extension. Protocol v1/v2 records remain read-only; they are not migrated, resumed or taken over.
-If older processes remain, verify their identities and clean them up manually.
+- Claude Code currently requires `2.1.x` with patch number `283` or higher, plus runtime protocol
+  capability checks. Later minor or major versions require revalidation before support is enabled.
 
 ## Install
 
@@ -64,13 +58,8 @@ four above are replaceable rather than a fixed hierarchy.
 
 ## Delegation depth
 
-Subagents cannot delegate again through the managed/native delegation tools. There is no opt-out:
-`allowSubagents: true` is rejected; an old `false` is accepted for compatibility. This is not an OS
-sandbox and does not prevent arbitrary programs launched through an unrestricted shell.
-
-Before upgrading, interrupt and release old runtimes and remove any `true` role settings. Saved
-instances with that setting remain queryable and releasable, but cannot receive `send` or any public
-`reply` (even cancellation may unblock the old task). Their records are not silently rewritten.
+Subagents cannot delegate again through this extension or native backend delegation tools. There is
+no opt-out: `allowSubagents: true` is rejected; an old `false` is accepted for compatibility.
 
 ## Tools
 
@@ -94,12 +83,6 @@ Pi children can ask the parent a single task question through `subagent_ask_pare
   and refuses while a turn it already accepted is still in flight: releasing that runtime would
   discard the turn, so `interrupt` it first. Whether a backend stays resident between turns is
   reported per instance rather than promised uniformly.
-- **A dead worker can leave accounting behind.** If a worker dies and its runtime becomes
-  `unreachable`, that runtime keeps occupying a slot until it is proven gone. `reclaim` frees the
-  slot only when both the recorded worker and CLI process no longer exist (an explicit `ESRCH`
-  observation, never an assumption); it confirms **no** native release, leaves the execution record
-  and lock untouched, and does not make the instance resumable. Refusals name the surviving process
-  and the files to inspect instead of suggesting a retry loop.
 - **Answers are not permissions.** A reply supplies task context, or reviews one request. It never
   grants a session-wide or persistent permission.
 - **Choose the working directory.** `start.cwd` accepts an existing directory, including a worktree
@@ -107,32 +90,6 @@ Pi children can ask the parent a single task question through `subagent_ask_pare
   A different cwd is not a permission sandbox; coordinate anyone sharing its files.
 - **Stopping is not a rollback.** An uncertain outcome is reported as uncertain, and a native session
   is never silently replaced by a new one.
-- **One parent session caps concurrency and runtimes.** Two independent limits apply to a parent
-  session, counted across roles: `PI_CLI_SUBAGENTS_MAX_ACTIVE` (default **4**) limits turns that may
-  still be executing, and `PI_CLI_SUBAGENTS_MAX_RESIDENT` (default **12**) limits managed runtimes
-  whose release is not confirmed yet. Each accepts `0` to disable that dimension; setting both to `0`
-  (`MAX_ACTIVE=0` and `MAX_RESIDENT=0`) restores uncapped dispatch. `PI_CLI_SUBAGENTS_MAX_RUNTIMES` still names the resident cap (by itself;
-  naming it together with `PI_CLI_SUBAGENTS_MAX_RESIDENT` is refused), and a value that is not a
-  non-negative integer is refused instead of being read as unlimited.
-- **These defaults are a behavior change.** Earlier versions treated a missing setting as no cap;
-  a parent session now starts at 4 concurrent turns and 12 resident runtimes. Reaching a limit refuses
-  the dispatch; nothing is queued or preempted and no instance directory or process is created.
-  A new run inside an already-resident child takes a turn slot but no runtime slot, so steering and
-  follow-ups on resident children keep working while the resident cap is full, as long as the turn cap
-  has room.
-
-## Managed-workspace retirement
-
-`workspace_create`, `workspace_integrate` and the `workspace`, `baseline`, `includeUncommitted`
-inputs have been removed, not aliased. Instance queries no longer return a workspace inventory.
-New instances use `cwd`; there is no worktree-specific skill or automatic Git workflow.
-
-Legacy managed instances retain their history and workspace metadata, but `send` refuses in every
-state rather than silently dropping baseline checks. Current-protocol replies, interruption and
-release remain available; replying can continue an already accepted task. Before explicitly adopting
-an old directory, release its users and inspect retained journals, patches and backups, especially
-uncertain integrations. Nothing is automatically migrated, deleted or applied. Do not start a
-replacement to bypass a refusal. See [the migration contract](https://github.com/joshua-zyy/pi-cli-subagents/blob/main/docs/subagent-tool-contract.md#5-working-directories-and-legacy-managed-records).
 
 ## In the session
 
@@ -170,26 +127,6 @@ Dispatch happens through the parent agent's tools and this panel. There is no `@
   uncertain operations
 - [Tool interface](https://github.com/joshua-zyy/pi-cli-subagents/blob/main/docs/subagent-tool-contract.md)
 - [Development and testing](https://github.com/joshua-zyy/pi-cli-subagents/blob/main/docs/testing.md)
-
-## Verification status
-
-The local suite passes without calling a model. Real CLI and model acceptance has been recorded for
-eight historical rounds covering Codex and Claude approvals, task questions, original-session
-resume, and the now-retired managed-worktree integration; those rounds can be replayed read-only
-but do not validate the replacement cwd-only interface.
-
-A separate real task on Windows with Pi 1.3.0 verified a Pi parent and Pi child using the cwd-only
-interface: two resident turns in one native session, parent-managed Git isolation, release before
-integration, post-merge tests and cleanup. No worktree-specific skill was loaded. This is one behavior
-witness, not a reliability or cost benchmark.
-
-A later Windows interaction witness used Pi 1.3.0 with Pi and Codex CLI 0.162.1 children, each for two
-resident turns. The parent read the matching backend reference before its first control operation,
-answered real task questions through the respective reply shapes, and did not read the unused Claude
-reference. Both runtimes were released; temporary test configuration was restored. This validates one
-question/continuation path, not general model compliance or token savings. Claude, running-input and
-interrupt timing, released-session resume, permission approvals, interactive TUI and Linux/macOS were
-not revalidated by this interaction witness.
 
 ## Credits
 
