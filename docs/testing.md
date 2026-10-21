@@ -55,6 +55,8 @@ node test/acceptance/audit.mjs .test-output/manual-acceptance/<case>/case.mjs
 | `acceptance-local` | 使用本地 CLI 夹具的 manager/UI 闭环 | ~125s |
 | `acceptance-slow` | 重型进程验收文件：`manager`、`residency`（历史耗时包含现已退役的 `workspace-manager`） | ~165s |
 
+`npm run build` 与门禁复用 `scripts/build.mjs`：先清理 `dist/`，再使用当前 Node 的 `process.execPath` 执行本地 TypeScript 入口，不通过 shell、`npm.cmd` 或 PATH 中的编译器包装脚本。构建与门禁从脚本所在仓库定位工作目录。
+
 `npm run gates` 只构建一次，依次运行 check、fast、domain、acceptance-local，并输出各门禁耗时和统一退出码。`npm run gates -- --slow` 增加 acceptance-slow，用于收尾验收。此前分开执行这些入口会重复构建四次，每次约 4 秒。
 
 `scripts/known-flakes.json` 标注已调查的偶发失败：`shutdown` 的 I-007 和 `residency` 的 I-015。运行前后都会输出标注，但命中仍算失败，退出码仍非零；标注只提供诊断线索。

@@ -1,7 +1,7 @@
 // One build for the whole gate sweep, then each tier in order. Every gate runs even when an earlier
 // one fails, so a single pass reports all failures; the exit code is non-zero if any tier failed.
 // `node scripts/gates.mjs` covers check + fast + domain + acceptance-local.
-// `node scripts/gates.mjs --slow` adds acceptance-slow (the three heavy real-process files).
+// `node scripts/gates.mjs --slow` adds acceptance-slow (the heavy local-process files).
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
@@ -10,19 +10,19 @@ const root = fileURLToPath(new URL('../', import.meta.url));
 const slow = process.argv.includes('--slow');
 const tiers = ['fast', 'domain', 'acceptance-local', ...(slow ? ['acceptance-slow'] : [])];
 
-const run = (label, command, args) => {
+const run = (label, args) => {
   const started = Date.now();
-  const result = spawnSync(command, args, { cwd: root, stdio: 'inherit', shell: process.platform === 'win32' });
+  const result = spawnSync(process.execPath, args, { cwd: root, stdio: 'inherit', shell: false });
   return { label, code: result.status ?? 1, ms: Date.now() - started };
 };
 
 const script = (name) => path.join(root, 'scripts', name);
 const results = [];
-results.push(run('check', process.execPath, ['node_modules/typescript/bin/tsc', '-p', 'tsconfig.json', '--noEmit']));
+results.push(run('check', ['node_modules/typescript/bin/tsc', '-p', 'tsconfig.json', '--noEmit']));
 // prepack and the tier entries both rebuild dist; build once here so every tier measures the same tree.
-const build = run('build', process.platform === 'win32' ? 'npm.cmd' : 'npm', ['run', 'build']);
+const build = run('build', [script('build.mjs')]);
 results.push(build);
-if (build.code === 0) for (const tier of tiers) results.push(run(tier, process.execPath, [script('test.mjs'), tier]));
+if (build.code === 0) for (const tier of tiers) results.push(run(tier, [script('test.mjs'), tier]));
 
 const failed = results.filter(r => r.code !== 0);
 console.log('\nGate summary');

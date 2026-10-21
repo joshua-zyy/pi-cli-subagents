@@ -5,6 +5,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { pathToFileURL } from 'node:url';
 
 function fixture(t, fail = false) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'test-runner-fixture-'));
@@ -103,4 +104,98 @@ test('launcher preserves failing exit status and removes the temporary home with
   const receipt = JSON.parse(fs.readFileSync(path.join(h.root, 'receipt.json')));
   assert.equal(fs.existsSync(receipt.home), false);
   assert.equal(fs.readFileSync(path.join(h.home, 'cli-subagents.roles.json'), 'utf8'), h.config);
+});
+
+function gateFixture(t, failures = {}) {
+  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'node-gates-fixture-'));
+  const directory = path.join(temporary, 'space 中文 & argv');
+  fs.mkdirSync(directory);
+  const root = fs.realpathSync(directory);
+  t.after(() => fs.rmSync(temporary, { recursive: true, force: true }));
+  fs.mkdirSync(path.join(root, 'scripts'));
+  for (const name of ['gates.mjs', 'build.mjs']) {
+    const source = new URL(`../scripts/${name}`, import.meta.url);
+    if (fs.existsSync(source)) fs.copyFileSync(source, path.join(root, 'scripts', name));
+  }
+  fs.mkdirSync(path.join(root, 'node_modules/typescript/bin'), { recursive: true });
+  fs.mkdirSync(path.join(root, 'dist'));
+  fs.writeFileSync(path.join(root, 'dist/stale.js'), 'must be removed before compile');
+  fs.writeFileSync(path.join(root, 'node_modules/typescript/bin/tsc'), `
+    const fs = require('node:fs');
+    const check = process.argv.includes('--noEmit');
+    fs.appendFileSync('executed.jsonl', JSON.stringify({label:check ? 'check' : 'compile', cwd:process.cwd(), args:process.argv.slice(2)}) + '\\n');
+    if (!check) {
+      if (fs.existsSync('dist/stale.js')) throw new Error('stale build output survived');
+      fs.mkdirSync('dist', {recursive:true}); fs.writeFileSync('dist/fresh.js', 'compiled');
+    }
+    process.exit(check ? ${failures.check ?? 0} : ${failures.build ?? 0});
+  `);
+  fs.writeFileSync(path.join(root, 'scripts/test.mjs'), `
+    import fs from 'node:fs';
+    const tier = process.argv[2];
+    fs.appendFileSync('executed.jsonl', JSON.stringify({label:tier, cwd:process.cwd()}) + '\\n');
+    process.exit(tier === 'fast' ? ${failures.fast ?? 0} : 0);
+  `);
+  const guard = path.join(root, 'guard.mjs');
+  fs.writeFileSync(guard, `
+    import cp from 'node:child_process'; import fs from 'node:fs'; import {syncBuiltinESMExports} from 'node:module';
+    const spawn = cp.spawnSync;
+    cp.spawnSync = (command, args, options) => {
+      if (command !== process.execPath || options.shell !== false) throw new Error('gate must launch Node without a shell');
+      fs.appendFileSync(${JSON.stringify(path.join(root, 'launches.jsonl'))}, JSON.stringify({command,args,cwd:options.cwd,shell:options.shell}) + '\\n');
+      return spawn(command, args, options);
+    };
+    syncBuiltinESMExports();
+  `);
+  const run = (script = 'gates.mjs', args = []) => {
+    const env = { ...process.env, NODE_OPTIONS: `--import ${JSON.stringify(pathToFileURL(guard).href)}` };
+    delete env.NODE_TEST_CONTEXT;
+    return spawnSync(process.execPath, [path.join(root, 'scripts', script), ...args], {
+      cwd: os.tmpdir(), env, encoding: 'utf8', timeout: 15000,
+    });
+  };
+  const records = name => fs.readFileSync(path.join(root, name), 'utf8').trim().split('\n').map(line => JSON.parse(line));
+  return { root, run, records };
+}
+
+test('gates launch only Node argv without a shell, build once and select the requested tiers from any cwd', t => {
+  for (const slow of [false, true]) {
+    const h = gateFixture(t), result = h.run('gates.mjs', slow ? ['--slow'] : []);
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    const tiers = ['fast', 'domain', 'acceptance-local', ...(slow ? ['acceptance-slow'] : [])];
+    const executed = h.records('executed.jsonl');
+    assert.deepEqual(executed.map(record => record.label), ['check', 'compile', ...tiers]);
+    assert.ok(executed.every(record => record.cwd === h.root));
+    assert.deepEqual(executed[0].args, ['-p', 'tsconfig.json', '--noEmit']);
+    assert.deepEqual(executed[1].args, ['-p', 'tsconfig.json']);
+    const launches = h.records('launches.jsonl');
+    assert.equal(launches.length, 3 + tiers.length, 'check, shared build entry, compiler, then each tier');
+    assert.ok(launches.every(record => record.command === process.execPath && record.shell === false && path.resolve(record.cwd) === h.root));
+    assert.equal(fs.existsSync(path.join(h.root, 'dist/stale.js')), false);
+    assert.equal(fs.readFileSync(path.join(h.root, 'dist/fresh.js'), 'utf8'), 'compiled');
+    assert.match(result.stdout, /all gates passed/);
+    assert.match(result.stdout, /real CLI\/model acceptance is NOT_RUN/);
+  }
+});
+
+test('gates keep check and tier failures nonzero while still running the remaining selected gates', t => {
+  const h = gateFixture(t, { check: 3, fast: 4 }), result = h.run('gates.mjs', ['--slow']);
+  assert.equal(result.status, 1, result.stdout + result.stderr);
+  assert.deepEqual(h.records('executed.jsonl').map(record => record.label), ['check', 'compile', 'fast', 'domain', 'acceptance-local', 'acceptance-slow']);
+  assert.match(result.stdout, /2 gate\(s\) failed: check, fast/);
+});
+
+test('gates do not run test tiers after a failed build', t => {
+  const h = gateFixture(t, { build: 7 }), result = h.run('gates.mjs', ['--slow']);
+  assert.equal(result.status, 1, result.stdout + result.stderr);
+  assert.deepEqual(h.records('executed.jsonl').map(record => record.label), ['check', 'compile']);
+  assert.match(result.stdout, /1 gate\(s\) failed: build/);
+});
+
+test('the shared build entry cleans stale output and preserves the compiler failure exit code', t => {
+  assert.equal(JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url))).scripts.build, 'node scripts/build.mjs');
+  const h = gateFixture(t, { build: 7 }), result = h.run('build.mjs');
+  assert.equal(result.status, 7, result.stdout + result.stderr);
+  assert.deepEqual(h.records('executed.jsonl').map(record => record.label), ['compile']);
+  assert.equal(fs.existsSync(path.join(h.root, 'dist/stale.js')), false);
 });
