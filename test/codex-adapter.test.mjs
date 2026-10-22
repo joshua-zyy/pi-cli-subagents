@@ -7,6 +7,8 @@ import { spawnSync } from 'node:child_process';
 import { CodexAdapter } from '../dist/codex-adapter.js';
 import { waitUntil } from '../dist/storage.js';
 import { tempDir } from './helpers/tmp.mjs';
+import { codexLaunch } from '../dist/codex-launch.js';
+import { detectClis } from '../dist/cli-discovery.js';
 const fixture = fileURLToPath(new URL('./fixtures/codex.mjs', import.meta.url));
 function setup(t, overrides = {}) {
   const cwd = tempDir('codex-protocol');
@@ -27,6 +29,29 @@ function setup(t, overrides = {}) {
 }
 const settled = events => waitUntil('adapter terminal event', () => events.find(e => e.type === 'settled'), 5000);
 const runSettled = (events, runId) => waitUntil('run terminal', () => events.find(e => e.type === 'settled' && e.runId === runId), 5000);
+
+test('Windows native Codex discovery launches its resolved executable directly with intact argv', { skip: process.platform !== 'win32' }, t => {
+  const cwd = tempDir('codex-native-argv'), bin = path.join(cwd, 'bin 中文 & space');
+  fs.mkdirSync(bin);
+  const executable = path.join(bin, 'codex.exe');
+  // A Node executable copy is a deterministic native CLI substitute, not real Codex.
+  fs.copyFileSync(process.execPath, executable);
+  const originalPath = process.env.PATH;
+  t.after(() => { if (originalPath === undefined) delete process.env.PATH; else process.env.PATH = originalPath; });
+  process.env.PATH = `"${bin}"`;
+  assert.equal(detectClis().codex, true);
+  const launch = codexLaunch();
+  assert.deepEqual(launch, { command: executable, args: [] });
+  const argv = ['app-server', '--listen', 'stdio://', '-c', JSON.stringify({ cwd: 'C:\\space 中文\\project', value: 'a & b | %PATH% ! ^ < > (x)' }), 'two words', '"quoted"'];
+  const env = { ...process.env }; delete env.NODE_TEST_CONTEXT;
+  const result = spawnSync(launch.command, [...launch.args, '-e', 'process.stdout.write(JSON.stringify(process.argv.slice(1)))', '--', ...argv], {
+    cwd, env, shell: false, windowsHide: true, encoding: 'utf8', timeout: 10_000,
+  });
+  assert.equal(result.error, undefined);
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.equal(result.stderr, '');
+  assert.deepEqual(JSON.parse(result.stdout), argv);
+});
 
 for (const scenario of ['complete', 'fragments', 'normal-prefix']) test(`Codex rejects records over 4 MiB in UTF-8 bytes: ${scenario}`, async t => {
   const { client } = setup(t), { c } = client(); await c.ready();

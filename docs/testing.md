@@ -69,6 +69,12 @@ node test/acceptance/audit.mjs .test-output/manual-acceptance/<case>/case.mjs
 
 配置文件存在不代表三平台已经通过。运行结果以对应提交的 GitHub Actions 记录为准；通过后证明的是该 runner／Node 组合下的本地逻辑和真实 OS 子进程夹具，包括已有父退出、重连和释放路径，不替代真实原生 CLI／模型、人工 TUI 或所有 CPU／文件系统的验收。Windows 专用用例在其他平台的显式 skip 仍需如实报告；未运行的平台仍为未验证。
 
+## Codex 启动入口
+
+Windows 按 PATH 目录顺序查找 Codex；同一目录优先使用原生 `codex.exe`，否则通过当前 Node 执行该目录下的 `node_modules/@openai/codex/bin/codex.js`。前一个目录的 npm 安装不会被后一个目录的原生安装越过。不执行 `.cmd`、`.bat` 或 PowerShell 包装脚本，也不使用 shell 回退；Linux/macOS 的 `codex` 命令启动方式不变。
+
+`cli-discovery` 的 fast 测试覆盖解析顺序及可用性一致性；`codex-adapter` 的 Windows 域测试用当前 Node 的副本作为原生可执行文件替身，验证真实启动与 argv 保真，不调用真实 Codex 或模型。解析成功仅代表找到支持的入口，不证明该文件的版本、权限和原生协议可用；实际启动失败仍显式报告，不自动改选另一个安装。
+
 ## 环境隔离
 
 每次执行都会创建临时 `PI_CODING_AGENT_DIR`，在导入子进程模块前应用，避免用户的 worker 角色配置把 Pi 夹具重定向到真实 Codex/Claude。入口还会清除继承的 `PI_CLI_SUBAGENT`，避免测试宿主的扩展注册提前返回；真实子代理的递归保护仍保留，测试不关闭该保护。

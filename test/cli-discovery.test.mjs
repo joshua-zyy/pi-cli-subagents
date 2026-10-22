@@ -10,6 +10,7 @@ import { codexDefaultValues, readCodexDefaults, readClaudeDefaults, claudeDefaul
 import { syncBuiltinESMExports } from 'node:module';
 import { EMPTY_CATALOG, detectClis, modelEfforts, parseCodexModels, parsePiModels, probeCatalog } from '../dist/cli-discovery.js';
 import { tempDir } from './helpers/tmp.mjs';
+import { codexLaunch } from '../dist/codex-launch.js';
 
 test('the Pi table and the Codex catalog are read from the CLIs’ own output', () => {
   const table = ['provider          model                         context  max-out  thinking  images',
@@ -70,6 +71,50 @@ test('Codex defaults keep both approval/sandbox axes, false gates and unspecifie
   assert.equal(codexDefaultValues({...raw,approval_policy:'untrusted'}).mode,'workspace-write / untrusted','never mislabel a native combination as our on-request preset');
   assert.equal(codexDefaultValues({...raw,approval_policy:'never'}).mode,'workspace-write / never');
   assert.deepEqual(codexDefaultValues({}),{model:'default',effort:'default',mode:'default',defaultModeQuestions:'default'});
+});
+
+test('Windows Codex discovery follows PATH order and prefers native executables within one directory', t => {
+  const platform = Object.getOwnPropertyDescriptor(process, 'platform'), originalPath = process.env.PATH;
+  Object.defineProperty(process, 'platform', { value: 'win32' });
+  t.after(() => {
+    Object.defineProperty(process, 'platform', platform);
+    if (originalPath === undefined) delete process.env.PATH; else process.env.PATH = originalPath;
+  });
+  const root = tempDir('codex-native-path'), nativeDir = path.join(root, 'native 中文 & space'), npmDir = path.join(root, 'npm');
+  fs.mkdirSync(nativeDir); fs.mkdirSync(npmDir);
+  const native = path.join(nativeDir, 'codex.exe'), npm = path.join(npmDir, 'node_modules', '@openai', 'codex', 'bin', 'codex.js');
+  fs.writeFileSync(native, 'resolver sentinel; never execute');
+  fs.mkdirSync(path.dirname(npm), { recursive: true }); fs.writeFileSync(npm, 'resolver sentinel; never execute');
+  const nativeLaunch = { command: native, args: [] }, npmLaunch = { command: process.execPath, args: [npm] };
+  for (const [directories, expected] of [
+    [[nativeDir], nativeLaunch],
+    [[nativeDir, npmDir], nativeLaunch],
+    [[npmDir, nativeDir], npmLaunch],
+    [[npmDir], npmLaunch],
+  ]) {
+    process.env.PATH = directories.map(directory => `"${directory}"`).join(path.delimiter);
+    assert.deepEqual(codexLaunch(), expected);
+    assert.equal(detectClis().codex, true, 'discovery uses the same supported launch resolution');
+  }
+  const sameDirectoryNpm = path.join(nativeDir, 'node_modules', '@openai', 'codex', 'bin', 'codex.js');
+  fs.mkdirSync(path.dirname(sameDirectoryNpm), { recursive: true }); fs.writeFileSync(sameDirectoryNpm, 'must not win');
+  process.env.PATH = nativeDir;
+  assert.deepEqual(codexLaunch(), nativeLaunch, 'native exe wins only within its PATH directory');
+  fs.unlinkSync(native);
+  assert.deepEqual(codexLaunch(), { command: process.execPath, args: [sameDirectoryNpm] }, 'npm remains usable if the native entry is removed');
+  fs.unlinkSync(sameDirectoryNpm);
+  for (const name of ['codex.cmd', 'codex.bat', 'codex.ps1']) fs.writeFileSync(path.join(nativeDir, name), 'must never execute');
+  assert.throws(() => codexLaunch(), /Codex CLI is not installed on PATH/);
+  assert.equal(detectClis().codex, false, 'shell shims alone are not a supported launch');
+});
+
+test('non-Windows Codex launch remains a PATH command rather than a Windows npm or exe lookup', t => {
+  const platform = Object.getOwnPropertyDescriptor(process, 'platform');
+  t.after(() => Object.defineProperty(process, 'platform', platform));
+  for (const value of ['linux', 'darwin']) {
+    Object.defineProperty(process, 'platform', { value });
+    assert.deepEqual(codexLaunch(), { command: 'codex', args: [] });
+  }
 });
 
 function codexProbePath(t) {

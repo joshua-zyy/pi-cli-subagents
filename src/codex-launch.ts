@@ -3,12 +3,15 @@ import path from "node:path";
 import os from "node:os";
 import type { Launch } from "./types.js";
 
-/** Windows npm shims are cmd/PowerShell scripts, not shell:false executables. */
+/** Preserve PATH order: native exe first per directory, otherwise bypass npm shell shims via Node. */
 export function codexLaunch(): Launch {
   if (process.platform !== "win32") return { command: "codex", args: [] };
   for (const directory of (process.env.PATH ?? "").split(path.delimiter)) {
     if (!directory) continue;
-    const entry = path.join(directory.replace(/^"|"$/g, ""), "node_modules", "@openai", "codex", "bin", "codex.js");
+    const clean = directory.replace(/^"|"$/g, "");
+    const native = path.join(clean, "codex.exe");
+    if (existsSync(native)) return { command: native, args: [] };
+    const entry = path.join(clean, "node_modules", "@openai", "codex", "bin", "codex.js");
     if (existsSync(entry)) return { command: process.execPath, args: [entry] };
   }
   throw new Error("Codex CLI is not installed on PATH; no Windows shell shim can be launched with shell:false");
