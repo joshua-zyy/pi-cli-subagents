@@ -47,6 +47,7 @@
     "log-writer.test.mjs",
     "pi-adapter.test.mjs",
     "pi-process.test.mjs",
+    "process-tree-live.test.mjs",
     "process-tree.test.mjs",
     "storage-race.test.mjs",
     "test-runner.test.mjs"
